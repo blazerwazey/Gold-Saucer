@@ -1,4 +1,4 @@
-Gold Saucer is Rust based file patching Randomizer for Final Fatasy 7 (Steam)
+Gold Saucer is a Rust based file patching Randomizer for Final Fatasy 7 (Steam)
 
 Current Features include:
 Enemy Randomization (With Enemy Drops and Stat Scaling)

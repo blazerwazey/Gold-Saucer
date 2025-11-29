@@ -9,7 +9,8 @@ Shop Randomization
 
 Future Goals:
 Archipelago Multiworld Support
-Free Roam style mode 
+Free Roam style mode
+IRO Export for use with 7th Heaven
 
 Credits
 Big thanks to 

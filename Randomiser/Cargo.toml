@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "randomiser-core",
+    "randomiser-cli",
+]
+resolver = "2"

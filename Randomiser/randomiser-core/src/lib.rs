@@ -1159,6 +1159,54 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                                 field_name,
                             ));
                         }
+                    } else if field_name.eq_ignore_ascii_case("mkt_s1") {
+                        if field::install_mkt_s1_dress_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_mkt_s1_dress_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("mkt_mens") {
+                        if field::install_mkt_mens_wig_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_mkt_mens_wig_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("mkt_m") {
+                        if field::install_mkt_m_tiara_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_mkt_m_tiara_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("mktpb") {
+                        if field::install_mktpb_cologne_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_mktpb_cologne_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("onna_52") {
+                        if field::install_onna_52_underwear_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_onna_52_underwear_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("mkt_s3") {
+                        if field::install_mkt_s3_pharmacy_group_helper(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_mkt_s3_pharmacy_group_helper field={} applied\n",
+                                field_name,
+                            ));
+                        }
                     }
 
                     let (scan_start, scan_end) =

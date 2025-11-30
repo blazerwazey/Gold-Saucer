@@ -2176,98 +2176,160 @@ pub(crate) fn debug_scan_sc_keyitems(buf: &[u8]) -> String {
         if hits == 0 {
             out.push_str("clsin2_2 debug: no Var[1][69] BITON hits in script range\n");
         }
+        out
     } else {
         out.push_str("clsin2_2 debug: get_pc_field_script_range() returned None\n");
+        out
+    }
+}
+fn inject_req_after_stitm(body: &mut Vec<u8>, entity_id: u8, script_index: u8) -> bool {
+    let len = body.len();
+    if len == 0 {
+        return false;
     }
 
-    out
+    let mut insert_positions: Vec<usize> = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        let op = body[i];
+        let sz = opcode_size_pc(body, i, len);
+        if sz == 0 {
+            break;
+        }
+        if op == 0x58 && sz >= 5 {
+            let banks = body[i + 1];
+            if banks == 0 {
+                insert_positions.push(i.saturating_add(sz));
+            }
+        }
+        i = i.saturating_add(sz);
+    }
+
+    if insert_positions.is_empty() {
+        return false;
+    }
+
+    for pos in insert_positions.into_iter().rev() {
+        body.splice(pos..pos, [0x01u8, entity_id, script_index].iter().copied());
+    }
+
+    true
 }
 
-pub(crate) fn lzs_decompress_raw(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    // Direct port of qt-lzs-1.3 LZS::decompressAll (headerless) used by
-    // Makou Reactor and other FF7 tools. This expects only the compressed
-    // payload, without any 4-byte uncompressed-size header.
+fn install_wall_market_group_helper(
+    buf: &mut Vec<u8>,
+    reward_scripts: &[(usize, usize)],
+) -> bool {
+    let header = match parse_pc_section1(buf) {
+        Some(h) => h,
+        None => return false,
+    };
 
-    if data.is_empty() {
-        return Err("LZS stream is empty".to_string());
+    if header.nb_groups == 0 {
+        return false;
     }
 
-    let file_size = data.len();
-    // Preallocate up to 5x compressed size, as in qt-lzs.
-    let size_alloc = std::cmp::min(file_size.saturating_mul(5), i32::MAX as usize);
-    let mut out: Vec<u8> = vec![0u8; size_alloc];
-    let mut cur_result: usize = 0;
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+    let helper_script_index: usize = 30;
+    if helper_script_index >= script_count {
+        return false;
+    }
 
-    // Ring buffer of size 4096, initialised to 0 for first 4078 bytes.
-    let mut text_buf = [0u8; 4096];
-    let mut cur_buff: usize = 4078;
+    let mut scripts = match extract_pc_section1_scripts(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
 
-    let mut flag_byte: u16 = 0;
-    let mut pos: usize = 0;
+    let (texts_blob, akao_blob) = match extract_pc_section1_texts_and_akao(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
 
-    loop {
-        // Load next flag byte when needed.
-        if ((flag_byte >> 1) & 0x100) == 0 {
-            if pos >= file_size {
-                out.truncate(cur_result);
-                return Ok(out);
-            }
-            flag_byte = (data[pos] as u16) | 0xFF00;
-            pos += 1;
-        } else {
-            flag_byte >>= 1;
+    let mut helper_entity: Option<usize> = None;
+    for g in 0..header.nb_groups as usize {
+        if header.script_ptrs[g][helper_script_index] == 0 {
+            helper_entity = Some(g);
+            break;
         }
+    }
 
-        if pos >= file_size {
-            out.truncate(cur_result);
-            return Ok(out);
+    if helper_entity.is_none() {
+        let fallback = header.nb_groups.saturating_sub(1) as usize;
+        if fallback < header.nb_groups as usize
+            && header.script_ptrs[fallback][helper_script_index] == 0
+        {
+            helper_entity = Some(fallback);
         }
+    }
 
-        if (flag_byte & 1) != 0 {
-            // Literal byte.
-            let c = data[pos];
-            pos += 1;
+    let entity_id = match helper_entity {
+        Some(v) => v,
+        None => return false,
+    };
 
-            if cur_result >= out.len() {
-                out.push(c);
-            } else {
-                out[cur_result] = c;
-            }
+    let src = "MESSAGE 0 0\nSTITM 0 0x0000 1\nRET";
+    let helper_bytes = match compile_script_from_str(src) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return false,
+    };
 
-            text_buf[cur_buff] = c;
-            cur_buff = (cur_buff + 1) & 0x0FFF;
-            cur_result += 1;
-        } else {
-            // Back-reference.
-            if pos + 1 >= file_size {
-                out.truncate(cur_result);
-                return Ok(out);
-            }
+    scripts[entity_id][helper_script_index] = Some(helper_bytes);
 
-            let mut offset = data[pos] as u16;
-            let mut length = data[pos + 1] as u16;
-            pos += 2;
+    let mut patched_any = false;
 
-            offset |= (length & 0xF0) << 4;
-            let end_index = (length & 0x0F) + 2 + offset;
-            let mut i = offset;
-
-            while i <= end_index {
-                let c = text_buf[(i & 0x0FFF) as usize];
-
-                if cur_result >= out.len() {
-                    out.push(c);
-                } else {
-                    out[cur_result] = c;
-                }
-
-                text_buf[cur_buff] = c;
-                cur_buff = (cur_buff + 1) & 0x0FFF;
-                cur_result += 1;
-                i += 1;
+    for (ent, script_idx) in reward_scripts {
+        let e = *ent;
+        let s = *script_idx;
+        if e >= header.nb_groups as usize || s >= script_count {
+            continue;
+        }
+        if let Some(ref mut body) = scripts[e][s] {
+            if inject_req_after_stitm(body, entity_id as u8, helper_script_index as u8) {
+                patched_any = true;
             }
         }
     }
+
+    if !patched_any {
+        return false;
+    }
+
+    let new_sec1 = match rebuild_pc_section1_from_scripts(&header, &scripts, &texts_blob, &akao_blob) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    replace_pc_section1(buf, &header, new_sec1)
+}
+
+pub(crate) fn install_mkt_s1_dress_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(4usize, 2usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
+}
+
+pub(crate) fn install_mkt_mens_wig_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(3usize, 1usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
+}
+
+pub(crate) fn install_mkt_m_tiara_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(5usize, 1usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
+}
+
+pub(crate) fn install_mktpb_cologne_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(11usize, 1usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
+}
+
+pub(crate) fn install_onna_52_underwear_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(10usize, 10usize), (8usize, 1usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
+}
+
+pub(crate) fn install_mkt_s3_pharmacy_group_helper(buf: &mut Vec<u8>) -> bool {
+    let reward_scripts = &[(7usize, 4usize)];
+    install_wall_market_group_helper(buf, reward_scripts)
 }
 
 pub fn lzs_decompress(data: &[u8]) -> std::result::Result<Vec<u8>, String> {

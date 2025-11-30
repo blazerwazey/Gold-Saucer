@@ -11,18 +11,13 @@ env:
 
 jobs:
   build:
-
     runs-on: windows-latest
-
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
-
-  - name: Install Rust (stable)
-    uses: dtolnay/rust-toolchain@stable
-
-  - name: Build
-    run: cargo build --workspace --all-targets
-
-  - name: Test
-    run: cargo test --workspace
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install Rust (stable)
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build
+      run: cargo build --workspace --all-targets
+    - name: Test
+      run: cargo test --workspace

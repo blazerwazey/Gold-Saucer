@@ -1,19 +1,19 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use randomiser_core::{run, RandomiserSettings};
+use randomiser_core::{field, run, RandomiserSettings};
 
 #[derive(Debug, Parser)]
 #[command(name = "ff7-randomiser", version, about = "Final Fantasy VII randomiser tool")]
 struct Args {
-    #[arg(long)]
-    input: PathBuf,
+    #[arg(long, required_unless_present = "debug_field_lzs")]
+    input: Option<PathBuf>,
 
-    #[arg(long)]
-    output: PathBuf,
+    #[arg(long, required_unless_present = "debug_field_lzs")]
+    output: Option<PathBuf>,
 
-    #[arg(long)]
-    seed: u64,
+    #[arg(long, required_unless_present = "debug_field_lzs")]
+    seed: Option<u64>,
 
     #[arg(long, default_value_t = true)]
     randomize_enemy_drops: bool,
@@ -35,13 +35,43 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     randomize_field_pickups: bool,
+
+    /// Debug-only: decompress a single field LZS file and dump its
+    /// Section1 / vEntityScripts layout. Normal randomisation is
+    /// skipped when this is provided.
+    #[arg(long, value_name = "LZS", hide = true)]
+    debug_field_lzs: Option<PathBuf>,
 }
 
 fn main() {
     let args = Args::parse();
 
+    // Debug path: inspect a single field LZS and exit.
+    if let Some(lzs_path) = args.debug_field_lzs.as_ref() {
+        match std::fs::read(lzs_path) {
+            Ok(data) => match field::lzs_decompress(&data) {
+                Ok(buf) => {
+                    let report = field::debug_dump_field_section1_layout(&buf);
+                    println!("{}", report);
+                }
+                Err(e) => {
+                    eprintln!("Failed to decompress {:?}: {}", lzs_path, e);
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to read {:?}: {}", lzs_path, e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let settings = RandomiserSettings {
-        seed: args.seed,
+        // These unwraps are safe here because clap enforces that
+        // input/output/seed are present unless --debug-field-lzs was
+        // provided, and we have already early-returned in that case.
+        seed: args.seed.expect("seed is required unless --debug-field-lzs is used"),
         randomize_enemy_drops: args.randomize_enemy_drops,
         randomize_enemies: args.randomize_enemies,
         randomize_shops: args.randomize_shops,
@@ -49,8 +79,12 @@ fn main() {
         randomize_starting_materia: args.randomize_starting_materia,
         randomize_starting_weapons: args.randomize_starting_weapons,
         randomize_field_pickups: args.randomize_field_pickups,
-        input_path: args.input,
-        output_path: args.output,
+        input_path: args
+            .input
+            .expect("input is required unless --debug-field-lzs is used"),
+        output_path: args
+            .output
+            .expect("output is required unless --debug-field-lzs is used"),
     };
 
     if let Err(err) = run(settings) {

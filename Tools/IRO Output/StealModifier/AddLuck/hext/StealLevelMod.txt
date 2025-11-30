@@ -1,0 +1,12 @@
+
+#Level modifier  VV (Default=28(40)) higher=easier
+005CA8F5 = 83 C0 28
+
+#Make steals  VV this hard (default=64(100)) lower=easier
+005CA933 = B9 64 00 00 00
+
+#Can combine both to make levels affect steals more
+
+#Add Luck to level calc
+005CA8F8 = E9 1D 17 1F 00 90
+007BC01A = 8B 0D 0C CE 99 00 8B 11 6B D2 68 8B 92 F1 B0 9A 00 81 E2 FF 00 00 00 01 D0 E9 C6 E8 E0 FF

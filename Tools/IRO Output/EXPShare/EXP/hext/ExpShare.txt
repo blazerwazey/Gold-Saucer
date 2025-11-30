@@ -1,0 +1,3 @@
+#EXP Share
+#All characters get full experience after a fight
+005C6F01 = 90 90

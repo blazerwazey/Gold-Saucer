@@ -1,0 +1,6 @@
+
+#Shortcut to the desired char
+00767376 = E9 84 00 00 00 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 8A 4D F4 C0 E1 03 80 25 96 0C DC 00 E7 08 0D 96 0C DC 00 8B 45 F4 8B E5 EB 74
+
+#Fix ocean teleporting
+00767415 = E9 72 FF FF FF

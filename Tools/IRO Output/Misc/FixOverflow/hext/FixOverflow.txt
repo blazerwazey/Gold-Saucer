@@ -1,0 +1,6 @@
+
+#Fix overflow in base damage calc
+005DE667 = 0F AF C1 F7 62 48 C1 E8 0D 85 D2 74 0E C1 E2 17 01 D0 EB 07
+
+#Fix overflow in rng application
+005DE99D = F7 E1 C1 E8 0C 85 D2 74 05 C1 E2 14 01 D0 85 C0 74 01 40 EB 04 90

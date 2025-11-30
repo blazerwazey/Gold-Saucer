@@ -1,0 +1,18 @@
+
+#Level Cap
+005C77D0 = E8 5B E2 1E 00 90 90
+
+#Visual Fix
+005C839D = E8 7E D6 1E 00 90 90
+
+#Level Cap Determining Function
+007B5A00 = 8B 15 DC 08 DC 00 B9 3D 5A 7B 00 83 C1 03 66 39 11 7C F8 8A 49 02 38 C8 C3 90
+
+#Visual Fix Code
+007B5A20 = 8D 44 10 FF E8 D7 FF FF FF C3
+
+#Level Cap Code
+007B5A30 = 89 45 FC E8 C8 FF FF FF C3
+
+#Level Cap Data (2 bytes game moment, 1 byte level cap)
+007B5A40 = EC 00 0A 4F 01 0F D2 01 14 29 02 19 E7 03 1E AD 04 23 4E 06 28 FF 7F 32

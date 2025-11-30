@@ -1,0 +1,9 @@
+
+#Fix W-Item glitch
+006DB618 = E9 A6 00 00 00 80 3D 88 3C DC 00 02 75 1C 0F B7 05 38 36 DC 00 6B C0 06 05 56 C3 9A 00 FF 00 66 8B 15 F4 38 DC 00 66 89 50 FE C3 E8 D5 FF FF FF E8 BD A1 06 00 E9 5A E4 FF FF
+
+#Add the item when leaving menu instead
+006D9AA7 = E9 97 1B 00 00
+
+# W-Item price
+9254AC = 20 4E 00 00

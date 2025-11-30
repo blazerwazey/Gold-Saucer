@@ -1,0 +1,4 @@
+..\ff7.exe
+
+#Skip All Animations
+005DA117 = 90 90

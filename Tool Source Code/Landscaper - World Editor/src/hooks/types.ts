@@ -1,0 +1,336 @@
+"use strict";
+
+export enum Tabs {
+  General = "general",
+  Field = "field",
+  World = "world",
+  Battle = "battle",
+}
+
+export enum GameModule {
+  None = 0,
+  Field = 1,
+  Battle = 2,
+  World = 3,
+  Menu = 5,
+  Highway = 6,
+  Chocobo = 7,
+  SnowBoard = 8,
+  Condor = 9,
+  Submarine = 10,
+  Jet = 11,
+  ChangeDisc = 12,
+  Snowboard2 = 14,
+  Quit = 19,
+  Start = 20,
+  BattleSwirl = 23,
+  Ending = 25,
+  GameOver = 26,
+  Intro = 27,
+  Credits = 28,
+}
+
+// export type RandomEncounters = "off" | "normal" | "max";
+export enum RandomEncounters {
+  Off = 0,
+  Normal = 1,
+  Max = 2,
+}
+
+export interface FieldModel {
+  name: string,
+  x: number,
+  y: number,
+  z: number,
+  direction: number,
+  triangle: number,
+}
+
+
+export interface BattleCharObj {
+  index: number,
+  status: number,
+  flags: number,
+  hp: number,
+  max_hp: number,
+  mp: number,
+  max_mp: number,
+  atb: number,
+  limit: number,
+  name: string,
+  scene_id: number,
+}
+
+export interface PartyMember {
+  id: number,
+  name: string,
+  status: number,
+  hp: number,
+  max_hp: number,
+  mp: number,
+  max_mp: number,
+  limit: number,
+  exp: number
+}
+
+export interface WorldModel {
+  index: number;
+  x: number;
+  y: number;
+  z: number;
+  direction: number;
+  model_id: number;
+  walkmesh_type: number;
+  script: number;
+  location_id?: number;
+  chocobo_tracks: boolean;
+}
+
+export interface WorldFieldTblItem {
+  x: number;
+  y: number;
+  field_id: number;
+  triangle_id: number;
+  direction: number;
+}
+
+export enum WorldModelIds {
+  Cloud = 0,
+  Tifa = 1,
+  Cid = 2,
+  Highwind = 3,
+  WildChocobo = 4,
+  TinyBronco = 5,
+  Buggy = 6,
+  JunonCanon = 7,
+  CargoShip = 8,
+  HighwindPropellers = 9,
+  DiamondWeapon = 10,
+  UltimateWeapon = 11,
+  FortCondor = 12,
+  Submarine = 13,
+  GoldSaucer = 14,
+  RocketTownRocket = 15,
+  RocketTownPad = 16,
+  SunkenGelnika = 17,
+  UnderwaterReactor = 18,
+  Chocobo = 19,
+  MidgarCanon = 20,
+  Unknown1 = 21,
+  Unknown2 = 22,
+  Unknown3 = 23,
+  NorthCraterBarrier = 24,
+  AncientForest = 25,
+  KeyOfTheAncients = 26,
+  Unknown4 = 27,
+  RedSubmarine = 28,
+  RubyWeapon = 29,
+  EmeraldWeapon = 30,
+}
+
+export enum WorldWalkmeshType {
+  Grass = 0,
+  Forest = 1,
+  Mountain = 2,
+  Sea = 3,
+  RiverCrossing = 4,
+  River = 5,
+  Water = 6,
+  Swamp = 7,
+  Desert = 8,
+  Wasteland = 9,
+  Snow = 10,
+  Riverside = 11,
+  Cliff = 12,
+  CorelBridge = 13,
+  WutaiBridge = 14,
+  Unused1 = 15,
+  Hillside = 16,
+  Beach = 17,
+  SubPen = 18,
+  Canyon = 19,
+  MountainPass = 20,
+  UnknownCliff = 21,
+  Waterfall = 22,
+  Unused2 = 23,
+  SaucerDesert = 24,
+  Jungle = 25,
+  Sea2 = 26,
+  NorthernCave = 27,
+  DesertBorder = 28,
+  Bridgehead = 29,
+  BackEntrance = 30,
+  Unused3 = 31
+}
+
+export enum ElementalType {
+  Fire = 0,
+  Ice = 1,
+  Lightning = 2,
+  Earth = 3,
+  Poison = 4,
+  Gravity = 5,
+  Water = 6,
+  Wind = 7,
+  Holy = 8,
+  Health = 9,
+  Cut = 10,
+  Hit = 11,
+  Punch = 12,
+  Shoot = 13,
+  Scream = 14,
+  Hidden = 15,
+  Nothing = 0xFF,
+}
+
+export enum ElementalEffect {
+  Death = 0,
+  AutoHit = 1,
+  DoubleDamage = 2,
+  HalfDamage = 4,
+  Nullify = 5,
+  Absorb = 6,
+  FullCure = 7,
+  Nothing = 0xFF,
+}
+
+export interface Elemental {
+  element: ElementalType,
+  effect: ElementalEffect
+}
+
+export enum ItemType {
+  Steal = 0,
+  Drop = 1
+}
+
+export interface Item {
+  name: string,
+  item_type: ItemType,
+  rate: number
+}
+
+export interface EnemyData {
+  level: number,
+  speed: number,
+  luck: number,
+  evade: number,
+  strength: number,
+  defense: number,
+  magic: number,
+  magic_defense: number,
+  gil: number,
+  exp: number,
+  ap: number,
+  back_damage_multiplier: number,
+  elements: Elemental[],
+  status_immunities: number,
+  items: Item[],
+  morph: String | null,
+}
+
+export enum ChocoboRating {
+  "wonderful" = 1,
+  "great" = 2,
+  "good" = 3,
+  "so-so" = 4,
+  "average" = 5,
+  "not bad" = 6,
+  "bad" = 7,
+  "terrible" = 8,
+}
+
+export type Destination = {
+  x: number;
+  y: number;
+  triangle: number;
+  direction?: number;
+}
+
+// Battle scene types
+export interface SceneCameraPosition {
+  x_pos: number;
+  y_pos: number;
+  z_pos: number;
+  x_dir: number;
+  y_dir: number;
+  z_dir: number;
+}
+
+export interface SceneBattleSetup {
+  battle_location: number;
+  next_formation_id_on_win: number;
+  escape_counter: number;
+  next_battle_arena_candidates: number[];
+  flags: number;
+  battle_layout_type: number;
+  pre_battle_camera_pos_index: number;
+}
+
+export interface SceneCameraPlacement {
+  primary_idle_camera: SceneCameraPosition;
+  other_camera_positions: SceneCameraPosition[];
+}
+
+export interface SceneBattleFormationEntry {
+  enemy_id: number;
+  pos_x: number;
+  pos_y: number;
+  pos_z: number;
+  row: number;
+  cover_flags: number;
+  initial_condition_flags: number;
+}
+
+export interface SceneElementRate {
+  element_type: number;
+  rate: number;
+}
+
+export interface SceneEnemyItem {
+  rate: number;
+  item_id: number;
+}
+
+export interface SceneEnemy {
+  id: number;
+  name: string;
+  level: number;
+  speed: number;
+  luck: number;
+  evade: number;
+  strength: number;
+  defense: number;
+  magic: number;
+  magic_defense: number;
+  element_rates: SceneElementRate[];
+  enemy_attack_ids: number[];
+  enemy_attack_camera_movement_ids: number[];
+  items: SceneEnemyItem[];
+  manipulated_berserk_attack_indexes: number[];
+  mp: number;
+  ap: number;
+  morph_item_id: number;
+  back_damage_multiplier: number;
+  hp: number;
+  exp: number;
+  gil: number;
+  status_immunities: number;
+}
+
+export interface SceneAttack {
+  id: number;
+  name: string;
+}
+
+export interface SceneFormation {
+  setup: SceneBattleSetup;
+  camera_placement: SceneCameraPlacement;
+  enemies: SceneBattleFormationEntry[];
+}
+
+export interface BattleScene {
+  enemies: SceneEnemy[];
+  formations: SceneFormation[];
+  attacks: SceneAttack[];
+}

@@ -1,0 +1,50 @@
+{
+  "productName": "FF7 Ultima",
+  "version": "1.7.0",
+  "identifier": "org.m4v3r.ff7-ultima",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ultima - FF7 Real-time Game Editor",
+        "width": 720,
+        "height": 635,
+        "theme": "Dark",
+        "visible": true,
+        "resizable": true,
+        "maximizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "nsis",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3MkQwQUYzQTg0NDI4MTkKUldRWktFU284d290TjJyUGUwTlRrZlhJb0hOSW9KLzgzbGxDd0Z2Vm9STExCODZyWVFjN2ZnK0gK",
+      "endpoints": [
+        "https://github.com/maciej-trebacz/ff7-ultima/releases/latest/download/updater.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

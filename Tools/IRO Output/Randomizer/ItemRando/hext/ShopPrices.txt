@@ -1,0 +1,537 @@
+..\ff7.exe
+# English version
+
+# X-Potion price
+924E60 = E8 03 00 00 
+
+# Turbo Ether price
+924E68 = B8 0B 00 00 
+
+# Elixir price
+924E6C = 10 27 00 00 
+
+# Megalixir price
+924E70 = A0 86 01 00 
+
+# Hero Drink price
+924EA0 = D0 07 00 00 
+
+# Vaccine price
+924EA4 = D0 07 00 00 
+
+# Shrapnel price
+924EAC = 90 01 00 00 
+
+# Right arm price
+924EB0 = 20 03 00 00 
+
+# Hourglass price
+924EB4 = E8 03 00 00 
+
+# Kiss of Death price
+924EB8 = D0 07 00 00 
+
+# Spider Web price
+924EBC = E8 03 00 00 
+
+# Dream Powder price
+924EC0 = F4 01 00 00 
+
+# Mute Mask price
+924EC4 = F4 01 00 00 
+
+# War Gong price
+924EC8 = F4 01 00 00 
+
+# Loco weed price
+924ECC = F4 01 00 00 
+
+# Fire Fang price
+924ED0 = F4 01 00 00 
+
+# Antarctic Wind price
+924ED8 = 20 03 00 00 
+
+# Ice Crystal price
+924EDC = DC 05 00 00 
+
+# Bolt Plume price
+924EE0 = 90 01 00 00 
+
+# Earth Drum price
+924EE8 = F4 01 00 00 
+
+# Earth Mallet price
+924EEC = D0 07 00 00 
+
+# Deadly Waste price
+924EF0 = 64 00 00 00 
+
+# M-Tentacles price
+924EF4 = D0 07 00 00 
+
+# Stardust price
+924EF8 = B8 0B 00 00 
+
+# Vampire Fang price
+924EFC = C8 00 00 00 
+
+# Ghost Hand price
+924F00 = C8 00 00 00 
+
+# Vagyrisk Claw price
+924F04 = D0 07 00 00 
+
+# Light Curtain price
+924F08 = D0 07 00 00 
+
+# Lunar Curtain price
+924F0C = D0 07 00 00 
+
+# Mirror price
+924F10 = D0 07 00 00 
+
+# Holy Torch price
+924F14 = D0 07 00 00 
+
+# Bird Wing price
+924F18 = BC 02 00 00 
+
+# Dragon Scales price
+924F1C = B8 0B 00 00 
+
+# 8-inch Cannon price
+924F34 = C4 09 00 00 
+
+# Graviball price
+924F38 = F4 01 00 00 
+
+# T/S Bomb price
+924F3C = E8 03 00 00 
+
+# Ink price
+924F40 = F4 01 00 00 
+
+# Dazers price
+924F44 = E8 03 00 00 
+
+# Dragon Fang price
+924F48 = D0 07 00 00 
+
+# Cauldron price
+924F4C = D0 07 00 00 
+
+# Power Source price
+924F74 = 10 27 00 00 
+
+# Guard Source price
+924F78 = 10 27 00 00 
+
+# Magic Source price
+924F7C = 10 27 00 00 
+
+# Mind Source price
+924F80 = 10 27 00 00 
+
+# Speed Source price
+924F84 = 10 27 00 00 
+
+# Luck Source price
+924F88 = 10 27 00 00 
+
+# Zeio Nut price
+924F8C = 10 27 00 00 
+
+# Carob Nut price
+924F90 = 88 13 00 00 
+
+# Omnislash price
+924FB4 = 88 13 00 00 
+
+# Catastrophe price
+924FB8 = 88 13 00 00 
+
+# Final Heaven price
+924FBC = 88 13 00 00 
+
+# Great Gospel price
+924FC0 = 88 13 00 00 
+
+# Cosmo Memory price
+924FC4 = 88 13 00 00 
+
+# All Creation price
+924FC8 = 88 13 00 00 
+
+# Chaos price
+924FCC = 88 13 00 00 
+
+# Highwind price
+924FD0 = 88 13 00 00 
+
+# 1/35 soldier price
+924FD4 = A0 0F 00 00 
+
+# Super Sweeper price
+924FD8 = A0 0F 00 00 
+
+# Masamune Blade price
+924FDC = A0 0F 00 00 
+
+# Combat Diary price
+924FE4 = A0 0F 00 00 
+
+# Autograph price
+924FE8 = A0 0F 00 00 
+
+# Gambler price
+924FEC = A0 0F 00 00 
+
+# Desert Rose price
+924FF0 = 50 C3 00 00 
+
+# Earth Harp price
+924FF4 = E0 93 04 00 
+
+# Guide Book price
+924FF8 = A0 86 01 00 
+
+# Apocalypse price
+925088 = 30 75 00 00 
+
+# Heaven's Cloud price
+92508C = 30 75 00 00 
+
+# Ragnarok price
+925090 = 40 9C 00 00 
+
+# Ultima Weapon price
+925094 = 50 C3 00 00 
+
+# Master Fist price
+9250CC = 30 75 00 00 
+
+# God's Hand price
+9250D0 = 40 9C 00 00 
+
+# Premium Heart price
+9250D4 = 50 C3 00 00 
+
+# Pile Banger price
+92510C = 30 75 00 00 
+
+# Max Ray price
+925110 = 40 9C 00 00 
+
+# Missing Score price
+925114 = 50 C3 00 00 
+
+# Behemoth Horn price
+925144 = 30 75 00 00 
+
+# Spring Gun Clip price
+925148 = 40 9C 00 00 
+
+# Limited Moon price
+92514C = 50 C3 00 00 
+
+# Scimitar price
+9251A4 = A8 61 00 00 
+
+# Spirit Lance price
+9251AC = 40 9C 00 00 
+
+# Venus Gospel price
+9251B0 = 50 C3 00 00 
+
+# Rising Sun price
+9251E0 = 30 75 00 00 
+
+# Oritsuru price
+9251E4 = 40 9C 00 00 
+
+# Conformer price
+9251E8 = 50 C3 00 00 
+
+# Battle Trumpet price
+925214 = 30 75 00 00 
+
+# Starlight Phone price
+925218 = 40 9C 00 00 
+
+# HP Shout price
+92521C = 50 C3 00 00 
+
+# Supershot ST price
+925248 = 30 75 00 00 
+
+# Outsider price
+92524C = 40 9C 00 00 
+
+# Death Penalty price
+925250 = 50 C3 00 00 
+
+# Adaman Bangle price
+92528C = B0 04 00 00 
+
+# Imperial Guard price
+925294 = 20 4E 00 00 
+
+# Aegis Armlet price
+925298 = 20 4E 00 00 
+
+# Fourth Bracelet price
+92529C = 20 4E 00 00 
+
+# Warrior Bangle price
+9252A0 = 88 13 00 00 
+
+# Shinra Alpha price
+9252A8 = A0 0F 00 00 
+
+# Minerva Band price
+9252C0 = 20 4E 00 00 
+
+# Escort Guard price
+9252C4 = 20 4E 00 00 
+
+# Mystile price
+9252C8 = 30 75 00 00 
+
+# Ziedrich price
+9252CC = 30 75 00 00 
+
+# Precious Watch price
+9252D0 = E8 03 00 00 
+
+# Chocobracelet price
+9252D4 = E8 03 00 00 
+
+# Champion Belt price
+9252F0 = 40 9C 00 00 
+
+# Tough Ring price
+9252F8 = 40 9C 00 00 
+
+# Circlet price
+9252FC = 40 9C 00 00 
+
+# Ribbon price
+925320 = 50 C3 00 00 
+
+# Tetra Elemental price
+925330 = 40 9C 00 00 
+
+# Curse Ring price
+92533C = 50 C3 00 00 
+
+# Cat's Bell price
+925344 = B8 0B 00 00 
+
+# Sneak Glove price
+925350 = 10 27 00 00 
+
+# HypnoCrown price
+925354 = 10 27 00 00 
+
+# EXP Plus price
+92546C = 20 4E 00 00 
+
+# Gil Plus price
+925470 = 20 4E 00 00 
+
+# Enemy Away price
+925474 = 20 4E 00 00 
+
+# Enemy Lure price
+925478 = E8 03 00 00 
+
+# Chocobo Lure price
+92547C = DC 05 00 00 
+
+# Pre-Emptive price
+925480 = 10 27 00 00 
+
+# Long Range price
+925484 = 20 4E 00 00 
+
+# Mega All price
+925488 = A0 86 01 00 
+
+# Counter Attack price
+92548C = 10 27 00 00 
+
+# Slash-All price
+925490 = 88 13 00 00 
+
+# Double Cut price
+925494 = A0 86 01 00 
+
+# Underwater price
+92549C = E8 03 00 00 
+
+# HP<->MP price
+9254A0 = E8 03 00 00 
+
+# W-Magic price
+9254A4 = A0 86 01 00 
+
+# W-Summon price
+9254A8 = A0 86 01 00 
+
+# W-Item price
+9254AC = 40 42 0F 00 
+
+#  price
+9254B0 = 10 27 00 00 
+
+# All price
+9254B4 = E8 03 00 00 
+
+# Counter price
+9254B8 = 20 4E 00 00 
+
+# Magic Counter price
+9254BC = 20 4E 00 00 
+
+# MP Turbo price
+9254C0 = 10 27 00 00 
+
+# MP Absorb price
+9254C4 = 10 27 00 00 
+
+# HP Absorb price
+9254C8 = 10 27 00 00 
+
+# Elemental price
+9254CC = D0 07 00 00 
+
+# Added Effect price
+9254D0 = D0 07 00 00 
+
+# Sneak Attack price
+9254D4 = D0 07 00 00 
+
+# Final Attack price
+9254D8 = 50 C3 00 00 
+
+# Added Cut price
+9254DC = 10 27 00 00 
+
+# Steal as well price
+9254E0 = 10 27 00 00 
+
+# Quadra Magic price
+9254E4 = 50 C3 00 00 
+
+# Morph price
+9254F8 = 88 13 00 00 
+
+# Mime price
+925504 = A0 86 01 00 
+
+# Enemy Skill price
+925508 = 88 13 00 00 
+
+#  price
+92550C = 10 27 00 00 
+
+#  price
+925510 = 10 27 00 00 
+
+#  price
+925514 = 10 27 00 00 
+
+# Master Command price
+925518 = A0 86 01 00 
+
+#  price
+925554 = 10 27 00 00 
+
+#  price
+925560 = 10 27 00 00 
+
+#  price
+925564 = 10 27 00 00 
+
+# Contain price
+92556C = 30 75 00 00 
+
+# Full Cure price
+925570 = 10 27 00 00 
+
+# Shield price
+925574 = 30 75 00 00 
+
+# Ultima price
+925578 = 50 C3 00 00 
+
+# Master Magic price
+92557C = 40 0D 03 00 
+
+# Choco/Mog price
+925580 = D0 07 00 00 
+
+# Shiva price
+925584 = 80 0C 00 00 
+
+# Ifrit price
+925588 = 48 0D 00 00 
+
+# Ramuh price
+92558C = 10 0E 00 00 
+
+# Titan price
+925590 = D8 0E 00 00 
+
+# Odin price
+925594 = A0 0F 00 00 
+
+# Leviathan price
+925598 = A0 0F 00 00 
+
+# Bahamut price
+92559C = 88 13 00 00 
+
+# Kujata price
+9255A0 = 70 17 00 00 
+
+# Alexander price
+9255A4 = 58 1B 00 00 
+
+# Phoenix price
+9255A8 = 20 4E 00 00 
+
+# Neo Bahamut price
+9255AC = 98 3A 00 00 
+
+# Hades price
+9255B0 = 20 4E 00 00 
+
+# Typhon price
+9255B4 = 98 3A 00 00 
+
+# Bahamut ZERO price
+9255B8 = A8 61 00 00 
+
+# Knights of Round price
+9255BC = A0 86 01 00 
+
+# Master Summon price
+9255C0 = 40 0D 03 00 
+
+#  price
+9255C4 = 10 27 00 00 
+
+#  price
+9255C8 = 10 27 00 00 
+
+#  price
+9255CC = 10 27 00 00 
+
+#  price
+9255D0 = 10 27 00 00 
+
+#  price
+9255D4 = 10 27 00 00 
+

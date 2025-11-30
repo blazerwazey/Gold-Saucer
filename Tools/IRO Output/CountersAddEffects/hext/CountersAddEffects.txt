@@ -1,0 +1,7 @@
+..\ff7.exe
+
+#Commands
+004362DC = 83 F8 03 74 1B
+
+#Spells/Summons
+005C985D = 90 90

@@ -457,6 +457,453 @@ pub(crate) fn get_pc_field_text_layout(buf: &[u8]) -> Option<(usize, u16, Vec<u1
     Some((texts_base, text_count, positions))
 }
 
+/// Minimal parsed representation of a PC Section1 (scripts + texts) header
+/// and script pointer table, using the same layout as Makou Reactor's
+/// Section1File for non-demo fields.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedSection1 {
+    /// Absolute byte offset of Section1 data (just after its 4-byte size
+    /// prefix in Section0) within the full field buffer.
+    pub sec1_start: usize,
+    /// Absolute end offset of Section1 within the full field buffer.
+    pub sec1_end: usize,
+
+    pub version: u16,
+    pub nb_groups: u8,
+    pub nb_3d_objects: u8,
+    /// Section1-relative offset of the text block ("posTexts"). Also acts
+    /// as the logical end of the script bytecode region.
+    pub pos_texts: u16,
+    pub nb_akao: u16,
+    pub scale: u16,
+    pub author: [u8; 8],
+    pub map_name: [u8; 8],
+
+    /// Raw 8-byte group names, length = nb_groups.
+    pub group_names: Vec<[u8; 8]>,
+    /// AKAO positions table (Section1-relative offsets), length = nb_akao.
+    pub akao_offsets: Vec<u32>,
+    /// Script pointer table in entity-major order
+    /// vEntityScripts[nb_groups][script_count], where script_count = 32 for
+    /// normal PC fields. Offsets are Section1-relative.
+    pub script_ptrs: Vec<[u16; 32]>,
+    /// Section1-relative offset where the concatenated script bytecode
+    /// region begins (newPosScripts in Makou).
+    pub scripts_region_rel: u16,
+    /// Section1-relative offset of the first AKAO block, or the Section1
+    /// length if nb_akao == 0.
+    pub pos_akao_rel: u16,
+}
+
+/// Parse the PC Section1 header and script pointer table for a decompressed
+/// field buffer, following Makou Reactor's Section1File::open layout. This
+/// does not yet decode individual scripts or texts; it is intended as a
+/// building block for a full Section1 reader/writer.
+pub(crate) fn parse_pc_section1(buf: &[u8]) -> Option<ParsedSection1> {
+    if buf.len() < 6 + 9 * 4 {
+        return None;
+    }
+
+    let section_count = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]);
+    if section_count != 9 {
+        return None;
+    }
+
+    let mut section_positions = [0u32; 9];
+    let mut o = 6usize;
+    for i in 0..9 {
+        section_positions[i] = u32::from_le_bytes([
+            buf[o],
+            buf[o + 1],
+            buf[o + 2],
+            buf[o + 3],
+        ]);
+        o += 4;
+    }
+
+    let s0 = section_positions[0] as usize;
+    let s1 = section_positions[1] as usize;
+    if s0 + 4 > buf.len() || s1 <= s0 + 4 || s1 > buf.len() {
+        return None;
+    }
+
+    // Skip the 4-byte Section1 size prefix stored in Section0.
+    let sec1_start = s0 + 4;
+    let sec1_end = s1;
+    let section1 = &buf[sec1_start..sec1_end];
+    if section1.len() < 32 {
+        return None;
+    }
+
+    let version = u16::from_le_bytes([section1[0], section1[1]]);
+    let nb_groups = section1[2];
+    let nb_3d_objects = section1[3];
+    let pos_texts = u16::from_le_bytes([section1[4], section1[5]]);
+    let nb_akao = u16::from_le_bytes([section1[6], section1[7]]);
+    let scale = u16::from_le_bytes([section1[8], section1[9]]);
+
+    // Header is 32 bytes: version, nb_groups, nb_3d_objects, posTexts,
+    // nbAKAO, scale, 6 bytes empty, author (8), mapName (8).
+    let author = {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&section1[16..24]);
+        a
+    };
+    let map_name = {
+        let mut n = [0u8; 8];
+        n.copy_from_slice(&section1[24..32]);
+        n
+    };
+
+    let nb_groups_usize = nb_groups as usize;
+    let nb_akao_usize = nb_akao as usize;
+    let header_size = 32usize;
+
+    // Group names table.
+    let names_off = header_size;
+    let names_size = nb_groups_usize.saturating_mul(8);
+    if names_off + names_size > section1.len() {
+        return None;
+    }
+    let mut group_names = Vec::with_capacity(nb_groups_usize);
+    for i in 0..nb_groups_usize {
+        let base = names_off + i * 8;
+        let mut name = [0u8; 8];
+        name.copy_from_slice(&section1[base..base + 8]);
+        group_names.push(name);
+    }
+
+    // AKAO offsets table.
+    let akao_offsets_off = names_off + names_size;
+    let akao_offsets_size = nb_akao_usize.saturating_mul(4);
+    if akao_offsets_off + akao_offsets_size > section1.len() {
+        return None;
+    }
+    let mut akao_offsets = Vec::with_capacity(nb_akao_usize);
+    for i in 0..nb_akao_usize {
+        let base = akao_offsets_off + i * 4;
+        let off = u32::from_le_bytes([
+            section1[base],
+            section1[base + 1],
+            section1[base + 2],
+            section1[base + 3],
+        ]);
+        akao_offsets.push(off);
+    }
+
+    // Script pointer table, entity-major vEntityScripts[nb_groups][script_count].
+    let script_count: usize = if version == 0x0301 { 16 } else { 32 };
+    let pos_scripts = akao_offsets_off + akao_offsets_size;
+    let ptr_table_size = nb_groups_usize
+        .saturating_mul(script_count)
+        .saturating_mul(2);
+    if pos_scripts + ptr_table_size > section1.len() {
+        return None;
+    }
+
+    let mut script_ptrs = Vec::with_capacity(nb_groups_usize);
+    for g in 0..nb_groups_usize {
+        let row_off = pos_scripts + g * script_count * 2;
+        let mut row = [0u16; 32];
+        for s in 0..script_count {
+            let base = row_off + s * 2;
+            let val = u16::from_le_bytes([
+                section1[base],
+                section1[base + 1],
+            ]);
+            row[s] = val;
+        }
+        // For non-demo PC fields script_count is always 32; for demo we
+        // still store them in the same fixed-size array, leaving the
+        // remaining entries as zero.
+        script_ptrs.push(row);
+    }
+
+    // Scripts region starts immediately after the pointer table.
+    let scripts_region_rel = (pos_scripts + ptr_table_size) as u16;
+
+    // Compute the first AKAO position (or Section1 length if none).
+    let sec1_len = section1.len();
+    let pos_akao_rel_u32 = if nb_akao_usize > 0 {
+        akao_offsets[0]
+    } else {
+        sec1_len as u32
+    };
+    let pos_akao_rel = pos_akao_rel_u32 as u16;
+
+    Some(ParsedSection1 {
+        sec1_start,
+        sec1_end,
+        version,
+        nb_groups,
+        nb_3d_objects,
+        pos_texts,
+        nb_akao,
+        scale,
+        author,
+        map_name,
+        group_names,
+        akao_offsets,
+        script_ptrs,
+        scripts_region_rel,
+        pos_akao_rel,
+    })
+}
+
+fn empty_script_row() -> [Option<Vec<u8>>; 32] {
+    [
+        None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None,
+    ]
+}
+
+fn extract_pc_section1_scripts(
+    buf: &[u8],
+    header: &ParsedSection1,
+) -> Option<Vec<[Option<Vec<u8>>; 32]>> {
+    let section1 = &buf[header.sec1_start..header.sec1_end];
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+
+    let scripts_start = header.scripts_region_rel as usize;
+    let scripts_end_rel = usize::min(header.pos_texts as usize, header.pos_akao_rel as usize);
+    if scripts_start >= scripts_end_rel || scripts_end_rel > section1.len() {
+        return None;
+    }
+
+    let mut starts: Vec<usize> = Vec::new();
+    for g in 0..header.nb_groups as usize {
+        let row = &header.script_ptrs[g];
+        for s in 0..script_count {
+            let p = row[s] as usize;
+            if p >= scripts_start && p < scripts_end_rel {
+                starts.push(p);
+            }
+        }
+    }
+
+    if starts.is_empty() {
+        let mut scripts = Vec::with_capacity(header.nb_groups as usize);
+        for _ in 0..header.nb_groups as usize {
+            scripts.push(empty_script_row());
+        }
+        return Some(scripts);
+    }
+
+    starts.sort_unstable();
+    starts.dedup();
+
+    let mut scripts = Vec::with_capacity(header.nb_groups as usize);
+    for g in 0..header.nb_groups as usize {
+        let mut row_out = empty_script_row();
+        let row_ptrs = &header.script_ptrs[g];
+        for s in 0..script_count {
+            let p = row_ptrs[s] as usize;
+            if p < scripts_start || p >= scripts_end_rel {
+                continue;
+            }
+            if let Ok(idx) = starts.binary_search(&p) {
+                let start_rel = starts[idx];
+                let end_rel = if idx + 1 < starts.len() {
+                    starts[idx + 1]
+                } else {
+                    scripts_end_rel
+                };
+                if end_rel <= start_rel || end_rel > section1.len() {
+                    continue;
+                }
+                let slice = &section1[start_rel..end_rel];
+                row_out[s] = Some(slice.to_vec());
+            }
+        }
+        scripts.push(row_out);
+    }
+
+    Some(scripts)
+}
+
+fn extract_pc_section1_texts_and_akao(
+    buf: &[u8],
+    header: &ParsedSection1,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let section1 = &buf[header.sec1_start..header.sec1_end];
+    let pos_texts = header.pos_texts as usize;
+    let pos_akao = header.pos_akao_rel as usize;
+    if pos_texts > section1.len() || pos_akao > section1.len() || pos_texts > pos_akao {
+        return None;
+    }
+
+    let texts = section1[pos_texts..pos_akao].to_vec();
+    let akao = if pos_akao < section1.len() {
+        section1[pos_akao..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Some((texts, akao))
+}
+
+fn rebuild_pc_section1_from_scripts(
+    header: &ParsedSection1,
+    scripts: &[[Option<Vec<u8>>; 32]],
+    texts_blob: &[u8],
+    akao_blob: &[u8],
+) -> Option<Vec<u8>> {
+    let nb_groups = header.nb_groups as usize;
+    if scripts.len() != nb_groups {
+        return None;
+    }
+
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+
+    let names_len = nb_groups.saturating_mul(8);
+    let akao_len = (header.nb_akao as usize).saturating_mul(4);
+    let ptr_len = nb_groups
+        .saturating_mul(script_count)
+        .saturating_mul(2);
+
+    let new_pos_scripts = 32usize
+        .saturating_add(names_len)
+        .saturating_add(akao_len)
+        .saturating_add(ptr_len);
+
+    let mut positions_scripts: Vec<u8> = Vec::with_capacity(ptr_len);
+    let mut all_scripts: Vec<u8> = Vec::new();
+    let mut pos32: u32 = new_pos_scripts as u32;
+
+    for g in 0..nb_groups {
+        let row = &scripts[g];
+        for s in 0..script_count {
+            let body_opt = &row[s];
+            if let Some(ref body) = body_opt {
+                pos32 = new_pos_scripts as u32 + all_scripts.len() as u32;
+                all_scripts.extend_from_slice(body);
+            }
+            if pos32 > 0xFFFF {
+                return None;
+            }
+            let pos_u16 = pos32 as u16;
+            positions_scripts.extend_from_slice(&pos_u16.to_le_bytes());
+        }
+    }
+
+    let new_pos_texts32 = new_pos_scripts
+        .saturating_add(all_scripts.len());
+    if new_pos_texts32 > 0xFFFF {
+        return None;
+    }
+    let new_pos_texts = new_pos_texts32 as u16;
+
+    let mut texts = texts_blob.to_vec();
+    if header.nb_akao > 0 {
+        let scripts_and_texts_size = positions_scripts.len()
+            .saturating_add(all_scripts.len())
+            .saturating_add(texts.len());
+        let pad = scripts_and_texts_size % 4;
+        if pad != 0 {
+            texts.extend(std::iter::repeat(0u8).take(4 - pad));
+        }
+    }
+
+    let new_pos_akaos32 = new_pos_texts32
+        .saturating_add(texts.len());
+
+    let mut positions_akao: Vec<u8> = Vec::with_capacity((header.nb_akao as usize).saturating_mul(4));
+    let nb_akao = header.nb_akao as usize;
+    let old_first_akao = header.pos_akao_rel as u32;
+    for i in 0..nb_akao {
+        let old_off = header.akao_offsets.get(i).copied().unwrap_or(old_first_akao);
+        let delta = old_off.saturating_sub(old_first_akao);
+        let pos = new_pos_akaos32.saturating_add(delta as usize) as u32;
+        positions_akao.extend_from_slice(&pos.to_le_bytes());
+    }
+
+    let mut out = Vec::new();
+    out.reserve(
+        32 + names_len + positions_akao.len() + positions_scripts.len() + all_scripts.len()
+            + texts.len()
+            + akao_blob.len(),
+    );
+
+    out.extend_from_slice(&header.version.to_le_bytes());
+    out.push(header.nb_groups);
+    out.push(header.nb_3d_objects);
+    out.extend_from_slice(&new_pos_texts.to_le_bytes());
+    out.extend_from_slice(&header.nb_akao.to_le_bytes());
+    out.extend_from_slice(&header.scale.to_le_bytes());
+    out.extend_from_slice(&[0u8; 6]);
+    out.extend_from_slice(&header.author);
+    out.extend_from_slice(&header.map_name);
+
+    for name in &header.group_names {
+        out.extend_from_slice(name);
+    }
+
+    out.extend_from_slice(&positions_akao);
+    out.extend_from_slice(&positions_scripts);
+    out.extend_from_slice(&all_scripts);
+    out.extend_from_slice(&texts);
+    out.extend_from_slice(akao_blob);
+
+    Some(out)
+}
+
+fn replace_pc_section1(buf: &mut Vec<u8>, header: &ParsedSection1, new_sec1: Vec<u8>) -> bool {
+    if buf.len() < 6 + 4 {
+        return false;
+    }
+
+    let section_count = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
+    if section_count == 0 || section_count > 9 {
+        return false;
+    }
+
+    let mut section_positions = vec![0u32; section_count];
+    let mut o = 6usize;
+    for i in 0..section_count {
+        if o + 4 > buf.len() {
+            return false;
+        }
+        section_positions[i] = u32::from_le_bytes([
+            buf[o],
+            buf[o + 1],
+            buf[o + 2],
+            buf[o + 3],
+        ]);
+        o += 4;
+    }
+
+    let old_size = header.sec1_end.saturating_sub(header.sec1_start);
+    let new_size = new_sec1.len();
+    let delta = new_size as isize - old_size as isize;
+
+    let size_off = header.sec1_start.saturating_sub(4);
+    if size_off + 4 > buf.len() {
+        return false;
+    }
+
+    buf.splice(header.sec1_start..header.sec1_end, new_sec1.into_iter());
+
+    let new_size_u32 = new_size as u32;
+    buf[size_off..size_off + 4].copy_from_slice(&new_size_u32.to_le_bytes());
+
+    if delta != 0 {
+        for idx in 1..section_count {
+            let pos_off = 6 + idx * 4;
+            if pos_off + 4 > buf.len() {
+                return false;
+            }
+            let p_old = section_positions[idx] as isize;
+            let p_new = p_old + delta;
+            buf[pos_off..pos_off + 4]
+                .copy_from_slice(&(p_new as u32).to_le_bytes());
+        }
+    }
+
+    true
+}
+
 fn encode_ff7_ascii(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     for ch in s.chars() {
@@ -469,6 +916,331 @@ fn encode_ff7_ascii(s: &str) -> Vec<u8> {
         out.push(code);
     }
     out
+}
+
+pub(crate) fn neutralise_clsin2_2_keystone(buf: &mut [u8]) -> bool {
+    // For clsin2_2 only: neutralise all BITON writes to ScKeyItems
+    // (Var[1][69]) and blank their nearby MESSAGE text so that Dio's
+    // Keystone event no longer sets the Keystone flag or mentions it,
+    // while preserving script lengths and existing item rewards.
+
+    let (scan_start, scan_end) = match get_pc_field_script_range(buf) {
+        Some(v) => v,
+        None => return false,
+    };
+    if scan_start >= scan_end || scan_end > buf.len() {
+        return false;
+    }
+
+    let mut biton_positions: Vec<usize> = Vec::new();
+    let mut i = scan_start;
+    while i + 4 <= scan_end {
+        let op = buf[i];
+        if op == 0x82 {
+            let banks = buf[i + 1];
+            let bank1 = banks >> 4;
+            let bank2 = banks & 0x0F;
+            let var = buf[i + 2];
+            if bank1 == 1 && bank2 == 0 && var == 69 {
+                biton_positions.push(i);
+            }
+        }
+
+        let sz = opcode_size_pc(buf, i, scan_end);
+        if sz == 0 {
+            break;
+        }
+        i = i.saturating_add(sz);
+    }
+
+    if biton_positions.is_empty() {
+        return false;
+    }
+
+    let mut text_layout = get_pc_field_text_layout(buf);
+    let mut changed = false;
+
+    for off in biton_positions {
+        if off + 3 >= scan_end {
+            continue;
+        }
+
+        // Neutralise BITON: keep opcode 0x82 but point it at Var[0][0]
+        // bit 0 (banks=0, var=0, bit=0). This avoids changing the
+        // instruction length or control flow.
+        buf[off + 1] = 0x00;
+        buf[off + 2] = 0x00;
+        buf[off + 3] = 0x00;
+        changed = true;
+
+        // Blank the nearest MESSAGE text so Dio no longer talks about the
+        // Keystone key item.
+        if let Some((texts_base, text_count, positions)) = text_layout.as_ref() {
+            if let Some((_, text_id)) =
+                find_nearby_message(buf, scan_start, scan_end, off, 0xC0)
+            {
+                let _ = blank_text_in_place(buf, *texts_base, *text_count, positions, text_id);
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+pub(crate) fn install_blin65_midgar_part1_req_script(buf: &mut Vec<u8>) -> bool {
+    // blin65_1-specific helper: append a new chest-style script as
+    // Entity 15 Script 30 (MESSAGE+STITM+BITON+RET) and rewire the
+    // original Midgar Part #1 BITON to call it via REQ 15,30+NOP,
+    // rebuilding Section1 in a Makou-compatible way.
+
+    const ENTITY_ID: usize = 15;
+    const SCRIPT_INDEX: usize = 30;
+
+    let header = match parse_pc_section1(buf) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    if ENTITY_ID >= header.nb_groups as usize {
+        return false;
+    }
+
+    let mut scripts = match extract_pc_section1_scripts(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let (texts_blob, akao_blob) = match extract_pc_section1_texts_and_akao(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    // Build the new chest script body for Midgar Part #1. This helper is
+    // now a pure chest-style grant (MESSAGE+STITM+RET); scenario bits are
+    // handled by the randomiser's key-item progression logic.
+    let src = "MESSAGE 0 1\nSTITM 0 0x0000 1\nRET";
+    let helper_bytes = match compile_script_from_str(src) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return false,
+    };
+
+    // Install helper as Entity 15, Script 30.
+    scripts[ENTITY_ID][SCRIPT_INDEX] = Some(helper_bytes);
+
+    // Find and patch the original Midgar Part #1 BITON (Var[1][68] bit 3)
+    // into REQ 15,30 + NOP inside the scripts matrix.
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+    let mut patched = false;
+
+    'outer: for g in 0..header.nb_groups as usize {
+        let row = &mut scripts[g];
+        for s in 0..script_count {
+            if let Some(ref mut body) = row[s] {
+                let mut i = 0usize;
+                while i + 4 <= body.len() {
+                    let op = body[i];
+                    if op == 0x82 {
+                        let banks = body[i + 1];
+                        let bank1 = banks >> 4;
+                        let bank2 = banks & 0x0F;
+                        let var = body[i + 2];
+                        let bit = body[i + 3];
+                        if bank1 == 1 && bank2 == 0 && var == 68 && bit == 3 {
+                            // Replace with REQ 15,30 + NOP (4 bytes).
+                            body[i] = 0x01; // REQ
+                            body[i + 1] = 0x0F; // entity 15
+                            body[i + 2] = 0x1E; // priority 0, func 30
+                            body[i + 3] = 0x5F; // NOP padding
+                            patched = true;
+                            break 'outer;
+                        }
+                    }
+
+                    let sz = opcode_size_pc(body, i, body.len());
+                    if sz == 0 {
+                        break;
+                    }
+                    i = i.saturating_add(sz);
+                }
+            }
+        }
+    }
+
+    if !patched {
+        return false;
+    }
+
+    let new_sec1 = match rebuild_pc_section1_from_scripts(&header, &scripts, &texts_blob, &akao_blob) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    replace_pc_section1(buf, &header, new_sec1)
+}
+
+pub(crate) fn install_blin65_midgar_part2_req_script(buf: &mut Vec<u8>) -> bool {
+    // blin65_1-specific helper: append a new chest-style script as
+    // Entity 16 Script 30 (MESSAGE+STITM+BITON+RET) and rewire the
+    // original Midgar Part #2 BITON to call it via REQ 16,30+NOP,
+    // rebuilding Section1 in a Makou-compatible way.
+
+    const ENTITY_ID: usize = 16;
+    const SCRIPT_INDEX: usize = 30;
+
+    let header = match parse_pc_section1(buf) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    if ENTITY_ID >= header.nb_groups as usize {
+        return false;
+    }
+
+    let mut scripts = match extract_pc_section1_scripts(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let (texts_blob, akao_blob) = match extract_pc_section1_texts_and_akao(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    // Build the new chest script body for Midgar Part #2. This helper is
+    // likewise a pure chest-style grant.
+    let src = "MESSAGE 0 1\nSTITM 0 0x0000 1\nRET";
+    let helper_bytes = match compile_script_from_str(src) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return false,
+    };
+
+    // Install helper as Entity 16, Script 30.
+    scripts[ENTITY_ID][SCRIPT_INDEX] = Some(helper_bytes);
+
+    // Find and patch the original Midgar Part #2 BITON (Var[1][68] bit 4)
+    // into REQ 16,30 + NOP inside the scripts matrix.
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+    let mut patched = false;
+
+    'outer: for g in 0..header.nb_groups as usize {
+        let row = &mut scripts[g];
+        for s in 0..script_count {
+            if let Some(ref mut body) = row[s] {
+                let mut i = 0usize;
+                while i + 4 <= body.len() {
+                    let op = body[i];
+                    if op == 0x82 {
+                        let banks = body[i + 1];
+                        let bank1 = banks >> 4;
+                        let bank2 = banks & 0x0F;
+                        let var = body[i + 2];
+                        let bit = body[i + 3];
+                        if bank1 == 1 && bank2 == 0 && var == 68 && bit == 4 {
+                            // Replace with REQ 16,30 + NOP (4 bytes).
+                            body[i] = 0x01; // REQ
+                            body[i + 1] = 0x10; // entity 16
+                            body[i + 2] = 0x1E; // priority 0, func 30
+                            body[i + 3] = 0x5F; // NOP padding
+                            patched = true;
+                            break 'outer;
+                        }
+                    }
+
+                    let sz = opcode_size_pc(body, i, body.len());
+                    if sz == 0 {
+                        break;
+                    }
+                    i = i.saturating_add(sz);
+                }
+            }
+        }
+    }
+
+    if !patched {
+        return false;
+    }
+
+    let new_sec1 = match rebuild_pc_section1_from_scripts(&header, &scripts, &texts_blob, &akao_blob) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    replace_pc_section1(buf, &header, new_sec1)
+}
+
+pub(crate) fn neutralise_blin65_midgar_parts(buf: &mut [u8]) -> bool {
+    // For blin65_1 only: neutralise BITON writes to Midgar Parts bits
+    // (Var[1][68] bit indices 3 and 4) and blank their nearby MESSAGE
+    // text so the scripts no longer control progression, while keeping
+    // script structure and control flow intact.
+
+    let (scan_start, scan_end) = match get_pc_field_script_range(buf) {
+        Some(v) => v,
+        None => return false,
+    };
+    if scan_start >= scan_end || scan_end > buf.len() {
+        return false;
+    }
+
+    let mut biton_positions: Vec<usize> = Vec::new();
+    let mut i = scan_start;
+    while i + 4 <= scan_end {
+        let op = buf[i];
+        if op == 0x82 {
+            let banks = buf[i + 1];
+            let bank1 = banks >> 4;
+            let bank2 = banks & 0x0F;
+            let var = buf[i + 2];
+            let bit_index = buf[i + 3];
+            if bank1 == 1 && bank2 == 0 && var == 68 &&
+                (bit_index == 3 || bit_index == 4)
+            {
+                biton_positions.push(i);
+            }
+        }
+
+        let sz = opcode_size_pc(buf, i, scan_end);
+        if sz == 0 {
+            break;
+        }
+        i = i.saturating_add(sz);
+    }
+
+    if biton_positions.is_empty() {
+        return false;
+    }
+
+    let mut text_layout = get_pc_field_text_layout(buf);
+    let mut changed = false;
+
+    for off in biton_positions {
+        if off + 3 >= scan_end {
+            continue;
+        }
+
+        // Neutralise BITON: keep opcode 0x82 but point it at Var[0][0]
+        // bit 0 (banks=0, var=0, bit=0). This preserves instruction
+        // length and control flow and avoids touching the ScKeyItems
+        // bank used for Midgar Part tracking.
+        buf[off + 1] = 0x00;
+        buf[off + 2] = 0x00;
+        buf[off + 3] = 0x00;
+        changed = true;
+
+        // Blank the nearest MESSAGE text so these scripts no longer
+        // explicitly mention Midgar Parts.
+        if let Some((texts_base, text_count, positions)) = text_layout.as_ref() {
+            if let Some((_, text_id)) =
+                find_nearby_message(buf, scan_start, scan_end, off, 0xC0)
+            {
+                let _ = blank_text_in_place(buf, *texts_base, *text_count, positions, text_id);
+                changed = true;
+            }
+        }
+    }
+
+    changed
 }
 
 fn build_pickup_message_bytes(
@@ -783,6 +1555,50 @@ pub(crate) fn patch_pickup_text_in_place(
     true
 }
 
+fn blank_text_in_place(
+    buf: &mut [u8],
+    texts_base: usize,
+    text_count: u16,
+    positions: &[u16],
+    text_id: u8,
+) -> bool {
+    let id = text_id as usize;
+    if id >= text_count as usize {
+        return false;
+    }
+
+    let start_rel = positions[id] as usize;
+    let start = texts_base.saturating_add(start_rel);
+    if start >= buf.len() {
+        return false;
+    }
+
+    let next_start = if id + 1 < text_count as usize {
+        let rel = positions[id + 1] as usize;
+        texts_base.saturating_add(rel.min(buf.len().saturating_sub(texts_base)))
+    } else {
+        buf.len()
+    };
+
+    let mut end = start;
+    while end < next_start {
+        if buf[end] == 0xFF {
+            end += 1;
+            break;
+        }
+        end += 1;
+    }
+    if end <= start {
+        return false;
+    }
+
+    for k in start..end {
+        buf[k] = 0xFF;
+    }
+
+    true
+}
+
 fn build_key_message_bytes(key_name: &str, capacity: usize) -> Option<Vec<u8>> {
     let variants = [
         format!("Found \"{}\"!", key_name),
@@ -1076,163 +1892,89 @@ pub(crate) fn add_dialog_entry_for_pickup(
 }
 
 pub(crate) fn rewrite_vanilla_keystone_source(buf: &mut [u8]) -> bool {
-    // Locate the scripts/texts Section1, then scan the event scripts for a
-    // BITON 1,0,69,2 opcode (Var[1][69] Keystone bit). When found, replace the
-    // entire script body with a simple MESSAGE+STITM+RET sequence compiled
-    // from the DSL, padded with NOPs to preserve the original script length so
-    // that offsets and section layout remain unchanged.
+    // clsin2_2-specific helper: locate the *script* that writes to
+    // ScKeyItems (Var[1][69]) and replace its body with a small
+    // MESSAGE+STITM+RET chest script. To avoid relying on the Section1
+    // pointer tables (which can vary between tools/versions), we:
+    //
+    // 1. Use get_pc_field_script_range to find the overall script bytecode
+    //    range.
+    // 2. Scan for the first BITON opcode that writes to Var[1][69].
+    // 3. Walk backwards to the previous RET (0x00) or the start of the
+    //    script region, and forwards to the next RET or the end of the
+    //    script region. That span is treated as the body of the Keystone
+    //    source script.
+    // 4. Replace that span with MESSAGE+STITM+RET, padded with NOPs so the
+    //    script length (and hence Section1 layout) is preserved.
 
-    if buf.len() < 6 + 9 * 4 {
-        return false;
-    }
-
-    let section_count = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
-    if section_count == 0 || section_count > 9 {
-        return false;
-    }
-
-    let mut section_positions = vec![0u32; section_count];
-    let mut o = 6usize;
-    for i in 0..section_count {
-        if o + 4 > buf.len() {
-            return false;
-        }
-        section_positions[i] = u32::from_le_bytes([
-            buf[o],
-            buf[o + 1],
-            buf[o + 2],
-            buf[o + 3],
-        ]);
-        o += 4;
-    }
-
-    let s0 = section_positions[0] as usize;
-    if s0 + 4 > buf.len() {
-        return false;
-    }
-    let sec1_start = s0 + 4;
-    let sec1_end = if section_count > 1 {
-        section_positions[1] as usize
-    } else {
-        buf.len()
-    };
-    if sec1_start + 32 > sec1_end || sec1_end > buf.len() {
-        return false;
-    }
-
-    let n_entities = buf[sec1_start + 2] as usize;
-    let n_akao = u16::from_le_bytes([
-        buf[sec1_start + 6],
-        buf[sec1_start + 7],
-    ]) as usize;
-    let pos_texts = u16::from_le_bytes([
-        buf[sec1_start + 4],
-        buf[sec1_start + 5],
-    ]) as usize;
-    if pos_texts == 0 {
-        return false;
-    }
-    let texts_base = sec1_start + pos_texts;
-    if texts_base > sec1_end || texts_base > buf.len() {
-        return false;
-    }
-
-    let entities_off = sec1_start + 32;
-    let akao_offsets_off = entities_off + n_entities.saturating_mul(8);
-    if akao_offsets_off + n_akao.saturating_mul(4) > sec1_end {
-        return false;
-    }
-
-    let script_tables_off = akao_offsets_off + n_akao.saturating_mul(4);
-    let scripts_start = script_tables_off + n_entities.saturating_mul(64);
-    let scripts_end = texts_base;
-    if scripts_start > scripts_end || scripts_end > buf.len() {
-        return false;
-    }
-
-    #[derive(Clone, Copy)]
-    struct ScriptMeta {
-        entity: u8,
-        index: u8,
-        rel: u16,
-    }
-
-    let mut scripts: Vec<ScriptMeta> = Vec::new();
-    for ent in 0..n_entities {
-        for idx in 0..32usize {
-            let base = script_tables_off + (ent * 32 + idx) * 2;
-            if base + 2 > scripts_start {
-                // Pointer tables must end before scripts_start.
-                return false;
-            }
-            let rel = u16::from_le_bytes([buf[base], buf[base + 1]]);
-            if rel != 0 {
-                scripts.push(ScriptMeta {
-                    entity: ent as u8,
-                    index: idx as u8,
-                    rel,
-                });
-            }
-        }
-    }
-
-    if scripts.is_empty() {
-        return false;
-    }
-
-    scripts.sort_by_key(|s| s.rel);
-
-    let mut target_script: Option<(usize, usize)> = None; // (start, end)
-
-    for (si, meta) in scripts.iter().enumerate() {
-        let start_rel = meta.rel as usize;
-        let start = scripts_start.saturating_add(start_rel);
-        if start >= scripts_end {
-            continue;
-        }
-        let end = if let Some(next) = scripts.get(si + 1) {
-            let next_rel = next.rel as usize;
-            scripts_start.saturating_add(next_rel.min(scripts_end.saturating_sub(scripts_start)))
-        } else {
-            scripts_end
+    let (script_region_start, script_region_end) =
+        match get_pc_field_script_range(buf) {
+            Some(v) => v,
+            None => return false,
         };
-        if end <= start || end > scripts_end {
-            continue;
-        }
+    if script_region_start >= script_region_end || script_region_end > buf.len() {
+        return false;
+    }
 
-        let mut pos = start;
-        while pos + 4 <= end {
-            let op = buf[pos];
-            if op == 0x82 {
-                let banks = buf[pos + 1];
-                let bank1 = banks >> 4;
-                let bank2 = banks & 0x0F;
-                let var = buf[pos + 2];
-                let bit = buf[pos + 3];
-                if bank1 == 1 && bank2 == 0 && var == 69 && bit == 2 {
-                    target_script = Some((start, end));
-                    break;
-                }
-            }
-
-            let sz = opcode_size_pc(buf, pos, end);
-            if sz == 0 {
+    // Step 2: find first BITON that writes to Var[1][69] (ScKeyItems).
+    let mut biton_off: Option<usize> = None;
+    let mut i = script_region_start;
+    while i + 4 <= script_region_end {
+        let op = buf[i];
+        if op == 0x82 {
+            let banks = buf[i + 1];
+            let bank1 = banks >> 4;
+            let bank2 = banks & 0x0F;
+            let var = buf[i + 2];
+            if bank1 == 1 && bank2 == 0 && var == 69 {
+                biton_off = Some(i);
                 break;
             }
-            pos = pos.saturating_add(sz);
         }
 
-        if target_script.is_some() {
+        let sz = opcode_size_pc(buf, i, script_region_end);
+        if sz == 0 {
+            break;
+        }
+        i = i.saturating_add(sz);
+    }
+
+    let biton_off = match biton_off {
+        Some(off) => off,
+        None => return false,
+    };
+
+    // Step 3: walk backwards to previous RET (0x00) as an approximate
+    // script start, or fall back to the start of the script region.
+    let mut script_start = script_region_start;
+    let mut j = biton_off;
+    while j > script_region_start {
+        j -= 1;
+        if buf[j] == 0x00 {
+            // Treat the byte after RET as the start of this script.
+            script_start = j.saturating_add(1);
             break;
         }
     }
 
-    let (script_start, script_end) = match target_script {
-        Some(v) => v,
-        None => return false,
-    };
+    // Step 3b: walk forwards to next RET (0x00) as script end, or fall
+    // back to the end of the script region.
+    let mut script_end = script_region_end;
+    let mut k = biton_off;
+    while k < script_region_end {
+        if buf[k] == 0x00 {
+            // Include the RET itself in the script body.
+            script_end = k.saturating_add(1);
+            break;
+        }
+        let sz = opcode_size_pc(buf, k, script_region_end);
+        if sz == 0 {
+            break;
+        }
+        k = k.saturating_add(sz);
+    }
 
-    if script_end <= script_start || script_end > scripts_end {
+    if script_end <= script_start || script_end > script_region_end {
         return false;
     }
 
@@ -1241,9 +1983,9 @@ pub(crate) fn rewrite_vanilla_keystone_source(buf: &mut [u8]) -> bool {
         return false;
     }
 
-    // Replacement script: simple MESSAGE + STITM + RET. The MESSAGE will be
-    // repointed and its text regenerated by the randomiser when field pickups
-    // are patched.
+    // Step 4: replacement script: simple MESSAGE + STITM + RET. The
+    // MESSAGE will be repointed and its text regenerated by the
+    // randomiser when field pickups are patched.
     let src = "MESSAGE 0 0\nSTITM 0 0x0000 1\nRET";
     let mut new_bytes = match compile_script_from_str(src) {
         Ok(b) => b,
@@ -1262,6 +2004,183 @@ pub(crate) fn rewrite_vanilla_keystone_source(buf: &mut [u8]) -> bool {
     buf[script_start..script_end].copy_from_slice(&new_bytes);
 
     true
+}
+
+pub(crate) fn rewrite_blin65_midgar_parts(buf: &mut [u8]) -> bool {
+    // blin65_1-specific helper: locate small scripts that write to
+    // Var[1][68] bit 3 or 4 (Midgar Part #1/#2) and replace their bodies
+    // with a simple MESSAGE+STITM+RET chest-style script. This allows the
+    // randomiser to treat these former key locations as normal pickups.
+
+    let (script_region_start, script_region_end) =
+        match get_pc_field_script_range(buf) {
+            Some(v) => v,
+            None => return false,
+        };
+    if script_region_start >= script_region_end || script_region_end > buf.len() {
+        return false;
+    }
+
+    let mut biton_positions: Vec<usize> = Vec::new();
+    let mut i = script_region_start;
+    while i + 4 <= script_region_end {
+        let op = buf[i];
+        if op == 0x82 {
+            let banks = buf[i + 1];
+            let bank1 = banks >> 4;
+            let bank2 = banks & 0x0F;
+            let var = buf[i + 2];
+            let bit_index = buf[i + 3];
+            if bank1 == 1 && bank2 == 0 && var == 68 &&
+                (bit_index == 3 || bit_index == 4)
+            {
+                biton_positions.push(i);
+            }
+        }
+
+        let sz = opcode_size_pc(buf, i, script_region_end);
+        if sz == 0 {
+            break;
+        }
+        i = i.saturating_add(sz);
+    }
+
+    if biton_positions.is_empty() {
+        return false;
+    }
+
+    const MAX_SCRIPT_LEN: usize = 0x100; // be conservative
+    const MAX_BACK: usize = 0x80;
+    const MAX_FWD: usize = 0x80;
+
+    let mut changed = false;
+
+    for off in biton_positions {
+        // If this opcode is no longer BITON (e.g. script was already
+        // rewritten), skip it.
+        if off >= buf.len() || buf[off] != 0x82 {
+            continue;
+        }
+
+        // Walk backwards to previous RET (0x00) or until MAX_BACK bytes,
+        // treating the byte after RET as the script start.
+        let mut script_start = script_region_start;
+        let mut j = off;
+        let mut back = 0usize;
+        while j > script_region_start && back < MAX_BACK {
+            j -= 1;
+            back = back.saturating_add(1);
+            if buf[j] == 0x00 {
+                script_start = j.saturating_add(1);
+                break;
+            }
+        }
+
+        if script_start == script_region_start && off.saturating_sub(script_region_start) >= MAX_BACK
+        {
+            continue;
+        }
+
+        // Walk forwards to next RET (0x00) or until MAX_FWD bytes,
+        // including the RET itself in the script body.
+        let mut script_end = script_region_end;
+        let mut k = off;
+        let mut fwd = 0usize;
+        while k < script_region_end && fwd < MAX_FWD {
+            if buf[k] == 0x00 {
+                script_end = k.saturating_add(1);
+                break;
+            }
+            let sz = opcode_size_pc(buf, k, script_region_end);
+            if sz == 0 {
+                break;
+            }
+            k = k.saturating_add(sz);
+            fwd = fwd.saturating_add(sz);
+        }
+
+        if script_end <= script_start
+            || script_end > script_region_end
+        {
+            continue;
+        }
+
+        let old_len = script_end.saturating_sub(script_start);
+        if old_len == 0 || old_len > MAX_SCRIPT_LEN {
+            continue;
+        }
+
+        // Try to reuse the existing MESSAGE text id near this BITON so
+        // that later pickup text patching can operate as usual.
+        let mut msg_id: u8 = 0;
+        if let Some((_, text_id)) =
+            find_nearby_message(buf, script_start, script_end, off, 0xC0)
+        {
+            msg_id = text_id;
+        }
+
+        let src = format!("MESSAGE 0 {}\nSTITM 0 0x0000 1\nRET", msg_id);
+        let mut new_bytes = match compile_script_from_str(&src) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        if new_bytes.len() > old_len {
+            continue;
+        }
+
+        let pad_len = old_len - new_bytes.len();
+        new_bytes.extend(std::iter::repeat(0x5F).take(pad_len));
+
+        buf[script_start..script_end].copy_from_slice(&new_bytes);
+        changed = true;
+    }
+
+    changed
+}
+
+pub(crate) fn debug_scan_sc_keyitems(buf: &[u8]) -> String {
+    // Debug helper: scan the script bytecode range for BITON opcodes that
+    // write to ScKeyItems (Var[1][69]) and return a short report.
+
+    let mut out = String::new();
+
+    if let Some((scan_start, scan_end)) = get_pc_field_script_range(buf) {
+        let mut hits = 0usize;
+        let mut i = scan_start;
+        while i < scan_end {
+            let op = buf[i];
+            if op == 0x82 && i + 3 < scan_end {
+                let banks = buf[i + 1];
+                let bank1 = banks >> 4;
+                let bank2 = banks & 0x0F;
+                let var = buf[i + 2];
+                let bit = buf[i + 3];
+
+                if bank1 == 1 && bank2 == 0 && var == 69 {
+                    out.push_str(&format!(
+                        "clsin2_2 debug: BITON Var[1][69] at off=0x{:06X} bit={} banks=0x{:02X}\n",
+                        i, bit, banks,
+                    ));
+                    hits += 1;
+                }
+            }
+
+            let sz = opcode_size_pc(buf, i, scan_end);
+            if sz == 0 {
+                break;
+            }
+            i = i.saturating_add(sz);
+        }
+
+        if hits == 0 {
+            out.push_str("clsin2_2 debug: no Var[1][69] BITON hits in script range\n");
+        }
+    } else {
+        out.push_str("clsin2_2 debug: get_pc_field_script_range() returned None\n");
+    }
+
+    out
 }
 
 pub(crate) fn lzs_decompress_raw(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
@@ -1351,7 +2270,7 @@ pub(crate) fn lzs_decompress_raw(data: &[u8]) -> std::result::Result<Vec<u8>, St
     }
 }
 
-pub(crate) fn lzs_decompress(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+pub fn lzs_decompress(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
     if data.is_empty() {
         return Err("LZS stream is empty".to_string());
     }
@@ -1668,6 +2587,85 @@ pub(crate) fn lzs_compress(input: &[u8]) -> std::result::Result<Vec<u8>, String>
     }
 
     Ok(result)
+}
+
+pub fn debug_dump_field_section1_layout(buf: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    if let Some(sec1) = parse_pc_section1(buf) {
+        let len = sec1.sec1_end.saturating_sub(sec1.sec1_start);
+        let _ = writeln!(
+            &mut out,
+            "Section1 parsed: sec1_start=0x{:06X} sec1_end=0x{:06X} len=0x{:04X}",
+            sec1.sec1_start, sec1.sec1_end, len,
+        );
+
+        let _ = writeln!(
+            &mut out,
+            "version=0x{:04X} nb_groups={} nb_3d_objects={} pos_texts_rel=0x{:04X} nb_akao={} scale={}",
+            sec1.version,
+            sec1.nb_groups,
+            sec1.nb_3d_objects,
+            sec1.pos_texts,
+            sec1.nb_akao,
+            sec1.scale,
+        );
+
+        let scripts_region_abs = sec1.sec1_start + sec1.scripts_region_rel as usize;
+        let pos_texts_abs = sec1.sec1_start + sec1.pos_texts as usize;
+        let pos_akao_abs = sec1.sec1_start + sec1.pos_akao_rel as usize;
+
+        let _ = writeln!(
+            &mut out,
+            "scripts_region_rel=0x{:04X} scripts_region_abs=0x{:06X}",
+            sec1.scripts_region_rel,
+            scripts_region_abs,
+        );
+        let _ = writeln!(
+            &mut out,
+            "pos_texts_rel=0x{:04X} pos_texts_abs=0x{:06X}",
+            sec1.pos_texts,
+            pos_texts_abs,
+        );
+        let _ = writeln!(
+            &mut out,
+            "pos_akao_rel=0x{:04X} pos_akao_abs=0x{:06X}",
+            sec1.pos_akao_rel,
+            pos_akao_abs,
+        );
+
+        // Dump a small window of vEntityScripts in entity-major order so we
+        // can compare against Makou's view.
+        let max_e = std::cmp::min(sec1.nb_groups as usize, 8);
+        let script_count: usize = if sec1.version == 0x0301 { 16 } else { 32 };
+        let _ = writeln!(
+            &mut out,
+            "\nEntity-major vEntityScripts (first {} entities, scripts 0-7):",
+            max_e,
+        );
+        for e in 0..max_e {
+            let _ = write!(&mut out, "E{:02}: ", e);
+            let row = &sec1.script_ptrs[e];
+            for s in 0..std::cmp::min(8, script_count) {
+                let rel = row[s];
+                let abs = sec1.sec1_start + rel as usize;
+                let _ = write!(
+                    &mut out,
+                    "s{:02}=0x{:04X}(abs=0x{:06X}) ",
+                    s,
+                    rel,
+                    abs,
+                );
+            }
+            out.push('\n');
+        }
+
+        out
+    } else {
+        out.push_str("parse_pc_section1() failed or Section1 is not PC-layout\n");
+        out
+    }
 }
 
 pub(crate) fn patch_md1stin_for_early_materia(buf: &mut [u8]) -> Option<usize> {

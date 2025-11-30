@@ -1,0 +1,18 @@
+
+#Rshifts time counter to check if big enough to decrement status counters. Default = 0D
+00435335 = 0C
+
+#Ands time counter to reduce after a decrement. Default = 1F(FF)
+00435345 = 0F
+
+#Rshifts time counter, but it's a different counter for death sentence at least Default = 0C
+00435375 = 0B
+
+#Ands time counter to reduce after a decrement. Default = 0F(FF)
+00435386 = 07
+
+#Rshifts time counter, but for regen at least. Default = 0F
+004353BC = 0E
+
+#Ands time counter to reduce. Default = 7F(FF)
+004353CD = 3F

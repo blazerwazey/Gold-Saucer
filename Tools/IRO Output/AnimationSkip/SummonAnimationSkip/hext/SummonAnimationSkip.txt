@@ -1,0 +1,7 @@
+..\ff7.exe
+
+#Skip Animations
+005DA117 = E9 19 B5 1D 00
+
+#Code
+007B5635 = A0 14 E3 99 00 3C 03 74 0A 3C 16 74 06 0F 1F 40 00 88 0A 8B 55 FC E9 CC 4A E2 FF

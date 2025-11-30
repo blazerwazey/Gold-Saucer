@@ -1,0 +1,21 @@
+This project is a Tauri 2.0 app that uses Rust on the backend (src-tauri directory) and TypeScript for the frontend (src directory). The TypeScript part utilizes shadcn-ui components and TailwindCSS for styling. The UI uses a dark theme with "slate" base color. When writing UI code make sure it's sleek and compact, use small buttons and minimal padding.
+
+The Rust backend is only responsible for bootstraping the app and for some core OS features, most of the app functionality is built using the TypeScript frontend. On the frontend the src/ff7 directory contains classes for reading/writing different file formats.
+
+The goal of this application is to build a working Final Fantasy VII world map editor, by directly editing the game's files. It has several screens:
+
+1. Messages - for editing in game dialogues and messages that show up on the world map. It works with the `mes` file from `world_us.lgp`
+2. Map - renders a 3D view of the game's world map, by working with `wmX.MAP` files. It can render triangles using different rendering modes (displaying terrain type, texture data, region data or script & chocobo data) and allows basic editing of texture UVs and vertex coordinates. It can display one of three game maps - Overworld, Underwater and Great Glacier.
+3. Textures - shows a list of textures for a particular game map
+
+## Installing shadcn components
+
+The proper command for installing shadcn components is: `npx shadcn@latest add <components>`
+Before installing components check if a component is already installed in components.json.
+
+## After you finish your task
+
+DO NOT run the application
+DO NOT build the application
+DO NOT write or run any tests
+Write only a short, 1-2 sentence summary of what you did in the final message

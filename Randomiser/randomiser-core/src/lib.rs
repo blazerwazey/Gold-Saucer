@@ -1,5 +1,6 @@
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -10,7 +11,7 @@ use thiserror::Error;
 mod items;
 mod shops;
 mod scene;
-mod field;
+pub mod field;
 mod field_compiler;
 
 use shops::build_shops_hext;
@@ -95,6 +96,169 @@ struct LgpEntry {
 struct LgpArchive {
     creator: [u8; 12],
     entries: Vec<LgpEntry>,
+}
+
+#[derive(Clone)]
+struct PickupSlot {
+    entry_index: usize,
+    field_name: String,
+    opcode_off: usize,
+    qty: u8,
+    item_id: u16,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FieldZone {
+    Midgar,
+    ShinraBuilding,
+    TempleAndAncients,
+    Glacier,
+    LateGame,
+    Other,
+}
+
+fn classify_field_zone(name: &str, _entry_index: usize) -> FieldZone {
+    let n = name.to_ascii_lowercase();
+
+    if n.starts_with("blin") {
+        return FieldZone::ShinraBuilding;
+    }
+
+    if n.starts_with("jtmp") || n.starts_with("loslake") || n.starts_with("ancnt") {
+        return FieldZone::TempleAndAncients;
+    }
+
+    if n.starts_with("slfrst")
+        || n.starts_with("snow")
+        || n.starts_with("ice")
+        || n.starts_with("icicle")
+        || n.starts_with("gaia")
+    {
+        return FieldZone::Glacier;
+    }
+
+    if n.starts_with("trnad") {
+        return FieldZone::LateGame;
+    }
+
+    if n.starts_with("md")
+        || n.starts_with("nmkin")
+        || n.starts_with("nnmid")
+        || n.starts_with("elmin")
+        || n.starts_with("mrkt")
+    {
+        return FieldZone::Midgar;
+    }
+
+    FieldZone::Other
+}
+
+fn key_can_appear_in_slot(
+    flag: &items::KeyItemFlag,
+    slot: &PickupSlot,
+    field_order: &HashMap<String, usize>,
+) -> bool {
+    let name = flag.name;
+    let field = slot.field_name.as_str();
+
+    let entry_index = slot.entry_index;
+
+    let zone = classify_field_zone(field, entry_index);
+
+    let before = |limit_name: &str| -> bool {
+        if let Some(&limit_idx) = field_order.get(limit_name) {
+            entry_index <= limit_idx
+        } else {
+            true
+        }
+    };
+
+    if name.starts_with("Keycard ") {
+        if zone != FieldZone::ShinraBuilding {
+            return false;
+        }
+    }
+
+    if name.starts_with("Midgar Part #") {
+        if zone != FieldZone::ShinraBuilding {
+            return false;
+        }
+    }
+
+    if name == "Keystone" {
+        if !before("jtmpin1") {
+            return false;
+        }
+    }
+
+    if name == "Key to Ancients" {
+        if !before("loslake3") {
+            return false;
+        }
+    }
+
+    if name == "Lunar Harp" {
+        if !before("slfrst_1") {
+            return false;
+        }
+    }
+
+    if name == "Glacier Map" || name == "Snowboard" {
+        if !before("snow") {
+            return false;
+        }
+    }
+
+    if name == "Black Materia" {
+        if !before("trnad_1") {
+            return false;
+        }
+    }
+
+    let _ = flag;
+    true
+}
+
+fn build_key_item_placements(
+    slots: &[PickupSlot],
+    seed: u64,
+    field_order: &HashMap<String, usize>,
+) -> HashMap<(usize, usize), &'static items::KeyItemFlag> {
+    let mut placements: HashMap<(usize, usize), &'static items::KeyItemFlag> =
+        HashMap::new();
+
+    if slots.is_empty() {
+        return placements;
+    }
+
+    let mut flags: Vec<&'static items::KeyItemFlag> =
+        items::key_item_flags_with_role(items::ItemRole::KeyProgression).collect();
+    if flags.is_empty() {
+        return placements;
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed ^ 0x4B1D_0EAD_u64);
+    flags.shuffle(&mut rng);
+
+    let mut remaining_slots: Vec<PickupSlot> = slots.to_vec();
+
+    for flag in flags {
+        let mut chosen_index: Option<usize> = None;
+
+        for (idx, slot) in remaining_slots.iter().enumerate() {
+            if key_can_appear_in_slot(flag, slot, field_order) {
+                chosen_index = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(idx) = chosen_index {
+            let slot = remaining_slots.swap_remove(idx);
+            placements.insert((slot.entry_index, slot.opcode_off), flag);
+        }
+    }
+
+    placements
 }
 
 // shop structures and helpers moved to shops module
@@ -716,28 +880,15 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         let mut field_replacements: HashMap<String, Vec<u8>> = HashMap::new();
 
         if settings.randomize_field_pickups {
-            let mut field_index_log = String::new();
-            let mut field_pickups_rand_log = String::new();
-            let mut smtra_materia_pool: Vec<u8> = Vec::new();
-            let huge_perm = make_huge_materia_perm(settings.seed);
-            let mut full_item_pool = build_field_item_pool(&settings);
-            let mut field_item_pool = full_item_pool.clone();
-            let mut guaranteed_remaining: Vec<u16> = GUARANTEED_FIELD_ITEMS
-                .iter()
-                .copied()
-                .filter(|id| full_item_pool.contains(id))
-                .collect();
-
-            let keystone_flag = items::all_key_item_flags()
-                .iter()
-                .find(|f| f.name == "Keystone");
-            let mut md1stin_keystone_proto_recorded = false;
-
-            if !guaranteed_remaining.is_empty() {
-                field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
+            let mut field_order: HashMap<String, usize> = HashMap::new();
+            for (idx, entry) in flevel_archive.entries.iter().enumerate() {
+                let name = entry.name.to_ascii_lowercase();
+                field_order.entry(name).or_insert(idx);
             }
 
-            for entry in &flevel_archive.entries {
+            let mut key_pickup_slots: Vec<PickupSlot> = Vec::new();
+
+            for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
                 let off_usize = entry.offset as usize;
                 const INNER_HEADER_SIZE: usize = 24;
 
@@ -795,17 +946,167 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
 
                 let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
 
+                if let Ok(buf) = field::lzs_decompress(&cmp_bytes) {
+                    let (scan_start, scan_end) =
+                        field::get_pc_field_script_range(&buf).unwrap_or((0, buf.len()));
+
+                    let mut i = scan_start;
+                    while i < scan_end {
+                        let opcode = buf[i];
+                        if opcode == 0x58 {
+                            let off = i;
+                            let banks = buf.get(i + 1).copied().unwrap_or(0);
+                            let item_lo = buf.get(i + 2).copied().unwrap_or(0);
+                            let item_hi = buf.get(i + 3).copied().unwrap_or(0);
+                            let qty = buf.get(i + 4).copied().unwrap_or(0);
+                            let item_id =
+                                u16::from_le_bytes([item_lo, item_hi]);
+
+                            if banks == 0 && qty >= 1 && qty <= 99 {
+                                key_pickup_slots.push(PickupSlot {
+                                    entry_index,
+                                    field_name: field_name.to_ascii_lowercase(),
+                                    opcode_off: off,
+                                    qty,
+                                    item_id,
+                                });
+                            }
+                        }
+
+                        let size = field::opcode_size_pc(&buf, i, scan_end);
+                        if size == 0 {
+                            break;
+                        }
+                        i += size;
+                    }
+                }
+            }
+
+            let key_item_placements =
+                build_key_item_placements(&key_pickup_slots, settings.seed, &field_order);
+
+            let mut field_index_log = String::new();
+            let mut field_pickups_rand_log = String::new();
+            let mut smtra_materia_pool: Vec<u8> = Vec::new();
+            let huge_perm = make_huge_materia_perm(settings.seed);
+            let mut full_item_pool = build_field_item_pool(&settings);
+            let mut field_item_pool = full_item_pool.clone();
+            let mut guaranteed_remaining: Vec<u16> = GUARANTEED_FIELD_ITEMS
+                .iter()
+                .copied()
+                .filter(|id| full_item_pool.contains(id))
+                .collect();
+
+            let key_item_flags = items::all_key_item_flags();
+
+            if !guaranteed_remaining.is_empty() {
+                field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
+            }
+
+            for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
+                let off_usize = entry.offset as usize;
+                const INNER_HEADER_SIZE: usize = 24;
+
+                if off_usize + INNER_HEADER_SIZE > flevel_bytes.len() {
+                    continue;
+                }
+
+                let header_name_bytes = &flevel_bytes[off_usize..off_usize + 20];
+                let nul_pos = header_name_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(header_name_bytes.len());
+                let trimmed = &header_name_bytes[..nul_pos];
+                let field_name = String::from_utf8_lossy(trimmed).trim_end().to_string();
+                if field_name.is_empty() {
+                    continue;
+                }
+
+                if field_name.eq_ignore_ascii_case("blackbg1")
+                    || field_name.eq_ignore_ascii_case("blackbg2")
+                    || field_name.eq_ignore_ascii_case("blackbg3")
+                    || field_name.eq_ignore_ascii_case("blackbg4")
+                    || field_name.eq_ignore_ascii_case("blackbg5")
+                    || field_name.eq_ignore_ascii_case("blackbg6")
+                {
+                    continue;
+                }
+
+                let size_bytes = &flevel_bytes[off_usize + 20..off_usize + 24];
+                let declared_len = u32::from_le_bytes([
+                    size_bytes[0],
+                    size_bytes[1],
+                    size_bytes[2],
+                    size_bytes[3],
+                ]) as usize;
+
+                let comp_start = off_usize + INNER_HEADER_SIZE;
+                let file_end = flevel_archive
+                    .entries
+                    .iter()
+                    .filter_map(|e| {
+                        if e.offset > entry.offset {
+                            Some(e.offset as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .min()
+                    .unwrap_or(flevel_bytes.len());
+
+                if comp_start >= file_end || file_end > flevel_bytes.len() {
+                    continue;
+                }
+
+                let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
+
                 if let Ok(mut buf) = field::lzs_decompress(&cmp_bytes) {
+                    // Track whether we changed the field *before* running the
+                    // normal pickup randomisation, so that pure script
+                    // rewrites (like converting the original Keystone BITON
+                    // source into a STITM chest) are still written back.
+                    let mut changed = false;
+
                     // Before doing any pickup randomisation, give the field
-                    // module a chance to rewrite the vanilla Keystone source
-                    // script (where Var[1][69] bit 2 is set) into a simple
-                    // MESSAGE+STITM+RET chest-style script. This allows the
-                    // randomiser to treat the former key location as a normal
-                    // pickup while md1stin now owns the Keystone BITON.
-                    if !field_name.eq_ignore_ascii_case("md1stin") {
-                        if field::rewrite_vanilla_keystone_source(&mut buf) {
-                            // Mark as changed so the recompressed field is
-                            // written back even if no further edits occur.
+                    // module a chance to apply a few targeted script
+                    // rewrites that convert specific key-item BITON sources
+                    // into simple chest-style scripts.
+                    if field_name.eq_ignore_ascii_case("clsin2_2") {
+                        // Emit a small debug scan of all BITON Var[1][69]
+                        // usages so we can cross-check against Makou.
+                        let debug = field::debug_scan_sc_keyitems(&buf);
+                        field_pickups_rand_log.push_str(&debug);
+
+                        // Then neutralise Dio's Keystone grant by
+                        // redirecting BITON Var[1][69] to a harmless local
+                        // var and blanking its nearby MESSAGE text. This
+                        // keeps the scene and other rewards intact while
+                        // ensuring only md1stin sets the Keystone bit.
+                        if field::neutralise_clsin2_2_keystone(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "neutralise_clsin2_2_keystone field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("blin65_1") {
+                        // Install Midgar Part #1/#2 helper scripts as
+                        // Entity 15/16 Script 30, and rewire their
+                        // original BITONs into REQ calls so the
+                        // randomiser can treat them as normal pickups.
+                        if field::install_blin65_midgar_part1_req_script(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_blin65_midgar_part1_req_script field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                        if field::install_blin65_midgar_part2_req_script(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_blin65_midgar_part2_req_script field={} applied\n",
+                                field_name,
+                            ));
                         }
                     }
 
@@ -826,7 +1127,6 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                     let mut total_stitm = 0usize;
                     let mut const_stitm = 0usize;
                     let mut const_itemish = 0usize;
-                    let mut changed = false;
 
                     if field_name.eq_ignore_ascii_case("md1stin") {
                         md1stin_decompressed_len = Some(buf.len());
@@ -859,83 +1159,70 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                             let qty = buf.get(i + 4).copied().unwrap_or(0);
                             let item_id =
                                 u16::from_le_bytes([item_lo, item_hi]);
+                            if let Some(flag) = key_item_placements.get(&(entry_index, off)) {
+                                let bit_mask = flag.bit;
+                                if bit_mask.count_ones() == 1 && off + 4 < buf.len() {
+                                    let bit_index = bit_mask.trailing_zeros() as u8;
+                                    let banks_byte = (flag.bank << 4) | 0;
 
-                            if banks == 0 {
-                                const_stitm += 1;
+                                    buf[off] = 0x82;
+                                    buf[off + 1] = banks_byte;
+                                    buf[off + 2] = flag.addr;
+                                    buf[off + 3] = bit_index;
+                                    buf[off + 4] = 0x5F;
+                                    changed = true;
 
-                                // For md1stin, convert the first constant STITM we see into a
-                                // Keystone key location by replacing it with BITON 1,0,Var[69],
-                                // bit=KeystoneBit plus a trailing NOP. This keeps the overall
-                                // opcode span at 5 bytes so the script remains aligned while
-                                // changing behaviour from "give item" to "set key flag".
-                                if field_name.eq_ignore_ascii_case("md1stin")
-                                    && !md1stin_keystone_proto_recorded
-                                {
-                                    if let Some(flag) = keystone_flag {
-                                        let bit_mask = flag.bit;
-                                        if bit_mask.count_ones() == 1 && off + 4 < buf.len() {
-                                            let bit_index = bit_mask.trailing_zeros() as u8;
-                                            let banks_byte = (flag.bank << 4) | 0;
+                                    let mut key_text_id: i32 = -1;
+                                    let mut key_text_patched = false;
 
-                                            buf[off] = 0x82; // BITON
-                                            buf[off + 1] = banks_byte;
-                                            buf[off + 2] = flag.addr;
-                                            buf[off + 3] = bit_index;
-                                            buf[off + 4] = 0x5F; // NOP (1-byte filler)
-                                            changed = true;
-
-                                            let mut key_text_id: i32 = -1;
-                                            let mut key_text_patched = false;
-
-                                            if let Some((texts_base, text_count, positions)) =
-                                                text_layout.as_mut()
-                                            {
-                                                if let Some((_, text_id)) =
-                                                    field::find_nearby_message(
-                                                        &buf,
-                                                        scan_start,
-                                                        scan_end,
-                                                        i,
-                                                        0xC0,
-                                                    )
-                                                {
-                                                    key_text_id = text_id as i32;
-                                                    key_text_patched =
-                                                        field::patch_key_text_in_place(
-                                                            &mut buf,
-                                                            *texts_base,
-                                                            *text_count,
-                                                            positions,
-                                                            text_id,
-                                                            flag.name,
-                                                        );
-                                                }
-                                            }
-
-                                            field_pickups_rand_log.push_str(&format!(
-                                                "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
-                                                field_name,
-                                                off,
-                                                flag.name,
-                                                flag.bank,
-                                                flag.addr,
-                                                flag.bit,
-                                                key_text_id,
-                                                key_text_patched,
-                                            ));
+                                    if let Some((texts_base, text_count, positions)) =
+                                        text_layout.as_mut()
+                                    {
+                                        if let Some((_, text_id)) =
+                                            field::find_nearby_message(
+                                                &buf,
+                                                scan_start,
+                                                scan_end,
+                                                i,
+                                                0xC0,
+                                            )
+                                        {
+                                            key_text_id = text_id as i32;
+                                            key_text_patched =
+                                                field::patch_key_text_in_place(
+                                                    &mut buf,
+                                                    *texts_base,
+                                                    *text_count,
+                                                    positions,
+                                                    text_id,
+                                                    flag.name,
+                                                );
                                         }
                                     }
 
-                                    md1stin_keystone_proto_recorded = true;
-                                    // Skip normal item randomisation for this opcode; we have
-                                    // turned it into a key location.
-                                    let size = field::opcode_size_pc(&buf, i, scan_end);
-                                    if size == 0 {
-                                        break;
-                                    }
-                                    i += size;
-                                    continue;
+                                    field_pickups_rand_log.push_str(&format!(
+                                        "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
+                                        field_name,
+                                        off,
+                                        flag.name,
+                                        flag.bank,
+                                        flag.addr,
+                                        flag.bit,
+                                        key_text_id,
+                                        key_text_patched,
+                                    ));
                                 }
+
+                                let size = field::opcode_size_pc(&buf, i, scan_end);
+                                if size == 0 {
+                                    break;
+                                }
+                                i += size;
+                                continue;
+                            }
+
+                            if banks == 0 {
+                                const_stitm += 1;
 
                                 if qty >= 1 && qty <= 99 && full_item_pool.contains(&item_id) {
                                     const_itemish += 1;
@@ -1273,7 +1560,11 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                                 }
                             }
                         } else if opcode == 0x82 || opcode == 0x83 || opcode == 0x84 {
-                            // BITON / BITOFF / BITXOR – remap Huge Materia bits on Var[1][66]
+                            // BITON / BITOFF / BITXOR – first, log any uses
+                            // that correspond to known key-item flags so we
+                            // can inspect them as potential chest-style
+                            // candidates; then apply Huge Materia remapping
+                            // for Var[1][66].
                             if i + 3 < scan_end {
                                 let banks = buf[i + 1];
                                 let bank1 = banks >> 4;
@@ -1281,6 +1572,42 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                                 let var = buf[i + 2];
                                 let pos = buf[i + 3];
 
+                                if opcode == 0x82 && bank2 == 0 {
+                                    let mask: u8 = 1u8 << (pos & 7);
+                                    if let Some(flag) = key_item_flags
+                                        .iter()
+                                        .find(|f| f.bank == bank1 && f.addr == var && f.bit == mask)
+                                    {
+                                        let mut msg_id_log: i32 = -1;
+                                        let mut has_msg = false;
+
+                                        if let Some((_, text_id)) = field::find_nearby_message(
+                                            &buf,
+                                            scan_start,
+                                            scan_end,
+                                            i,
+                                            0xC0,
+                                        ) {
+                                            msg_id_log = text_id as i32;
+                                            has_msg = true;
+                                        }
+
+                                        field_pickups_rand_log.push_str(&format!(
+                                            "key_bit field={} off=0x{:06X} key_name={} bank={} addr={} bit_mask=0x{:02X} bit_index={} has_msg={} msg_id={}\n",
+                                            field_name,
+                                            i,
+                                            flag.name,
+                                            flag.bank,
+                                            flag.addr,
+                                            flag.bit,
+                                            pos,
+                                            has_msg,
+                                            msg_id_log,
+                                        ));
+                                    }
+                                }
+
+                                // Huge Materia remap on Var[1][66].
                                 if bank1 == 1 && bank2 == 0 && var == 66 {
                                     let mut new_pos = pos;
                                     for (idx, &b) in HUGE_MATERIA_BITS.iter().enumerate() {

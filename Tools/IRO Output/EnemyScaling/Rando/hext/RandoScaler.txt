@@ -1,0 +1,14 @@
+#Scales Randomizer
+
+#Branch out from enemy scaling
+009170D6 = E8 66 00 00 00
+
+#Call adjuster
+00917141 = E8 EA 06 09 00
+
+#Adjuster code    Y/X     X->VV          Y->VV
+009A7830 = 50 0F B6 C6 6B C0 02 30 F6 6B D2 03 EB 04 D1 E8 D1 EA 66 3D 80 00 7D F6 66 81 FA 80 00 7D EF 88 C6 58 C3
+
+#Call adjuster from attack scaling
+009A77F1 = E8 3A 00 00 00
+009A77E1 = E8 4A 00 00 00

@@ -1,0 +1,6 @@
+
+#Check if the first character is tifa or cid, then set the party leader to that character or cloud
+00767376 = A0 30 02 DC 00 3C 02 0F 84 7C 00 00 00 3C 08 74 69 E9 82 00 00 00 8A 4D F4 C0 E1 03 80 25 96 0C DC 00 E7 08 0D 96 0C DC 00 8B 45 F4 8B E5 EB 74
+
+#Fix ocean teleporting
+00767415 = E9 72 FF FF FF

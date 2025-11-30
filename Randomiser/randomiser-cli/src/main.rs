@@ -33,14 +33,23 @@ struct Args {
     #[arg(long, default_value_t = true)]
     randomize_starting_weapons: bool,
 
+    #[arg(long, default_value_t = true)]
+    randomize_starting_accessories: bool,
+
+    #[arg(long, default_value_t = false)]
+    randomize_weapon_stats: bool,
+
+    #[arg(long, default_value_t = false)]
+    randomize_weapon_slots: bool,
+
+    #[arg(long, default_value_t = false)]
+    randomize_weapon_growth: bool,
+
     #[arg(long, default_value_t = false)]
     randomize_field_pickups: bool,
 
     #[arg(long, default_value_t = false)]
     debug: bool,
-
-    #[arg(long, default_value_t = false)]
-    export_iro: bool,
 
     /// Debug-only: decompress a single field LZS file and dump its
     /// Section1 / vEntityScripts layout. Normal randomisation is
@@ -84,8 +93,11 @@ fn main() {
         randomize_equipment: args.randomize_equipment,
         randomize_starting_materia: args.randomize_starting_materia,
         randomize_starting_weapons: args.randomize_starting_weapons,
+        randomize_starting_accessories: args.randomize_starting_accessories,
+        randomize_weapon_stats: args.randomize_weapon_stats,
+        randomize_weapon_slots: args.randomize_weapon_slots,
+        randomize_weapon_growth: args.randomize_weapon_growth,
         randomize_field_pickups: args.randomize_field_pickups,
-        export_iro: args.export_iro,
         debug: args.debug,
         input_path: args
             .input

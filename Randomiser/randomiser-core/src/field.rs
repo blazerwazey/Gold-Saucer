@@ -2332,6 +2332,93 @@ pub(crate) fn install_mkt_s3_pharmacy_group_helper(buf: &mut Vec<u8>) -> bool {
     install_wall_market_group_helper(buf, reward_scripts)
 }
 
+pub(crate) fn lzs_decompress_raw(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    // Direct port of qt-lzs-1.3 LZS::decompressAll (headerless) used by
+    // Makou Reactor and other FF7 tools. This expects only the compressed
+    // payload, without any 4-byte uncompressed-size header.
+
+    if data.is_empty() {
+        return Err("LZS stream is empty".to_string());
+    }
+
+    let file_size = data.len();
+    // Preallocate up to 5x compressed size, as in qt-lzs.
+    let size_alloc = std::cmp::min(file_size.saturating_mul(5), i32::MAX as usize);
+    let mut out: Vec<u8> = vec![0u8; size_alloc];
+    let mut cur_result: usize = 0;
+
+    // Ring buffer of size 4096, initialised to 0 for first 4078 bytes.
+    let mut text_buf = [0u8; 4096];
+    let mut cur_buff: usize = 4078;
+
+    let mut flag_byte: u16 = 0;
+    let mut pos: usize = 0;
+
+    loop {
+        // Load next flag byte when needed.
+        if ((flag_byte >> 1) & 0x100) == 0 {
+            if pos >= file_size {
+                out.truncate(cur_result);
+                return Ok(out);
+            }
+            flag_byte = (data[pos] as u16) | 0xFF00;
+            pos += 1;
+        } else {
+            flag_byte >>= 1;
+        }
+
+        if pos >= file_size {
+            out.truncate(cur_result);
+            return Ok(out);
+        }
+
+        if (flag_byte & 1) != 0 {
+            // Literal byte.
+            let c = data[pos];
+            pos += 1;
+
+            if cur_result >= out.len() {
+                out.push(c);
+            } else {
+                out[cur_result] = c;
+            }
+
+            text_buf[cur_buff] = c;
+            cur_buff = (cur_buff + 1) & 0x0FFF;
+            cur_result += 1;
+        } else {
+            // Back-reference.
+            if pos + 1 >= file_size {
+                out.truncate(cur_result);
+                return Ok(out);
+            }
+
+            let mut offset = data[pos] as u16;
+            let mut length = data[pos + 1] as u16;
+            pos += 2;
+
+            offset |= (length & 0xF0) << 4;
+            let end_index = (length & 0x0F) + 2 + offset;
+            let mut i = offset;
+
+            while i <= end_index {
+                let c = text_buf[(i & 0x0FFF) as usize];
+
+                if cur_result >= out.len() {
+                    out.push(c);
+                } else {
+                    out[cur_result] = c;
+                }
+
+                text_buf[cur_buff] = c;
+                cur_buff = (cur_buff + 1) & 0x0FFF;
+                cur_result += 1;
+                i += 1;
+            }
+        }
+    }
+}
+
 pub fn lzs_decompress(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
     if data.is_empty() {
         return Err("LZS stream is empty".to_string());

@@ -14,7 +14,6 @@ use randomiser_core::{run as run_randomiser, RandomiserSettings};
 struct GuiConfig {
     input_path: String,
     output_path: String,
-    export_iro: bool,
 }
 
 impl Default for GuiConfig {
@@ -22,7 +21,6 @@ impl Default for GuiConfig {
         Self {
             input_path: String::new(),
             output_path: String::new(),
-            export_iro: false,
         }
     }
 }
@@ -98,9 +96,11 @@ struct RandomiserApp {
     randomize_equipment: bool,
     randomize_starting_materia: bool,
     randomize_starting_weapons: bool,
+    randomize_starting_accessories: bool,
+    randomize_weapon_stats: bool,
+    randomize_weapon_slots: bool,
+    randomize_weapon_growth: bool,
     randomize_field_pickups: bool,
-
-    export_iro: bool,
 
     is_running: bool,
     log: String,
@@ -149,9 +149,11 @@ impl Default for RandomiserApp {
             randomize_equipment: true,
             randomize_starting_materia: true,
             randomize_starting_weapons: true,
+            randomize_starting_accessories: true,
+            randomize_weapon_stats: true,
+            randomize_weapon_slots: true,
+            randomize_weapon_growth: true,
             randomize_field_pickups: true,
-
-            export_iro: cfg.export_iro,
 
             is_running: false,
             log: String::new(),
@@ -286,9 +288,6 @@ impl eframe::App for RandomiserApp {
                             self.seed_text = seed.to_string();
                         }
                     });
-
-                    ui.separator();
-                    ui.checkbox(&mut self.export_iro, "Export IRO for 7th Heaven");
                 }
                 ConfigTab::Field => {
                     ui.label("Field randomisation:");
@@ -323,6 +322,24 @@ impl eframe::App for RandomiserApp {
                         &mut self.randomize_starting_weapons,
                         "Randomise starting weapons",
                     );
+                    ui.checkbox(
+                        &mut self.randomize_starting_accessories,
+                        "Randomise starting accessories",
+                    );
+                    ui.separator();
+                    ui.label("Global weapon randomisation:");
+                    ui.checkbox(
+                        &mut self.randomize_weapon_stats,
+                        "Randomise weapon stats (attack, hit, bonuses)",
+                    );
+                    ui.checkbox(
+                        &mut self.randomize_weapon_slots,
+                        "Randomise weapon materia slots",
+                    );
+                    ui.checkbox(
+                        &mut self.randomize_weapon_growth,
+                        "Randomise weapon AP growth",
+                    );
                 }
             }
 
@@ -343,7 +360,6 @@ impl eframe::App for RandomiserApp {
                 save_config(&GuiConfig {
                     input_path: self.input_path.clone(),
                     output_path: self.output_path.clone(),
-                    export_iro: self.export_iro,
                 });
 
                 let settings = RandomiserSettings {
@@ -354,8 +370,11 @@ impl eframe::App for RandomiserApp {
                     randomize_equipment: self.randomize_equipment,
                     randomize_starting_materia: self.randomize_starting_materia,
                     randomize_starting_weapons: self.randomize_starting_weapons,
+                    randomize_starting_accessories: self.randomize_starting_accessories,
+                    randomize_weapon_stats: self.randomize_weapon_stats,
+                    randomize_weapon_slots: self.randomize_weapon_slots,
+                    randomize_weapon_growth: self.randomize_weapon_growth,
                     randomize_field_pickups: self.randomize_field_pickups,
-                    export_iro: self.export_iro,
                     debug: false,
                     input_path: input,
                     output_path: output,

@@ -7,9 +7,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use walkdir::WalkDir;
-use zip::write::FileOptions;
-use zip::CompressionMethod;
 
 mod items;
 mod shops;
@@ -28,8 +25,11 @@ pub struct RandomiserSettings {
     pub randomize_equipment: bool,
     pub randomize_starting_materia: bool,
     pub randomize_starting_weapons: bool,
+    pub randomize_starting_accessories: bool,
+    pub randomize_weapon_stats: bool,
+    pub randomize_weapon_slots: bool,
+    pub randomize_weapon_growth: bool,
     pub randomize_field_pickups: bool,
-    pub export_iro: bool,
     pub debug: bool,
     pub input_path: PathBuf,
     pub output_path: PathBuf,
@@ -57,8 +57,6 @@ pub enum RandomiserError {
     Io(#[from] std::io::Error),
     #[error("configuration error: {0}")]
     Config(String),
-    #[error("ZIP error: {0}")]
-    Zip(#[from] zip::result::ZipError),
 }
 
 pub type Result<T> = std::result::Result<T, RandomiserError>;
@@ -81,45 +79,6 @@ fn find_first_existing(base: &Path, candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn export_as_iro(output_root: &Path, seed: u64) -> Result<PathBuf> {
-    if !output_root.exists() {
-        return Err(RandomiserError::Config(format!(
-            "output path does not exist for IRO export: {}",
-            output_root.display()
-        )));
-    }
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(output_root).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            files.push(path.to_path_buf());
-        }
-    }
-
-    let iro_name = format!("GoldSaucer_{}.iro", seed);
-    let iro_path = output_root.join(iro_name);
-
-    let file = std::fs::File::create(&iro_path)?;
-    let writer = std::io::BufWriter::new(file);
-    let mut zip = zip::ZipWriter::new(writer);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
-
-    for path in files {
-        let rel = match path.strip_prefix(output_root) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let name = rel.to_string_lossy().replace('\\', "/");
-        zip.start_file(name, options)?;
-        let data = fs::read(&path)?;
-        zip.write_all(&data)?;
-    }
-
-    zip.finish()?;
-    Ok(iro_path)
 }
 
 struct KernelFile {
@@ -371,7 +330,9 @@ fn parse_lgp_archive(raw: &[u8]) -> Result<LgpArchive> {
     let toc_len = file_count
         .checked_mul(entry_size)
         .ok_or_else(|| {
-            RandomiserError::Config("flevel.lgp file count is unreasonably large".to_string())
+            RandomiserError::Config(
+                "flevel.lgp file count is unreasonably large".to_string(),
+            )
         })?;
 
     if toc_start + toc_len > raw.len() {
@@ -599,8 +560,75 @@ fn compress_kernel_section(data: &[u8]) -> Result<(Vec<u8>, u16)> {
     Ok((cmp_data, raw_size_u16))
 }
 
+fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSettings) -> Result<()> {
+    if !settings.randomize_weapon_stats
+        && !settings.randomize_weapon_slots
+        && !settings.randomize_weapon_growth
+    {
+        return Ok(());
+    }
+
+    // Shuffle whole 44-byte weapon records within each weapon-data section
+    // (KERNEL.BIN section 6). This safely randomises stats, slots and AP
+    // growth together without needing to know individual field offsets.
+    const WEAPON_RECORD_SIZE: usize = 44;
+
+    for file in archive.files.iter_mut() {
+        if file.dir_id != 5 {
+            continue;
+        }
+
+        let mut data = decompress_kernel_section(file)?;
+        if data.len() < WEAPON_RECORD_SIZE || data.len() % WEAPON_RECORD_SIZE != 0 {
+            // Unexpected layout; leave this section untouched.
+            continue;
+        }
+
+        let record_count = data.len() / WEAPON_RECORD_SIZE;
+        if record_count <= 1 {
+            continue;
+        }
+
+        let mut indices: Vec<usize> = (0..record_count).collect();
+        let mut rng = StdRng::seed_from_u64(settings.seed ^ 0xDEAD_BEEF_u64 ^ (file.index as u64));
+        indices.shuffle(&mut rng);
+
+        let mut shuffled = vec![0u8; data.len()];
+        for (dst_idx, &src_idx) in indices.iter().enumerate() {
+            let src_off = src_idx * WEAPON_RECORD_SIZE;
+            let dst_off = dst_idx * WEAPON_RECORD_SIZE;
+            shuffled[dst_off..dst_off + WEAPON_RECORD_SIZE]
+                .copy_from_slice(&data[src_off..src_off + WEAPON_RECORD_SIZE]);
+        }
+
+        let (cmp_data, raw_size) = compress_kernel_section(&shuffled)?;
+        file.cmp_data = cmp_data;
+        file.raw_size = raw_size;
+    }
+
+    Ok(())
+}
+
+fn weapon_class_range_for_char(char_index: usize) -> Option<(u8, u8)> {
+    match char_index {
+        0 => Some((0x00, 0x0F)), // Cloud - swords
+        1 => Some((0x20, 0x2F)), // Barret - guns/arms
+        2 => Some((0x10, 0x1F)), // Tifa - gloves
+        3 => Some((0x3E, 0x48)), // Aeris - staves
+        4 => Some((0x30, 0x3D)), // Red XIII - clips
+        5 => Some((0x57, 0x64)), // Yuffie - shuriken
+        6 => Some((0x65, 0x71)), // Cait Sith - megaphones
+        7 => Some((0x72, 0x7E)), // Vincent - guns
+        8 => Some((0x49, 0x56)), // Cid - spears
+        _ => None,
+    }
+}
+
 fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &RandomiserSettings) {
-    if !settings.randomize_starting_materia {
+    if !settings.randomize_starting_materia
+        && !settings.randomize_starting_weapons
+        && !settings.randomize_starting_accessories
+    {
         return;
     }
 
@@ -610,8 +638,11 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
     const CLOUD_RECORD_OFFSET: usize = 0x0000; // savemap 0x0054
     const BARRET_RECORD_OFFSET: usize = 0x0084; // savemap 0x00D8
 
-    // Within a character record, these offsets store the equipped materia for
-    // weapon and armor. Each slot is 4 bytes (materia ID + AP or flags).
+    // Within a character record, these offsets store the equipped weapon/armor
+    // and their materia, as well as the equipped accessory.
+    const EQUIPPED_WEAPON_OFFSET: usize = 0x1C;
+    const EQUIPPED_ARMOR_OFFSET: usize = 0x1D;
+    const EQUIPPED_ACCESSORY_OFFSET: usize = 0x1E;
     const WEAPON_MATERIA_OFFSET: usize = 0x40;
     const ARMOR_MATERIA_OFFSET: usize = 0x60;
     const MATERIA_SLOT_SIZE: usize = 4;
@@ -637,6 +668,42 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
         || barret_armor_start + armor_region_len > kernel_data.len()
         || cloud_armor_start + armor_region_len > kernel_data.len()
     {
+        return;
+    }
+
+    // Optionally randomise starting weapons/accessories for all main characters.
+    let character_count = kernel_data.len() / CHARACTER_RECORD_SIZE;
+    let max_chars = std::cmp::min(character_count, 9);
+    if max_chars > 0 {
+        let mut rng_eq = StdRng::seed_from_u64(settings.seed ^ 0x7777_1111_u64);
+        for char_index in 0..max_chars {
+            let record_base = char_index * CHARACTER_RECORD_SIZE;
+            if settings.randomize_starting_weapons {
+                if let Some((start, end_incl)) = weapon_class_range_for_char(char_index) {
+                    let count = end_incl.wrapping_sub(start).wrapping_add(1);
+                    if count > 0 {
+                        let roll = rng_eq.gen_range(0..count);
+                        let new_weapon = start.wrapping_add(roll);
+                        let off = record_base + EQUIPPED_WEAPON_OFFSET;
+                        if off < kernel_data.len() {
+                            kernel_data[off] = new_weapon;
+                        }
+                    }
+                }
+            }
+
+            if settings.randomize_starting_accessories {
+                let off = record_base + EQUIPPED_ACCESSORY_OFFSET;
+                if off < kernel_data.len() {
+                    // Accessory indices 0x00-0x1F are valid according to the item tables.
+                    let new_acc: u8 = rng_eq.gen_range(0x00..=0x1F);
+                    kernel_data[off] = new_acc;
+                }
+            }
+        }
+    }
+
+    if !settings.randomize_starting_materia {
         return;
     }
 
@@ -782,6 +849,10 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     if settings.randomize_equipment
         || settings.randomize_starting_materia
         || settings.randomize_starting_weapons
+        || settings.randomize_starting_accessories
+        || settings.randomize_weapon_stats
+        || settings.randomize_weapon_slots
+        || settings.randomize_weapon_growth
     {
         if let Some(init_file) = kernel_archive
             .files
@@ -794,6 +865,11 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
             init_file.cmp_data = cmp_data;
             init_file.raw_size = raw_size;
         }
+
+        // When any of the weapon randomisation flags are enabled, also
+        // shuffle the weapon tables so stats/slots/growth are globally
+        // randomised across weapons.
+        randomize_weapon_tables(&mut kernel_archive, &settings)?;
     }
 
     let kernel2_src = find_first_existing(
@@ -853,6 +929,10 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     let new_kernel_bytes = if settings.randomize_equipment
         || settings.randomize_starting_materia
         || settings.randomize_starting_weapons
+        || settings.randomize_starting_accessories
+        || settings.randomize_weapon_stats
+        || settings.randomize_weapon_slots
+        || settings.randomize_weapon_growth
     {
         build_kernel_archive(&kernel_archive)?
     } else {
@@ -1794,8 +1874,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         if let Some(exe_src) = &exe_src {
             let exe_bytes = fs::read(exe_src)?;
             let hext = build_shops_hext(&exe_bytes, &settings)?;
-            let path = settings
-                .output_path
+            let path = out_root
                 .join("hext")
                 .join("ff7")
                 .join("en")
@@ -1891,32 +1970,6 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         log.push_str(&format!("shops.hext: {}\n", path.display()));
     } else {
         log.push_str("shops.hext: not generated (shop randomisation disabled)\n");
-    }
-
-    if settings.export_iro {
-        match export_as_iro(&out_root, settings.seed) {
-            Ok(p) => {
-                log.push_str(&format!("IRO export: {}\n", p.display()));
-
-                // After exporting, remove the on-disk data folder so that
-                // only the IRO (and optional debug logs) remain in the
-                // per-seed output directory.
-                let data_dir = out_root.join("data");
-                if data_dir.exists() {
-                    if let Err(e) = fs::remove_dir_all(&data_dir) {
-                        if settings.debug {
-                            log.push_str(&format!(
-                                "Failed to remove data directory after IRO export: {}\n",
-                                e
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log.push_str(&format!("IRO export failed: {}\n", e));
-            }
-        }
     }
 
     log.push_str("key item flags by variable (bank,addr):\n");

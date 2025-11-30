@@ -1,3 +1,4 @@
 # ignore folders
 RandomiserOutput
 GoldSaucer.png
+Randomiser/target/debug/

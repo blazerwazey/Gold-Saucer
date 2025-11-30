@@ -7,6 +7,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use walkdir::WalkDir;
+use zip::write::FileOptions;
+use zip::CompressionMethod;
 
 mod items;
 mod shops;
@@ -26,6 +29,8 @@ pub struct RandomiserSettings {
     pub randomize_starting_materia: bool,
     pub randomize_starting_weapons: bool,
     pub randomize_field_pickups: bool,
+    pub export_iro: bool,
+    pub debug: bool,
     pub input_path: PathBuf,
     pub output_path: PathBuf,
 }
@@ -52,6 +57,8 @@ pub enum RandomiserError {
     Io(#[from] std::io::Error),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("ZIP error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 pub type Result<T> = std::result::Result<T, RandomiserError>;
@@ -74,6 +81,45 @@ fn find_first_existing(base: &Path, candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn export_as_iro(output_root: &Path, seed: u64) -> Result<PathBuf> {
+    if !output_root.exists() {
+        return Err(RandomiserError::Config(format!(
+            "output path does not exist for IRO export: {}",
+            output_root.display()
+        )));
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(output_root).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() {
+            files.push(path.to_path_buf());
+        }
+    }
+
+    let iro_name = format!("GoldSaucer_{}.iro", seed);
+    let iro_path = output_root.join(iro_name);
+
+    let file = std::fs::File::create(&iro_path)?;
+    let writer = std::io::BufWriter::new(file);
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for path in files {
+        let rel = match path.strip_prefix(output_root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let name = rel.to_string_lossy().replace('\\', "/");
+        zip.start_file(name, options)?;
+        let data = fs::read(&path)?;
+        zip.write_all(&data)?;
+    }
+
+    zip.finish()?;
+    Ok(iro_path)
 }
 
 struct KernelFile {
@@ -694,6 +740,16 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         fs::create_dir_all(&settings.output_path)?;
     }
 
+    // All outputs for a given run go into a per-seed subfolder so that
+    // multiple runs do not collide and IRO export only needs to pack
+    // the files for this specific seed.
+    let out_root = settings
+        .output_path
+        .join(format!("GoldSaucer_{}", settings.seed));
+    if !out_root.exists() {
+        fs::create_dir_all(&out_root)?;
+    }
+
     let exe_src = if settings.randomize_shops {
         Some(
             find_first_existing(
@@ -786,8 +842,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         Option<usize>,
     )> = None;
 
-    let kernel_dest = settings
-        .output_path
+    let kernel_dest = out_root
         .join("data")
         .join(lang)
         .join("kernel")
@@ -805,8 +860,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     };
     fs::write(&kernel_dest, &new_kernel_bytes)?;
 
-    let kernel2_dest = settings
-        .output_path
+    let kernel2_dest = out_root
         .join("data")
         .join(lang)
         .join("kernel")
@@ -816,8 +870,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     }
     fs::copy(&kernel2_src, &kernel2_dest)?;
 
-    let scene_dest = settings
-        .output_path
+    let scene_dest = out_root
         .join("data")
         .join(lang)
         .join("battle")
@@ -852,10 +905,8 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     };
 
     let flevel_dest = flevel_src.as_ref().map(|_| {
-        settings
-            .output_path
+        out_root
             .join("data")
-            .join(lang)
             .join("field")
             .join("flevel.lgp")
     });
@@ -1661,13 +1712,13 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                 }
             }
 
-            let index_path = settings.output_path.join("field_stitm_index.txt");
-            let _ = fs::write(&index_path, field_index_log);
+            if settings.debug {
+                let index_path = out_root.join("field_stitm_index.txt");
+                let _ = fs::write(&index_path, field_index_log);
 
-            let pickups_rand_path = settings
-                .output_path
-                .join("field_pickups_randomized.txt");
-            let _ = fs::write(&pickups_rand_path, field_pickups_rand_log);
+                let pickups_rand_path = out_root.join("field_pickups_randomized.txt");
+                let _ = fs::write(&pickups_rand_path, field_pickups_rand_log);
+            }
         }
 
         let rebuilt_flevel_bytes =
@@ -1794,6 +1845,32 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         log.push_str("shops.hext: not generated (shop randomisation disabled)\n");
     }
 
+    if settings.export_iro {
+        match export_as_iro(&out_root, settings.seed) {
+            Ok(p) => {
+                log.push_str(&format!("IRO export: {}\n", p.display()));
+
+                // After exporting, remove the on-disk data folder so that
+                // only the IRO (and optional debug logs) remain in the
+                // per-seed output directory.
+                let data_dir = out_root.join("data");
+                if data_dir.exists() {
+                    if let Err(e) = fs::remove_dir_all(&data_dir) {
+                        if settings.debug {
+                            log.push_str(&format!(
+                                "Failed to remove data directory after IRO export: {}\n",
+                                e
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log.push_str(&format!("IRO export failed: {}\n", e));
+            }
+        }
+    }
+
     log.push_str("key item flags by variable (bank,addr):\n");
     for ((bank, addr), flags) in items::key_item_groups_by_var() {
         log.push_str(&format!("  Var[{}][{}]:", bank, addr));
@@ -1806,8 +1883,10 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         log.push('\n');
     }
 
-    let log_path = settings.output_path.join("spoiler_log.txt");
-    fs::write(log_path, log)?;
+    if settings.debug {
+        let log_path = out_root.join("spoiler_log.txt");
+        fs::write(log_path, log)?;
+    }
 
     Ok(())
 }

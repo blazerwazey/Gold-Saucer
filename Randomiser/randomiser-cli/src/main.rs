@@ -36,6 +36,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     randomize_field_pickups: bool,
 
+    #[arg(long, default_value_t = false)]
+    debug: bool,
+
+    #[arg(long, default_value_t = false)]
+    export_iro: bool,
+
     /// Debug-only: decompress a single field LZS file and dump its
     /// Section1 / vEntityScripts layout. Normal randomisation is
     /// skipped when this is provided.
@@ -79,6 +85,8 @@ fn main() {
         randomize_starting_materia: args.randomize_starting_materia,
         randomize_starting_weapons: args.randomize_starting_weapons,
         randomize_field_pickups: args.randomize_field_pickups,
+        export_iro: args.export_iro,
+        debug: args.debug,
         input_path: args
             .input
             .expect("input is required unless --debug-field-lzs is used"),

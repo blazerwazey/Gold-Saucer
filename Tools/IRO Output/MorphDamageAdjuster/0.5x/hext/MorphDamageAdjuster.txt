@@ -1,3 +1,0 @@
-
-#Default = 02, 1/8th regular attack damage. 10 would be normal attack damage
-005CA6DD = 08

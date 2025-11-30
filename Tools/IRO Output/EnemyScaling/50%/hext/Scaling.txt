@@ -1,6 +1,0 @@
-
-#Scaling numbers
-#Denominator
-009A7836 = 02
-#Numerator
-009A783B = 03

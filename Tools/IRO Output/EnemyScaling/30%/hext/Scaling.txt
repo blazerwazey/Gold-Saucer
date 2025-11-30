@@ -1,6 +1,0 @@
-
-#Scaling numbers
-#Denominator
-009A7836 = 0A
-#Numerator
-009A783B = 0D

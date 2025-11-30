@@ -1,0 +1,12 @@
+[package]
+name = "randomiser-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.26", default-features = false, features = ["glow"] }
+rand = "0.8"
+randomiser-core = { path = "../randomiser-core" }
+
+[profile.release]
+opt-level = 3

@@ -1,4 +1,4 @@
 # ignore folders
-# Tools/
-# Tool Source Code/
-RandomiserOutput/
+Tools
+Tool Source Code
+RandomiserOutput

@@ -2,5 +2,6 @@
 members = [
     "randomiser-core",
     "randomiser-cli",
+    "randomiser-gui",
 ]
 resolver = "2"

@@ -1,9 +1,0 @@
-..\ff7.exe
-
-#Level modifier  VV (Default=28(40)) higher=easier
-005CA8F5 = 83 C0 14
-
-#Make steals  VV this hard (default=64(100)) lower=easier
-005CA933 = B9 19 00 00 00
-
-#Can combine both to make levels affect steals more

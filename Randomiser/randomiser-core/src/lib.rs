@@ -24,11 +24,14 @@ pub struct RandomiserSettings {
     pub randomize_shops: bool,
     pub randomize_equipment: bool,
     pub randomize_starting_materia: bool,
+    pub starting_materia_all_types: bool,
     pub randomize_starting_weapons: bool,
+    pub randomize_starting_armor: bool,
     pub randomize_starting_accessories: bool,
     pub randomize_weapon_stats: bool,
     pub randomize_weapon_slots: bool,
     pub randomize_weapon_growth: bool,
+    pub keep_weapon_appearance: bool,
     pub randomize_field_pickups: bool,
     pub debug: bool,
     pub input_path: PathBuf,
@@ -627,6 +630,7 @@ fn weapon_class_range_for_char(char_index: usize) -> Option<(u8, u8)> {
 fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &RandomiserSettings) {
     if !settings.randomize_starting_materia
         && !settings.randomize_starting_weapons
+        && !settings.randomize_starting_armor
         && !settings.randomize_starting_accessories
     {
         return;
@@ -678,7 +682,7 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
         let mut rng_eq = StdRng::seed_from_u64(settings.seed ^ 0x7777_1111_u64);
         for char_index in 0..max_chars {
             let record_base = char_index * CHARACTER_RECORD_SIZE;
-            if settings.randomize_starting_weapons {
+            if settings.randomize_starting_weapons && !settings.keep_weapon_appearance {
                 if let Some((start, end_incl)) = weapon_class_range_for_char(char_index) {
                     let count = end_incl.wrapping_sub(start).wrapping_add(1);
                     if count > 0 {
@@ -689,6 +693,14 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
                             kernel_data[off] = new_weapon;
                         }
                     }
+                }
+            }
+
+            if settings.randomize_starting_armor {
+                let off = record_base + EQUIPPED_ARMOR_OFFSET;
+                if off < kernel_data.len() {
+                    let new_armor: u8 = rng_eq.gen_range(0x00..=0x1F);
+                    kernel_data[off] = new_armor;
                 }
             }
 
@@ -728,7 +740,13 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
     // looked up in the Save Materia List.
     const EARLY_SAFE_MATERIA_IDS: &[u8] = &[0x31, 0x35];
 
-    if !EARLY_SAFE_MATERIA_IDS.is_empty() {
+    let materia_pool: Vec<u8> = if settings.starting_materia_all_types {
+        (0x00u8..=0x5Au8).collect()
+    } else {
+        EARLY_SAFE_MATERIA_IDS.to_vec()
+    };
+
+    if !materia_pool.is_empty() {
         let mut rng = StdRng::seed_from_u64(settings.seed ^ 0xC1C10C1C_u64);
 
         // Fill Cloud's first two weapon materia slots.
@@ -742,8 +760,8 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
                 break;
             }
 
-            let materia_index = rng.gen_range(0..EARLY_SAFE_MATERIA_IDS.len());
-            let materia_id = EARLY_SAFE_MATERIA_IDS[materia_index];
+            let materia_index = rng.gen_range(0..materia_pool.len());
+            let materia_id = materia_pool[materia_index];
 
             // 1 byte ID + 3 bytes AP (all zero).
             kernel_data[slot_offset] = materia_id;
@@ -778,8 +796,8 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
                     && kernel_data[entry_offset + 2] == 0
                     && kernel_data[entry_offset + 3] == 0
                 {
-                    let materia_index = rng.gen_range(0..EARLY_SAFE_MATERIA_IDS.len());
-                    let materia_id = EARLY_SAFE_MATERIA_IDS[materia_index];
+                    let materia_index = rng.gen_range(0..materia_pool.len());
+                    let materia_id = materia_pool[materia_index];
 
                     kernel_data[entry_offset] = materia_id;
                     kernel_data[entry_offset + 1] = 0;
@@ -849,6 +867,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     if settings.randomize_equipment
         || settings.randomize_starting_materia
         || settings.randomize_starting_weapons
+        || settings.randomize_starting_armor
         || settings.randomize_starting_accessories
         || settings.randomize_weapon_stats
         || settings.randomize_weapon_slots
@@ -929,6 +948,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
     let new_kernel_bytes = if settings.randomize_equipment
         || settings.randomize_starting_materia
         || settings.randomize_starting_weapons
+        || settings.randomize_starting_armor
         || settings.randomize_starting_accessories
         || settings.randomize_weapon_stats
         || settings.randomize_weapon_slots
@@ -1045,6 +1065,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                     || field_name.eq_ignore_ascii_case("blackbg4")
                     || field_name.eq_ignore_ascii_case("blackbg5")
                     || field_name.eq_ignore_ascii_case("blackbg6")
+                    || field_name.eq_ignore_ascii_case("tin_1")
                 {
                     continue;
                 }
@@ -1159,6 +1180,7 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                     || field_name.eq_ignore_ascii_case("blackbg4")
                     || field_name.eq_ignore_ascii_case("blackbg5")
                     || field_name.eq_ignore_ascii_case("blackbg6")
+                    || field_name.eq_ignore_ascii_case("tin_1")
                 {
                     continue;
                 }

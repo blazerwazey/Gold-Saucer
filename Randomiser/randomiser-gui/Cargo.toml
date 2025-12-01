@@ -16,3 +16,7 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 
 [profile.release]
 opt-level = 3
+
+[[bin]]
+name = "GoldSaucer-GUI"
+path = "src/main.rs"

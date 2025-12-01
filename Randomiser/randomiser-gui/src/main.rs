@@ -95,11 +95,14 @@ struct RandomiserApp {
     randomize_shops: bool,
     randomize_equipment: bool,
     randomize_starting_materia: bool,
+    starting_materia_all_types: bool,
     randomize_starting_weapons: bool,
+    randomize_starting_armor: bool,
     randomize_starting_accessories: bool,
     randomize_weapon_stats: bool,
     randomize_weapon_slots: bool,
     randomize_weapon_growth: bool,
+    keep_weapon_appearance: bool,
     randomize_field_pickups: bool,
 
     is_running: bool,
@@ -144,15 +147,18 @@ impl Default for RandomiserApp {
             logo,
 
             randomize_enemy_drops: true,
-            randomize_enemies: true,
+            randomize_enemies: false,
             randomize_shops: true,
             randomize_equipment: true,
             randomize_starting_materia: true,
+            starting_materia_all_types: false,
             randomize_starting_weapons: true,
+            randomize_starting_armor: true,
             randomize_starting_accessories: true,
             randomize_weapon_stats: true,
             randomize_weapon_slots: true,
             randomize_weapon_growth: true,
+            keep_weapon_appearance: false,
             randomize_field_pickups: true,
 
             is_running: false,
@@ -319,12 +325,24 @@ impl eframe::App for RandomiserApp {
                         "Randomise starting materia",
                     );
                     ui.checkbox(
+                        &mut self.starting_materia_all_types,
+                        "Allow all materia types for starting materia",
+                    );
+                    ui.checkbox(
                         &mut self.randomize_starting_weapons,
                         "Randomise starting weapons",
                     );
                     ui.checkbox(
+                        &mut self.randomize_starting_armor,
+                        "Randomise starting armour",
+                    );
+                    ui.checkbox(
                         &mut self.randomize_starting_accessories,
                         "Randomise starting accessories",
+                    );
+                    ui.checkbox(
+                        &mut self.keep_weapon_appearance,
+                        "Keep original weapon appearance (don't change equipped weapons)",
                     );
                     ui.separator();
                     ui.label("Global weapon randomisation:");
@@ -369,11 +387,14 @@ impl eframe::App for RandomiserApp {
                     randomize_shops: self.randomize_shops,
                     randomize_equipment: self.randomize_equipment,
                     randomize_starting_materia: self.randomize_starting_materia,
+                    starting_materia_all_types: self.starting_materia_all_types,
                     randomize_starting_weapons: self.randomize_starting_weapons,
+                    randomize_starting_armor: self.randomize_starting_armor,
                     randomize_starting_accessories: self.randomize_starting_accessories,
                     randomize_weapon_stats: self.randomize_weapon_stats,
                     randomize_weapon_slots: self.randomize_weapon_slots,
                     randomize_weapon_growth: self.randomize_weapon_growth,
+                    keep_weapon_appearance: self.keep_weapon_appearance,
                     randomize_field_pickups: self.randomize_field_pickups,
                     debug: false,
                     input_path: input,
@@ -392,6 +413,13 @@ impl eframe::App for RandomiserApp {
                 self.log.push_str(&format!(
                     "Starting randomiser with seed {}...",
                     seed
+                ));
+                self.log.push_str(&format!(
+                    "\nOptions: enemies={} enemy_drops={} shops={} field_pickups={}",
+                    self.randomize_enemies,
+                    self.randomize_enemy_drops,
+                    self.randomize_shops,
+                    self.randomize_field_pickups,
                 ));
 
                 thread::spawn(move || {

@@ -242,7 +242,20 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
     const ENEMY_GIL_OFFSET: usize = 0xAC; // 4 bytes u32
 
     fn is_probable_boss(hp: u32, level: u8) -> bool {
-        hp >= 50_000 || level >= 70
+        // Be conservative: treat anything reasonably bulky or high-level as a
+        // probable boss so we avoid shuffling those scenes at all. This keeps
+        // story / scripted battles much more stable while still letting us
+        // randomise truly regular encounters.
+        if hp == 0 {
+            return false;
+        }
+        if hp >= 10_000 {
+            return true;
+        }
+        if level >= 45 {
+            return true;
+        }
+        false
     }
 
     fn scene_stat_scale_factor(scene_index: usize) -> f32 {
@@ -329,13 +342,11 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
                 continue;
             }
 
-            let src_start = ENEMY_DATA_OFFSET;
-            let src_end = ENEMY_DATA_OFFSET + ENEMIES_PER_SCENE * ENEMY_DATA_SIZE;
-            if src_end > src_scene.len() || src_end > dst_scene.len() {
-                continue;
-            }
-
-            dst_scene[src_start..src_end].copy_from_slice(&src_scene[src_start..src_end]);
+            // Swap the entire scene contents for candidate scenes rather than
+            // only the enemy stat blocks. This keeps formations, camera data
+            // and AI consistent with the enemies, avoiding mismatches that can
+            // lead to battle softlocks.
+            *dst_scene = src_scene.clone();
         }
     }
 

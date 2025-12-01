@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 randomiser-core = { path = "../randomiser-core" }
+
+[[bin]]
+name = "GoldSaucer-CLI"
+path = "src/main.rs"

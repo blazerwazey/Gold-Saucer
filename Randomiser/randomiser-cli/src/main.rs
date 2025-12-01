@@ -18,7 +18,7 @@ struct Args {
     #[arg(long, default_value_t = true)]
     randomize_enemy_drops: bool,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     randomize_enemies: bool,
 
     #[arg(long, default_value_t = true)]
@@ -30,8 +30,14 @@ struct Args {
     #[arg(long, default_value_t = true)]
     randomize_starting_materia: bool,
 
+    #[arg(long, default_value_t = false)]
+    starting_materia_all_types: bool,
+
     #[arg(long, default_value_t = true)]
     randomize_starting_weapons: bool,
+
+    #[arg(long, default_value_t = true)]
+    randomize_starting_armor: bool,
 
     #[arg(long, default_value_t = true)]
     randomize_starting_accessories: bool,
@@ -44,6 +50,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     randomize_weapon_growth: bool,
+
+    #[arg(long, default_value_t = false)]
+    keep_weapon_appearance: bool,
 
     #[arg(long, default_value_t = false)]
     randomize_field_pickups: bool,
@@ -92,11 +101,14 @@ fn main() {
         randomize_shops: args.randomize_shops,
         randomize_equipment: args.randomize_equipment,
         randomize_starting_materia: args.randomize_starting_materia,
+        starting_materia_all_types: args.starting_materia_all_types,
         randomize_starting_weapons: args.randomize_starting_weapons,
+        randomize_starting_armor: args.randomize_starting_armor,
         randomize_starting_accessories: args.randomize_starting_accessories,
         randomize_weapon_stats: args.randomize_weapon_stats,
         randomize_weapon_slots: args.randomize_weapon_slots,
         randomize_weapon_growth: args.randomize_weapon_growth,
+        keep_weapon_appearance: args.keep_weapon_appearance,
         randomize_field_pickups: args.randomize_field_pickups,
         debug: args.debug,
         input_path: args

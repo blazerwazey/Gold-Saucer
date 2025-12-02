@@ -1079,6 +1079,203 @@ pub(crate) fn install_blin65_midgar_part1_req_script(buf: &mut Vec<u8>) -> bool 
     replace_pc_section1(buf, &header, new_sec1)
 }
 
+pub(crate) fn install_subin1b_key_to_ancients_req_script(buf: &mut Vec<u8>) -> bool {
+    const ENTITY_ID: usize = 19;
+    const SCRIPT_INDEX: usize = 30;
+
+    let header = match parse_pc_section1(buf) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    if ENTITY_ID >= header.nb_groups as usize {
+        return false;
+    }
+
+    let mut scripts = match extract_pc_section1_scripts(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let (texts_blob, akao_blob) = match extract_pc_section1_texts_and_akao(buf, &header) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+    if SCRIPT_INDEX >= script_count {
+        return false;
+    }
+
+    let src = "MESSAGE 0 1\nSTITM 0 0x0000 1\nRET";
+    let helper_bytes = match compile_script_from_str(src) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return false,
+    };
+
+    scripts[ENTITY_ID][SCRIPT_INDEX] = Some(helper_bytes);
+
+    let mut patched = false;
+
+    if ENTITY_ID < header.nb_groups as usize {
+        let row = &mut scripts[ENTITY_ID];
+        let mut s = 16usize;
+        if s >= script_count {
+            s = 0;
+        }
+
+        if let Some(ref mut body) = row[s] {
+            let mut i = 0usize;
+            while i + 4 <= body.len() {
+                let op = body[i];
+                if op == 0x82 {
+                    let banks = body[i + 1];
+                    let bank1 = banks >> 4;
+                    let bank2 = banks & 0x0F;
+                    let var = body[i + 2];
+                    let bit_index = body[i + 3];
+                    if bank1 == 1 && bank2 == 0 && var == 67 && bit_index == 0 {
+                        body[i] = 0x01;
+                        body[i + 1] = ENTITY_ID as u8;
+                        body[i + 2] = 0x1E;
+                        body[i + 3] = 0x5F;
+                        patched = true;
+                        break;
+                    }
+                }
+
+                let sz = opcode_size_pc(body, i, body.len());
+                if sz == 0 {
+                    break;
+                }
+                i = i.saturating_add(sz);
+            }
+        }
+    }
+
+    if !patched {
+        return false;
+    }
+
+    let new_sec1 = match rebuild_pc_section1_from_scripts(&header, &scripts, &texts_blob, &akao_blob) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    replace_pc_section1(buf, &header, new_sec1)
+}
+
+pub(crate) fn install_blin65_extra_midgar_helpers(buf: &mut Vec<u8>) -> bool {
+	// blin65_1-specific helper: ensure entities 17–20 each have a simple
+	// chest-style Script 30 (MESSAGE+STITM+RET) that external logic can
+	// call via REQ 17,30–20,30 when performing key item swaps.
+	const SCRIPT_INDEX: usize = 30;
+
+	let header = match parse_pc_section1(buf) {
+		Some(h) => h,
+		None => return false,
+	};
+
+	let script_count: usize = if header.version == 0x0301 { 16 } else { 32 };
+	if SCRIPT_INDEX >= script_count {
+		return false;
+	}
+
+	let mut scripts = match extract_pc_section1_scripts(buf, &header) {
+		Some(v) => v,
+		None => return false,
+	};
+
+	let (texts_blob, akao_blob) = match extract_pc_section1_texts_and_akao(buf, &header) {
+		Some(v) => v,
+		None => return false,
+	};
+
+	// Shared helper body for all of these entities.
+	let src = "MESSAGE 0 1\nSTITM 0 0x0000 1\nRET";
+	let base_helper = match compile_script_from_str(src) {
+		Ok(b) if !b.is_empty() => b,
+		_ => return false,
+	};
+
+	let mut changed = false;
+	for entity_id in 17usize..=20usize {
+		if entity_id < header.nb_groups as usize {
+			// Install or overwrite Script 30 for this entity.
+			scripts[entity_id][SCRIPT_INDEX] = Some(base_helper.clone());
+			changed = true;
+		}
+	}
+
+	// Now rewire the original BITONs for Midgar Parts #3–#5 and Keycard 66
+	// to call these helpers via REQ 17/18/19/20,30 + NOP. The mappings
+	// below assume Var[1][68] bit indices 5,6,7 for Parts #3–#5 and bit
+	// index 1 for Keycard 66, matching the key item flag table.
+	let bit_mappings: &[(u8, u8)] = &[
+		(17, 5), // Midgar Part #3 -> Var[1][68] bit 5 (mask 0x20)
+		(18, 6), // Midgar Part #4 -> Var[1][68] bit 6 (mask 0x40)
+		(19, 7), // Midgar Part #5 -> Var[1][68] bit 7 (mask 0x80)
+		(20, 1), // Keycard 66     -> Var[1][68] bit 1 (mask 0x02)
+	];
+
+	for &(entity_id, bit_index) in bit_mappings {
+		if entity_id as usize >= header.nb_groups as usize {
+			continue;
+		}
+
+		let mut patched = false;
+
+		'outer: for g in 0..header.nb_groups as usize {
+			let row = &mut scripts[g];
+			for s in 0..script_count {
+				if let Some(ref mut body) = row[s] {
+					let mut i = 0usize;
+					while i + 4 <= body.len() {
+						let op = body[i];
+						if op == 0x82 {
+							let banks = body[i + 1];
+							let bank1 = banks >> 4;
+							let bank2 = banks & 0x0F;
+							let var = body[i + 2];
+							let bit = body[i + 3];
+							if bank1 == 1 && bank2 == 0 && var == 68 && bit == bit_index {
+								// Replace with REQ entity_id,30 + NOP (4 bytes).
+								body[i] = 0x01; // REQ
+								body[i + 1] = entity_id; // target entity
+								body[i + 2] = 0x1E; // priority 0, func 30
+								body[i + 3] = 0x5F; // NOP padding
+								patched = true;
+								break 'outer;
+							}
+						}
+
+						let sz = opcode_size_pc(body, i, body.len());
+						if sz == 0 {
+							break;
+						}
+						i = i.saturating_add(sz);
+					}
+				}
+			}
+		}
+
+		if patched {
+			changed = true;
+		}
+	}
+
+	if !changed {
+		return false;
+	}
+
+	let new_sec1 = match rebuild_pc_section1_from_scripts(&header, &scripts, &texts_blob, &akao_blob) {
+		Some(v) => v,
+		None => return false,
+	};
+
+	replace_pc_section1(buf, &header, new_sec1)
+}
+
 pub(crate) fn install_blin65_midgar_part2_req_script(buf: &mut Vec<u8>) -> bool {
     // blin65_1-specific helper: append a new chest-style script as
     // Entity 16 Script 30 (MESSAGE+STITM+BITON+RET) and rewire the

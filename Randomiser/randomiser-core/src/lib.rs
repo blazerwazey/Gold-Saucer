@@ -118,10 +118,18 @@ struct PickupSlot {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FieldZone {
     Midgar,
+    MidgarRaid,
     ShinraBuilding,
     TempleAndAncients,
     Glacier,
     LateGame,
+    WallMarket,
+    ClimbToShinraBuilding,
+    Nibelheim,
+    Kalm,
+    FarmAndMythrilMines,
+    FortCondor,
+    JunonUpperAndLower,
     Other,
 }
 
@@ -149,13 +157,75 @@ fn classify_field_zone(name: &str, _entry_index: usize) -> FieldZone {
         return FieldZone::LateGame;
     }
 
+    if n.starts_with("mkt")
+        || n.starts_with("onna")
+        || n.starts_with("mrkt")
+        || n.starts_with("colne")
+    {
+        return FieldZone::WallMarket;
+    }
+
+    if n.starts_with("wcrimb") {
+        return FieldZone::ClimbToShinraBuilding;
+    }
+
+    // Late-game Midgar raid maps.
+    if n == "md8_5"
+        || n == "md8_6"
+        || n == "md8_b1"
+        || n == "md8_b2"
+        || n == "sbwy4_22"
+        || n == "tunnel_4"
+        || n == "tunnel_5"
+        || n == "md8brdg2"
+        || n == "md8_32"
+        || n == "canon_1"
+        || n == "canon_2"
+    {
+        return FieldZone::MidgarRaid;
+    }
+
     if n.starts_with("md")
         || n.starts_with("nmkin")
         || n.starts_with("nnmid")
         || n.starts_with("elmin")
         || n.starts_with("mrkt")
+        || n.starts_with("smkin")
+        || n.starts_with("sbwy")
+        || n.starts_with("eal")
     {
         return FieldZone::Midgar;
+    }
+
+    if n.starts_with("niv")
+        || n.starts_with("nv")
+        || n.starts_with("sinin")
+        || n.starts_with("mtnvl")
+    {
+        return FieldZone::Nibelheim;
+    }
+
+    if n.starts_with("elm") {
+        return FieldZone::Kalm;
+    }
+
+    if n.starts_with("farm")
+        || n.starts_with("psd")
+        || n.starts_with("frmin")
+        || n.starts_with("frcyo")
+    {
+        return FieldZone::FarmAndMythrilMines;
+    }
+
+    if n.starts_with("con") {
+        return FieldZone::FortCondor;
+    }
+
+    if n.starts_with("jun")
+        || n.starts_with("uju")
+        || n.starts_with("pris")
+    {
+        return FieldZone::JunonUpperAndLower;
     }
 
     FieldZone::Other
@@ -182,25 +252,51 @@ fn key_can_appear_in_slot(
     };
 
     if name.starts_with("Keycard ") {
-        if zone != FieldZone::ShinraBuilding {
+        if !(zone == FieldZone::ShinraBuilding
+            || zone == FieldZone::Midgar
+            || zone == FieldZone::WallMarket)
+        {
+            return false;
+        }
+
+        if name == "Keycard 60" && !before("blin60_1") {
+            return false;
+        }
+        if name == "Keycard 62" && !before("blin62_1") {
+            return false;
+        }
+        if name == "Keycard 65" && !before("blin63_1") {
+            return false;
+        }
+        if name == "Keycard 66" && !before("blin66_1") {
+            return false;
+        }
+        if name == "Keycard 68" && !before("blin69_1") {
             return false;
         }
     }
 
     if name.starts_with("Midgar Part #") {
-        if zone != FieldZone::ShinraBuilding {
+        if !(zone == FieldZone::ShinraBuilding
+            || zone == FieldZone::Midgar
+            || zone == FieldZone::WallMarket)
+        {
+            return false;
+        }
+
+        if !before("blin65_1") {
             return false;
         }
     }
 
     if name == "Keystone" {
-        if !before("jtmpin1") {
+        if !before("jtempl") {
             return false;
         }
     }
 
     if name == "Key to Ancients" {
-        if !before("loslake3") {
+        if !before("snw_w") {
             return false;
         }
     }
@@ -212,7 +308,7 @@ fn key_can_appear_in_slot(
     }
 
     if name == "Glacier Map" || name == "Snowboard" {
-        if !before("snow") {
+        if !before("hyou1") {
             return false;
         }
     }
@@ -564,6 +660,9 @@ fn compress_kernel_section(data: &[u8]) -> Result<(Vec<u8>, u16)> {
 }
 
 fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSettings) -> Result<()> {
+    // This operates on the global weapon table (section 6). When
+    // keep_weapon_appearance is true we still shuffle stats/slots/growth, but
+    // we restore each weapon's original model index so visuals stay vanilla.
     if !settings.randomize_weapon_stats
         && !settings.randomize_weapon_slots
         && !settings.randomize_weapon_growth
@@ -575,6 +674,7 @@ fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSet
     // (KERNEL.BIN section 6). This safely randomises stats, slots and AP
     // growth together without needing to know individual field offsets.
     const WEAPON_RECORD_SIZE: usize = 44;
+    const MODEL_INDEX_OFFSET: usize = 12;
 
     for file in archive.files.iter_mut() {
         if file.dir_id != 5 {
@@ -602,6 +702,14 @@ fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSet
             let dst_off = dst_idx * WEAPON_RECORD_SIZE;
             shuffled[dst_off..dst_off + WEAPON_RECORD_SIZE]
                 .copy_from_slice(&data[src_off..src_off + WEAPON_RECORD_SIZE]);
+
+            if settings.keep_weapon_appearance {
+                let model_off = dst_off + MODEL_INDEX_OFFSET;
+                if model_off < data.len() && model_off < shuffled.len() {
+                    let original_model = data[model_off];
+                    shuffled[model_off] = original_model;
+                }
+            }
         }
 
         let (cmp_data, raw_size) = compress_kernel_section(&shuffled)?;
@@ -741,7 +849,14 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
     const EARLY_SAFE_MATERIA_IDS: &[u8] = &[0x31, 0x35];
 
     let materia_pool: Vec<u8> = if settings.starting_materia_all_types {
-        (0x00u8..=0x5Au8).collect()
+        // Use the full 0x00..=0x5A range but skip entries that are marked as
+        // unused/dummy in the item tables so we don't add blank materia.
+        (0x00u8..=0x5Au8)
+            .filter(|&id| {
+                let name = items::lookup_materia_name(id);
+                name != "(unused)" && name != "?"
+            })
+            .collect()
     } else {
         EARLY_SAFE_MATERIA_IDS.to_vec()
     };
@@ -1155,6 +1270,15 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                 field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
             }
 
+            // Guarantee up to three Battery (0x0055) pickups before wcrimb_1 by
+            // forcing eligible early STITM slots to that item ID.
+            let battery_item_id: u16 = 0x0055;
+            let battery_limit_index = field_order
+                .get("wcrimb_1")
+                .copied()
+                .unwrap_or(field_count.saturating_sub(1));
+            let mut guaranteed_batteries_remaining: u8 = 3;
+
             for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
                 let off_usize = entry.offset as usize;
                 const INNER_HEADER_SIZE: usize = 24;
@@ -1242,7 +1366,9 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                                 field_name,
                             ));
                         }
-                    } else if field_name.eq_ignore_ascii_case("blin65_1") {
+                    } else if field_name.eq_ignore_ascii_case("blin65_1")
+                        || field_name.eq_ignore_ascii_case("blin_65_1")
+                    {
                         // Install Midgar Part #1/#2 helper scripts as
                         // Entity 15/16 Script 30, and rewire their
                         // original BITONs into REQ calls so the
@@ -1258,6 +1384,21 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                             changed = true;
                             field_pickups_rand_log.push_str(&format!(
                                 "install_blin65_midgar_part2_req_script field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                        if field::install_blin65_extra_midgar_helpers(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_blin65_extra_midgar_helpers field={} applied\n",
+                                field_name,
+                            ));
+                        }
+                    } else if field_name.eq_ignore_ascii_case("subin_1b") {
+                        if field::install_subin1b_key_to_ancients_req_script(&mut buf) {
+                            changed = true;
+                            field_pickups_rand_log.push_str(&format!(
+                                "install_subin1b_key_to_ancients_req_script field={} applied\n",
                                 field_name,
                             ));
                         }
@@ -1430,7 +1571,13 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                                     if let Some(r) = rng.as_mut() {
                                         let mut new_item_id: u16;
 
-                                        if let Some(id) = guaranteed_remaining.pop() {
+                                        // First, guarantee up to three Batteries before wcrimb_1.
+                                        if guaranteed_batteries_remaining > 0
+                                            && entry_index <= battery_limit_index
+                                        {
+                                            new_item_id = battery_item_id;
+                                            guaranteed_batteries_remaining -= 1;
+                                        } else if let Some(id) = guaranteed_remaining.pop() {
                                             new_item_id = id;
                                         } else {
                                             if field_item_pool.is_empty() {

@@ -255,7 +255,7 @@ fn decode_enemy_name_from_scene_block(scene: &[u8], base: usize) -> Option<Strin
 
 fn is_named_boss_enemy(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    matches!(upper.as_str(), "GUARD SCORPION" | "LOST NUMBER")
+    matches!(upper.as_str(), "GUARD SCORPION" | "LOST NUMBER" | "PALMER")
 }
 
 pub(crate) fn randomize_enemy_formations_in_scene_archive(
@@ -292,22 +292,31 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
     }
 
     fn scene_stat_scale_factor(scene_index: usize) -> f32 {
-        // Leave the very earliest scenes essentially vanilla so the first
-        // fights are not overly punishing, then ramp stats more aggressively
-        // for mid/late scenes.
-        const EARLY_SAFE_SCENES: usize = 16;
+        // Make the early game noticeably easier, then ramp stats up slowly
+        // through Midgar and more sharply into late game.
+        const EASY_END_SCENE: usize = 64; // roughly covers early/Midgar content
+        const MID_END_SCENE: usize = 160;
+        const MAX_SCENE_INDEX: usize = 255;
 
-        if scene_index < EARLY_SAFE_SCENES {
-            return 1.0;
+        if scene_index <= EASY_END_SCENE {
+            // Early scenes: scale HP/EXP/Gil from ~0.7 up to 1.0 so the very
+            // start is forgiving and only reaches vanilla by the end of
+            // Midgar / early world.
+            let t = (scene_index as f32 / EASY_END_SCENE as f32).clamp(0.0, 1.0);
+            return 0.7 + t * 0.3;
         }
 
-        let max_index = 255.0_f32;
-        let t = ((scene_index.saturating_sub(EARLY_SAFE_SCENES)) as f32
-            / (max_index - EARLY_SAFE_SCENES as f32))
-            .clamp(0.0, 1.0);
+        if scene_index <= MID_END_SCENE {
+            // Mid-game: ramp gently from 1.0 up to ~1.4.
+            let span = (MID_END_SCENE - EASY_END_SCENE) as f32;
+            let t = ((scene_index - EASY_END_SCENE) as f32 / span).clamp(0.0, 1.0);
+            return 1.0 + t * 0.4;
+        }
 
-        // Scale from ~0.9 up to ~2.2 across the remaining scenes.
-        0.9 + t * 1.3
+        // Late game: ramp from ~1.4 up to ~2.2.
+        let span = (MAX_SCENE_INDEX - MID_END_SCENE) as f32;
+        let t = (scene_index.saturating_sub(MID_END_SCENE) as f32 / span).clamp(0.0, 1.0);
+        1.4 + t * 0.8
     }
 
     // Phase 1: shuffle non-boss enemy triplets (the three enemy data blocks
@@ -570,4 +579,35 @@ pub(crate) fn build_scene_archive(archive: &SceneArchive) -> Result<Vec<u8>> {
     }
 
     Ok(out)
+}
+
+pub(crate) fn randomize_scene_bin(
+    raw_scene: &[u8],
+    settings: &RandomiserSettings,
+) -> Result<(Vec<u8>, Option<(usize, usize)>)> {
+    if !settings.randomize_enemy_drops && !settings.randomize_enemies {
+        // No enemy-related randomisation enabled; return the original
+        // scene.bin bytes untouched and without a drop summary.
+        return Ok((raw_scene.to_vec(), None));
+    }
+
+    let mut archive = parse_scene_archive(raw_scene)?;
+
+    let mut summary: Option<(usize, usize)> = None;
+
+    if settings.randomize_enemy_drops {
+        randomize_enemy_drops_in_scene_archive(&mut archive, settings);
+        summary = Some(summarize_scene_enemy_drops(&archive));
+    }
+
+    if settings.randomize_enemies {
+        randomize_enemy_formations_in_scene_archive(&mut archive, settings);
+    }
+
+    if settings.randomize_enemy_drops || settings.randomize_enemies {
+        let new_scene_bytes = build_scene_archive(&archive)?;
+        Ok((new_scene_bytes, summary))
+    } else {
+        Ok((raw_scene.to_vec(), None))
+    }
 }

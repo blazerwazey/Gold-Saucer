@@ -47,11 +47,7 @@ use items::{
 };
 
 use scene::{
-    build_scene_archive,
-    parse_scene_archive,
-    randomize_enemy_drops_in_scene_archive,
-    randomize_enemy_formations_in_scene_archive,
-    summarize_scene_enemy_drops,
+    randomize_scene_bin,
 };
 
 #[derive(Debug, Error)]
@@ -363,6 +359,884 @@ fn build_key_item_placements(
     }
 
     placements
+}
+
+fn randomize_field_pickups_in_flevel(
+    flevel_bytes: &[u8],
+    flevel_archive: &LgpArchive,
+    settings: &RandomiserSettings,
+) -> Result<(
+    HashMap<String, Vec<u8>>,
+    Option<usize>,
+    Option<usize>,
+    String,
+    String,
+)> {
+    let field_count = flevel_archive.entries.len();
+
+    let mut md1stin_setword_offset: Option<usize> = None;
+    let mut md1stin_decompressed_len: Option<usize> = None;
+    let mut field_replacements: HashMap<String, Vec<u8>> = HashMap::new();
+
+    let mut field_order: HashMap<String, usize> = HashMap::new();
+    for (idx, entry) in flevel_archive.entries.iter().enumerate() {
+        let name = entry.name.to_ascii_lowercase();
+        field_order.entry(name).or_insert(idx);
+    }
+
+    let mut key_pickup_slots: Vec<PickupSlot> = Vec::new();
+
+    for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
+        let off_usize = entry.offset as usize;
+        const INNER_HEADER_SIZE: usize = 24;
+
+        if off_usize + INNER_HEADER_SIZE > flevel_bytes.len() {
+            continue;
+        }
+
+        let header_name_bytes = &flevel_bytes[off_usize..off_usize + 20];
+        let nul_pos = header_name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(header_name_bytes.len());
+        let trimmed = &header_name_bytes[..nul_pos];
+        let field_name = String::from_utf8_lossy(trimmed).trim_end().to_string();
+        if field_name.is_empty() {
+            continue;
+        }
+
+        // Skip known debug-only maps.
+        if field_name.eq_ignore_ascii_case("blackbg1")
+            || field_name.eq_ignore_ascii_case("blackbg2")
+            || field_name.eq_ignore_ascii_case("blackbg3")
+            || field_name.eq_ignore_ascii_case("blackbg4")
+            || field_name.eq_ignore_ascii_case("blackbg5")
+            || field_name.eq_ignore_ascii_case("blackbg6")
+            || field_name.eq_ignore_ascii_case("tin_1")
+        {
+            continue;
+        }
+
+        let size_bytes = &flevel_bytes[off_usize + 20..off_usize + 24];
+        let declared_len = u32::from_le_bytes([
+            size_bytes[0],
+            size_bytes[1],
+            size_bytes[2],
+            size_bytes[3],
+        ]) as usize;
+
+        let comp_start = off_usize + INNER_HEADER_SIZE;
+        let file_end = flevel_archive
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if e.offset > entry.offset {
+                    Some(e.offset as usize)
+                } else {
+                    None
+                }
+            })
+            .min()
+            .unwrap_or(flevel_bytes.len());
+
+        if comp_start >= file_end || file_end > flevel_bytes.len() {
+            continue;
+        }
+
+        let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
+
+        if let Ok(buf) = field::lzs_decompress(&cmp_bytes) {
+            let (scan_start, scan_end) =
+                field::get_pc_field_script_range(&buf).unwrap_or((0, buf.len()));
+
+            let mut i = scan_start;
+            while i < scan_end {
+                let opcode = buf[i];
+                if opcode == 0x58 {
+                    let off = i;
+                    let banks = buf.get(i + 1).copied().unwrap_or(0);
+                    let item_lo = buf.get(i + 2).copied().unwrap_or(0);
+                    let item_hi = buf.get(i + 3).copied().unwrap_or(0);
+                    let qty = buf.get(i + 4).copied().unwrap_or(0);
+                    let item_id = u16::from_le_bytes([item_lo, item_hi]);
+
+                    if banks == 0 && qty >= 1 && qty <= 99 {
+                        key_pickup_slots.push(PickupSlot {
+                            entry_index,
+                            field_name: field_name.to_ascii_lowercase(),
+                            opcode_off: off,
+                            qty,
+                            item_id,
+                        });
+                    }
+                }
+
+                let size = field::opcode_size_pc(&buf, i, scan_end);
+                if size == 0 {
+                    break;
+                }
+                i += size;
+            }
+        }
+    }
+
+    let key_item_placements =
+        build_key_item_placements(&key_pickup_slots, settings.seed, &field_order);
+
+    let mut field_index_log = String::new();
+    let mut field_pickups_rand_log = String::new();
+    let mut smtra_materia_pool: Vec<u8> = Vec::new();
+    let huge_perm = make_huge_materia_perm(settings.seed);
+    let mut full_item_pool = build_field_item_pool(&settings);
+    let mut field_item_pool = full_item_pool.clone();
+    let mut guaranteed_remaining: Vec<u16> = GUARANTEED_FIELD_ITEMS
+        .iter()
+        .copied()
+        .filter(|id| full_item_pool.contains(id))
+        .collect();
+
+    let key_item_flags = items::all_key_item_flags();
+
+    if !guaranteed_remaining.is_empty() {
+        field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
+    }
+
+    // Guarantee up to three Battery (0x0055) pickups before wcrimb_1 by
+    // forcing eligible early STITM slots to that item ID.
+    let battery_item_id: u16 = 0x0055;
+    let battery_limit_index = field_order
+        .get("wcrimb_1")
+        .copied()
+        .unwrap_or(field_count.saturating_sub(1));
+    let mut guaranteed_batteries_remaining: u8 = 3;
+
+    for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
+        let off_usize = entry.offset as usize;
+        const INNER_HEADER_SIZE: usize = 24;
+
+        if off_usize + INNER_HEADER_SIZE > flevel_bytes.len() {
+            continue;
+        }
+
+        let header_name_bytes = &flevel_bytes[off_usize..off_usize + 20];
+        let nul_pos = header_name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(header_name_bytes.len());
+        let trimmed = &header_name_bytes[..nul_pos];
+        let field_name = String::from_utf8_lossy(trimmed).trim_end().to_string();
+        if field_name.is_empty() {
+            continue;
+        }
+
+        if field_name.eq_ignore_ascii_case("blackbg1")
+            || field_name.eq_ignore_ascii_case("blackbg2")
+            || field_name.eq_ignore_ascii_case("blackbg3")
+            || field_name.eq_ignore_ascii_case("blackbg4")
+            || field_name.eq_ignore_ascii_case("blackbg5")
+            || field_name.eq_ignore_ascii_case("blackbg6")
+            || field_name.eq_ignore_ascii_case("tin_1")
+        {
+            continue;
+        }
+
+        let size_bytes = &flevel_bytes[off_usize + 20..off_usize + 24];
+        let declared_len = u32::from_le_bytes([
+            size_bytes[0],
+            size_bytes[1],
+            size_bytes[2],
+            size_bytes[3],
+        ]) as usize;
+
+        let comp_start = off_usize + INNER_HEADER_SIZE;
+        let file_end = flevel_archive
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if e.offset > entry.offset {
+                    Some(e.offset as usize)
+                } else {
+                    None
+                }
+            })
+            .min()
+            .unwrap_or(flevel_bytes.len());
+
+        if comp_start >= file_end || file_end > flevel_bytes.len() {
+            continue;
+        }
+
+        let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
+
+        if let Ok(mut buf) = field::lzs_decompress(&cmp_bytes) {
+            // Track whether we changed the field *before* running the
+            // normal pickup randomisation, so that pure script
+            // rewrites (like converting the original Keystone BITON
+            // source into a STITM chest) are still written back.
+            let mut changed = false;
+
+            // Before doing any pickup randomisation, give the field
+            // module a chance to apply a few targeted script
+            // rewrites that convert specific key-item BITON sources
+            // into simple chest-style scripts.
+            if field_name.eq_ignore_ascii_case("clsin2_2") {
+                // Emit a small debug scan of all BITON Var[1][69]
+                // usages so we can cross-check against Makou.
+                let debug = field::debug_scan_sc_keyitems(&buf);
+                field_pickups_rand_log.push_str(&debug);
+
+                // Then neutralise Dio's Keystone grant by
+                // redirecting BITON Var[1][69] to a harmless local
+                // var and blanking its nearby MESSAGE text. This
+                // keeps the scene and other rewards intact while
+                // ensuring only md1stin sets the Keystone bit.
+                if field::neutralise_clsin2_2_keystone(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "neutralise_clsin2_2_keystone field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("blin65_1")
+                || field_name.eq_ignore_ascii_case("blin_65_1")
+            {
+                // Install Midgar Part #1/#2 helper scripts as
+                // Entity 15/16 Script 30, and rewire their
+                // original BITONs into REQ calls so the
+                // randomiser can treat them as normal pickups.
+                if field::install_blin65_midgar_part1_req_script(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_blin65_midgar_part1_req_script field={} applied\n",
+                        field_name,
+                    ));
+                }
+                if field::install_blin65_midgar_part2_req_script(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_blin65_midgar_part2_req_script field={} applied\n",
+                        field_name,
+                    ));
+                }
+                if field::install_blin65_extra_midgar_helpers(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_blin65_extra_midgar_helpers field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("subin_1b") {
+                if field::install_subin1b_key_to_ancients_req_script(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_subin1b_key_to_ancients_req_script field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("mkt_s1") {
+                if field::install_mkt_s1_dress_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_mkt_s1_dress_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("mkt_mens") {
+                if field::install_mkt_mens_wig_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_mkt_mens_wig_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("mkt_m") {
+                if field::install_mkt_m_tiara_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_mkt_m_tiara_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("mktpb") {
+                if field::install_mktpb_cologne_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_mktpb_cologne_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("onna_52") {
+                if field::install_onna_52_underwear_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_onna_52_underwear_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            } else if field_name.eq_ignore_ascii_case("mkt_s3") {
+                if field::install_mkt_s3_pharmacy_group_helper(&mut buf) {
+                    changed = true;
+                    field_pickups_rand_log.push_str(&format!(
+                        "install_mkt_s3_pharmacy_group_helper field={} applied\n",
+                        field_name,
+                    ));
+                }
+            }
+
+            let (scan_start, scan_end) =
+                field::get_pc_field_script_range(&buf).unwrap_or((0, buf.len()));
+            let mut text_layout = field::get_pc_field_text_layout(&buf);
+            let mut empty_text_slots: Option<Vec<u8>> = text_layout.as_ref().map(
+                |(texts_base, text_count, positions)| {
+                    field::find_empty_text_slots(
+                        &buf,
+                        *texts_base,
+                        *text_count,
+                        positions,
+                    )
+                },
+            );
+
+            let mut total_stitm = 0usize;
+            let mut const_stitm = 0usize;
+            let mut const_itemish = 0usize;
+
+            if field_name.eq_ignore_ascii_case("md1stin") {
+                md1stin_decompressed_len = Some(buf.len());
+                if let Some(off) = field::patch_md1stin_for_early_materia(&mut buf) {
+                    md1stin_setword_offset = Some(off);
+                    changed = true;
+                }
+            }
+
+            let mut rng: Option<StdRng> = {
+                let mut h: u64 = 0xcbf29ce484222325u64;
+                for b in field_name.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001B3_u64);
+                }
+                let seed = settings.seed ^ h;
+                Some(StdRng::seed_from_u64(seed))
+            };
+
+            let mut i = scan_start;
+            while i < scan_end {
+                let opcode = buf[i];
+                if opcode == 0x58 {
+                    total_stitm += 1;
+
+                    let off = i;
+                    let banks = buf.get(i + 1).copied().unwrap_or(0);
+                    let item_lo = buf.get(i + 2).copied().unwrap_or(0);
+                    let item_hi = buf.get(i + 3).copied().unwrap_or(0);
+                    let qty = buf.get(i + 4).copied().unwrap_or(0);
+                    let item_id = u16::from_le_bytes([item_lo, item_hi]);
+                    if let Some(flag) = key_item_placements.get(&(entry_index, off)) {
+                        let bit_mask = flag.bit;
+                        if bit_mask.count_ones() == 1 && off + 4 < buf.len() {
+                            let bit_index = bit_mask.trailing_zeros() as u8;
+                            let banks_byte = (flag.bank << 4) | 0;
+
+                            buf[off] = 0x82;
+                            buf[off + 1] = banks_byte;
+                            buf[off + 2] = flag.addr;
+                            buf[off + 3] = bit_index;
+                            buf[off + 4] = 0x5F;
+                            changed = true;
+
+                            let mut key_text_id: i32 = -1;
+                            let mut key_text_patched = false;
+
+                            if let Some((texts_base, text_count, positions)) =
+                                text_layout.as_mut()
+                            {
+                                if let Some((_, text_id)) =
+                                    field::find_nearby_message(
+                                        &buf,
+                                        scan_start,
+                                        scan_end,
+                                        i,
+                                        0xC0,
+                                    )
+                                {
+                                    key_text_id = text_id as i32;
+                                    key_text_patched =
+                                        field::patch_key_text_in_place(
+                                            &mut buf,
+                                            *texts_base,
+                                            *text_count,
+                                            positions,
+                                            text_id,
+                                            flag.name,
+                                        );
+                                }
+                            }
+
+                            field_pickups_rand_log.push_str(&format!(
+                                "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
+                                field_name,
+                                off,
+                                flag.name,
+                                flag.bank,
+                                flag.addr,
+                                flag.bit,
+                                key_text_id,
+                                key_text_patched,
+                            ));
+                        }
+
+                        let size = field::opcode_size_pc(&buf, i, scan_end);
+                        if size == 0 {
+                            break;
+                        }
+                        i += size;
+                        continue;
+                    }
+
+                    if banks == 0 {
+                        const_stitm += 1;
+
+                        if qty >= 1 && qty <= 99 && full_item_pool.contains(&item_id) {
+                            const_itemish += 1;
+                            if let Some(r) = rng.as_mut() {
+                                let mut new_item_id: u16;
+
+                                // First, guarantee up to three Batteries before wcrimb_1.
+                                if guaranteed_batteries_remaining > 0
+                                    && entry_index <= battery_limit_index
+                                {
+                                    new_item_id = battery_item_id;
+                                    guaranteed_batteries_remaining -= 1;
+                                } else if let Some(id) = guaranteed_remaining.pop() {
+                                    new_item_id = id;
+                                } else {
+                                    if field_item_pool.is_empty() {
+                                        continue;
+                                    }
+                                    let new_item_idx = r.gen_range(0..field_item_pool.len());
+                                    new_item_id = field_item_pool[new_item_idx];
+                                }
+
+                                let new_bytes = new_item_id.to_le_bytes();
+                                if i + 4 < buf.len() {
+                                    buf[i + 2] = new_bytes[0];
+                                    buf[i + 3] = new_bytes[1];
+                                    changed = true;
+
+                                    let mut text_id_log: i32 = -1;
+                                    let mut text_patched = false;
+
+                                    if let Some((texts_base, text_count, positions)) =
+                                        text_layout.as_ref()
+                                    {
+                                        if let Some((msg_off, text_id)) =
+                                            field::find_nearby_message(
+                                                &buf,
+                                                scan_start,
+                                                scan_end,
+                                                i,
+                                                0xC0,
+                                            )
+                                        {
+                                            // Primary path: grow Section1 by appending a
+                                            // new dialog entry for this pickup and point
+                                            // MESSAGE at it. This avoids reusing shared
+                                            // text IDs so each randomized pickup can have
+                                            // its own name-based line.
+                                            if let Some(new_id) =
+                                                field::add_dialog_entry_for_pickup(
+                                                    &mut buf,
+                                                    qty,
+                                                    new_item_id,
+                                                    false,
+                                                )
+                                            {
+                                                let arg_off = msg_off + 2;
+                                                if arg_off < buf.len() {
+                                                    buf[arg_off] = new_id;
+                                                    changed = true;
+                                                }
+                                                text_id_log = new_id as i32;
+                                                text_patched = true;
+
+                                                text_layout =
+                                                    field::get_pc_field_text_layout(&buf);
+                                                empty_text_slots = text_layout
+                                                    .as_ref()
+                                                    .map(|(
+                                                        texts_base,
+                                                        text_count,
+                                                        positions,
+                                                    )| {
+                                                        field::find_empty_text_slots(
+                                                            &buf,
+                                                            *texts_base,
+                                                            *text_count,
+                                                            positions,
+                                                        )
+                                                    });
+                                            } else {
+                                                // Fallback: reuse an empty slot or patch
+                                                // the original text entry in place.
+                                                let original_text_id = text_id;
+                                                let mut target_text_id = text_id;
+                                                let mut allocated_new = false;
+
+                                                if let Some(ref mut slots) =
+                                                    empty_text_slots
+                                                {
+                                                    if let Some(new_id) = slots.pop() {
+                                                        target_text_id = new_id;
+                                                        allocated_new = true;
+
+                                                        let arg_off = msg_off + 2;
+                                                        if arg_off < buf.len() {
+                                                            buf[arg_off] =
+                                                                target_text_id;
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                }
+
+                                                let mut patched =
+                                                    field::patch_pickup_text_in_place(
+                                                        &mut buf,
+                                                        *texts_base,
+                                                        *text_count,
+                                                        positions,
+                                                        target_text_id,
+                                                        qty,
+                                                        new_item_id,
+                                                        false,
+                                                    );
+
+                                                if !patched && allocated_new {
+                                                    if let Some(ref mut slots) =
+                                                        empty_text_slots
+                                                    {
+                                                        slots.push(target_text_id);
+                                                    }
+
+                                                    let arg_off = msg_off + 2;
+                                                    if arg_off < buf.len() {
+                                                        buf[arg_off] = original_text_id;
+                                                        changed = true;
+                                                    }
+
+                                                    target_text_id = original_text_id;
+                                                    patched =
+                                                        field::patch_pickup_text_in_place(
+                                                            &mut buf,
+                                                            *texts_base,
+                                                            *text_count,
+                                                            positions,
+                                                            target_text_id,
+                                                            qty,
+                                                            new_item_id,
+                                                            false,
+                                                        );
+                                                }
+
+                                                text_id_log = target_text_id as i32;
+                                                text_patched = patched;
+                                            }
+                                        }
+                                    }
+
+                                    let display_name = lookup_inventory_name(new_item_id);
+                                    field_pickups_rand_log.push_str(&format!(
+                                        "field={} off=0x{:06X} old_item_id=0x{:04X} new_item_id=0x{:04X} qty={} text_id={} text_patched={} name={}\n",
+                                        field_name,
+                                        off,
+                                        item_id,
+                                        new_item_id,
+                                        qty,
+                                        text_id_log,
+                                        text_patched,
+                                        display_name,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                } else if opcode == 0x5B {
+                    // SMTRA (Set Materia) – handle constant materia grants where
+                    // both B1/B2 and B3/B4 are zero, so T is a literal materia ID
+                    // and AP is a literal 3-byte value.
+                    if let Some(r) = rng.as_mut() {
+                        if i + 6 < buf.len() {
+                            let off = i;
+                            let b1b2 = buf.get(i + 1).copied().unwrap_or(0);
+                            let b3b4 = buf.get(i + 2).copied().unwrap_or(0);
+                            let materia_id = buf.get(i + 3).copied().unwrap_or(0);
+
+                            // Only randomise when all bank nibbles are zero
+                            // (pure constant call).
+                            if b1b2 == 0 && b3b4 == 0 {
+                                if field::is_field_materia_id_allowed(materia_id)
+                                    && !smtra_materia_pool.contains(&materia_id)
+                                {
+                                    smtra_materia_pool.push(materia_id);
+                                }
+
+                                let mut new_materia_id = materia_id;
+                                let pool_len = smtra_materia_pool.len();
+                                if pool_len > 0 {
+                                    let idx = r.gen_range(0..pool_len);
+                                    new_materia_id = smtra_materia_pool[idx];
+
+                                    if pool_len > 1 && new_materia_id == materia_id {
+                                        let mut alt_idx = r.gen_range(0..(pool_len - 1));
+                                        if alt_idx >= idx {
+                                            alt_idx += 1;
+                                        }
+                                        new_materia_id = smtra_materia_pool[alt_idx];
+                                    }
+                                }
+
+                                if new_materia_id != materia_id {
+                                    buf[i + 3] = new_materia_id;
+                                    changed = true;
+                                }
+
+                                let mut text_id_log: i32 = -1;
+                                let mut text_patched = false;
+
+                                if let Some((texts_base, text_count, positions)) =
+                                    text_layout.as_ref()
+                                {
+                                    if let Some((msg_off, text_id)) =
+                                        field::find_nearby_message(
+                                            &buf,
+                                            scan_start,
+                                            scan_end,
+                                            i,
+                                            0xC0,
+                                        )
+                                    {
+                                        // Primary path: grow Section1 by appending a new
+                                        // dialog entry for this materia pickup and point
+                                        // MESSAGE at it.
+                                        if let Some(new_id) =
+                                            field::add_dialog_entry_for_pickup(
+                                                &mut buf,
+                                                1,
+                                                new_materia_id as u16,
+                                                true,
+                                            )
+                                        {
+                                            let arg_off = msg_off + 2;
+                                            if arg_off < buf.len() {
+                                                buf[arg_off] = new_id;
+                                                changed = true;
+                                            }
+                                            text_id_log = new_id as i32;
+                                            text_patched = true;
+
+                                            text_layout =
+                                                field::get_pc_field_text_layout(&buf);
+                                            empty_text_slots = text_layout
+                                                .as_ref()
+                                                .map(|(
+                                                    texts_base,
+                                                    text_count,
+                                                    positions,
+                                                )| {
+                                                    field::find_empty_text_slots(
+                                                        &buf,
+                                                        *texts_base,
+                                                        *text_count,
+                                                        positions,
+                                                    )
+                                                });
+                                        } else {
+                                            // Fallback: reuse an empty slot or patch the
+                                            // original text entry in place.
+                                            let original_text_id = text_id;
+                                            let mut target_text_id = text_id;
+                                            let mut allocated_new = false;
+
+                                            if let Some(ref mut slots) = empty_text_slots {
+                                                if let Some(new_id) = slots.pop() {
+                                                    target_text_id = new_id;
+                                                    allocated_new = true;
+
+                                                    let arg_off = msg_off + 2;
+                                                    if arg_off < buf.len() {
+                                                        buf[arg_off] = target_text_id;
+                                                        changed = true;
+                                                    }
+                                                }
+                                            }
+
+                                            let mut patched =
+                                                field::patch_pickup_text_in_place(
+                                                    &mut buf,
+                                                    *texts_base,
+                                                    *text_count,
+                                                    positions,
+                                                    target_text_id,
+                                                    1,
+                                                    new_materia_id as u16,
+                                                    true,
+                                                );
+
+                                            if !patched && allocated_new {
+                                                if let Some(ref mut slots) =
+                                                    empty_text_slots
+                                                {
+                                                    slots.push(target_text_id);
+                                                }
+
+                                                let arg_off = msg_off + 2;
+                                                if arg_off < buf.len() {
+                                                    buf[arg_off] = original_text_id;
+                                                    changed = true;
+                                                }
+
+                                                target_text_id = original_text_id;
+                                                patched =
+                                                    field::patch_pickup_text_in_place(
+                                                        &mut buf,
+                                                        *texts_base,
+                                                        *text_count,
+                                                        positions,
+                                                        target_text_id,
+                                                        1,
+                                                        new_materia_id as u16,
+                                                        true,
+                                                    );
+                                            }
+
+                                            text_id_log = target_text_id as i32;
+                                            text_patched = patched;
+                                        }
+                                    }
+                                }
+
+                                let materia_name =
+                                    items::lookup_materia_name(new_materia_id);
+                                field_pickups_rand_log.push_str(&format!(
+                                    "field={} off=0x{:06X} old_materia_id=0x{:02X} new_materia_id=0x{:02X} text_id={} text_patched={} name={}\n",
+                                    field_name,
+                                    off,
+                                    materia_id,
+                                    new_materia_id,
+                                    text_id_log,
+                                    text_patched,
+                                    materia_name,
+                                ));
+                            }
+                        }
+                    }
+                } else if opcode == 0x82 || opcode == 0x83 || opcode == 0x84 {
+                    // BITON / BITOFF / BITXOR – first, log any uses
+                    // that correspond to known key-item flags so we
+                    // can inspect them as potential chest-style
+                    // candidates; then apply Huge Materia remapping
+                    // for Var[1][66].
+                    if i + 3 < scan_end {
+                        let banks = buf[i + 1];
+                        let bank1 = banks >> 4;
+                        let bank2 = banks & 0x0F;
+                        let var = buf[i + 2];
+                        let pos = buf[i + 3];
+
+                        if opcode == 0x82 && bank2 == 0 {
+                            let mask: u8 = 1u8 << (pos & 7);
+                            if let Some(flag) = key_item_flags
+                                .iter()
+                                .find(|f| f.bank == bank1 && f.addr == var && f.bit == mask)
+                            {
+                                let mut msg_id_log: i32 = -1;
+                                let mut has_msg = false;
+
+                                if let Some((_, text_id)) = field::find_nearby_message(
+                                    &buf,
+                                    scan_start,
+                                    scan_end,
+                                    i,
+                                    0xC0,
+                                ) {
+                                    msg_id_log = text_id as i32;
+                                    has_msg = true;
+                                }
+
+                                field_pickups_rand_log.push_str(&format!(
+                                    "key_bit field={} off=0x{:06X} key_name={} bank={} addr={} bit_mask=0x{:02X} bit_index={} has_msg={} msg_id={}\n",
+                                    field_name,
+                                    i,
+                                    flag.name,
+                                    flag.bank,
+                                    flag.addr,
+                                    flag.bit,
+                                    pos,
+                                    has_msg,
+                                    msg_id_log,
+                                ));
+                            }
+                        }
+
+                        // Huge Materia remap on Var[1][66].
+                        if bank1 == 1 && bank2 == 0 && var == 66 {
+                            let mut new_pos = pos;
+                            for (idx, &b) in HUGE_MATERIA_BITS.iter().enumerate() {
+                                if pos == b {
+                                    new_pos = huge_perm[idx];
+                                    break;
+                                }
+                            }
+
+                            if new_pos != pos {
+                                buf[i + 3] = new_pos;
+                                changed = true;
+
+                                field_pickups_rand_log.push_str(&format!(
+                                    "field={} off=0x{:06X} opcode=0x{:02X} old_bit={} new_bit={}\n",
+                                    field_name,
+                                    i,
+                                    opcode,
+                                    pos,
+                                    new_pos,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let size = field::opcode_size_pc(&buf, i, scan_end);
+                if size == 0 {
+                    break;
+                }
+                i += size;
+            }
+
+            if const_itemish > 0 {
+                field_index_log.push_str(&format!(
+                    "field={} stitm_total={} stitm_constant={} stitm_constant_itemish={}\n",
+                    field_name, total_stitm, const_stitm, const_itemish
+                ));
+            }
+
+            if changed {
+                if let Ok(new_payload) = field::lzs_compress(&buf) {
+                    let new_lzs_size = new_payload.len() as u32;
+                    let mut body = Vec::with_capacity(4 + new_payload.len());
+                    body.extend_from_slice(&new_lzs_size.to_le_bytes());
+                    body.extend_from_slice(&new_payload);
+                    field_replacements.insert(field_name.to_ascii_lowercase(), body);
+                }
+            }
+        }
+    }
+
+    Ok((
+        field_replacements,
+        md1stin_decompressed_len,
+        md1stin_setword_offset,
+        field_index_log,
+        field_pickups_rand_log,
+    ))
 }
 
 // shop structures and helpers moved to shops module
@@ -1097,26 +1971,8 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
 
     let scene_drop_summary: Option<(usize, usize)> = {
         let scene_bytes = fs::read(&scene_src)?;
-        let mut scene_archive = parse_scene_archive(&scene_bytes)?;
-
-        let mut summary: Option<(usize, usize)> = None;
-
-        if settings.randomize_enemy_drops {
-            randomize_enemy_drops_in_scene_archive(&mut scene_archive, &settings);
-            summary = Some(summarize_scene_enemy_drops(&scene_archive));
-        }
-
-        if settings.randomize_enemies {
-            randomize_enemy_formations_in_scene_archive(&mut scene_archive, &settings);
-        }
-
-        if settings.randomize_enemy_drops || settings.randomize_enemies {
-            let new_scene_bytes = build_scene_archive(&scene_archive)?;
-            fs::write(&scene_dest, &new_scene_bytes)?;
-        } else {
-            fs::copy(&scene_src, &scene_dest)?;
-        }
-
+        let (new_scene_bytes, summary) = randomize_scene_bin(&scene_bytes, &settings)?;
+        fs::write(&scene_dest, &new_scene_bytes)?;
         summary
     };
 
@@ -1142,873 +1998,23 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
             .find(|e| e.name.eq_ignore_ascii_case("md1stin"))
             .map(|e| e.offset);
         let has_md1stin = md1stin_offset.is_some();
-        let mut md1stin_setword_offset: Option<usize> = None;
+
         let mut md1stin_decompressed_len: Option<usize> = None;
+        let mut md1stin_setword_offset: Option<usize> = None;
         let mut field_replacements: HashMap<String, Vec<u8>> = HashMap::new();
 
         if settings.randomize_field_pickups {
-            let mut field_order: HashMap<String, usize> = HashMap::new();
-            for (idx, entry) in flevel_archive.entries.iter().enumerate() {
-                let name = entry.name.to_ascii_lowercase();
-                field_order.entry(name).or_insert(idx);
-            }
-
-            let mut key_pickup_slots: Vec<PickupSlot> = Vec::new();
-
-            for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
-                let off_usize = entry.offset as usize;
-                const INNER_HEADER_SIZE: usize = 24;
-
-                if off_usize + INNER_HEADER_SIZE > flevel_bytes.len() {
-                    continue;
-                }
-
-                let header_name_bytes = &flevel_bytes[off_usize..off_usize + 20];
-                let nul_pos = header_name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(header_name_bytes.len());
-                let trimmed = &header_name_bytes[..nul_pos];
-                let field_name = String::from_utf8_lossy(trimmed).trim_end().to_string();
-                if field_name.is_empty() {
-                    continue;
-                }
-
-                // Skip known debug-only maps.
-                if field_name.eq_ignore_ascii_case("blackbg1")
-                    || field_name.eq_ignore_ascii_case("blackbg2")
-                    || field_name.eq_ignore_ascii_case("blackbg3")
-                    || field_name.eq_ignore_ascii_case("blackbg4")
-                    || field_name.eq_ignore_ascii_case("blackbg5")
-                    || field_name.eq_ignore_ascii_case("blackbg6")
-                    || field_name.eq_ignore_ascii_case("tin_1")
-                {
-                    continue;
-                }
-
-                let size_bytes = &flevel_bytes[off_usize + 20..off_usize + 24];
-                let declared_len = u32::from_le_bytes([
-                    size_bytes[0],
-                    size_bytes[1],
-                    size_bytes[2],
-                    size_bytes[3],
-                ]) as usize;
-
-                let comp_start = off_usize + INNER_HEADER_SIZE;
-                let file_end = flevel_archive
-                    .entries
-                    .iter()
-                    .filter_map(|e| {
-                        if e.offset > entry.offset {
-                            Some(e.offset as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .min()
-                    .unwrap_or(flevel_bytes.len());
-
-                if comp_start >= file_end || file_end > flevel_bytes.len() {
-                    continue;
-                }
-
-                let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
-
-                if let Ok(buf) = field::lzs_decompress(&cmp_bytes) {
-                    let (scan_start, scan_end) =
-                        field::get_pc_field_script_range(&buf).unwrap_or((0, buf.len()));
-
-                    let mut i = scan_start;
-                    while i < scan_end {
-                        let opcode = buf[i];
-                        if opcode == 0x58 {
-                            let off = i;
-                            let banks = buf.get(i + 1).copied().unwrap_or(0);
-                            let item_lo = buf.get(i + 2).copied().unwrap_or(0);
-                            let item_hi = buf.get(i + 3).copied().unwrap_or(0);
-                            let qty = buf.get(i + 4).copied().unwrap_or(0);
-                            let item_id =
-                                u16::from_le_bytes([item_lo, item_hi]);
-
-                            if banks == 0 && qty >= 1 && qty <= 99 {
-                                key_pickup_slots.push(PickupSlot {
-                                    entry_index,
-                                    field_name: field_name.to_ascii_lowercase(),
-                                    opcode_off: off,
-                                    qty,
-                                    item_id,
-                                });
-                            }
-                        }
-
-                        let size = field::opcode_size_pc(&buf, i, scan_end);
-                        if size == 0 {
-                            break;
-                        }
-                        i += size;
-                    }
-                }
-            }
-
-            let key_item_placements =
-                build_key_item_placements(&key_pickup_slots, settings.seed, &field_order);
-
-            let mut field_index_log = String::new();
-            let mut field_pickups_rand_log = String::new();
-            let mut smtra_materia_pool: Vec<u8> = Vec::new();
-            let huge_perm = make_huge_materia_perm(settings.seed);
-            let mut full_item_pool = build_field_item_pool(&settings);
-            let mut field_item_pool = full_item_pool.clone();
-            let mut guaranteed_remaining: Vec<u16> = GUARANTEED_FIELD_ITEMS
-                .iter()
-                .copied()
-                .filter(|id| full_item_pool.contains(id))
-                .collect();
-
-            let key_item_flags = items::all_key_item_flags();
-
-            if !guaranteed_remaining.is_empty() {
-                field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
-            }
-
-            // Guarantee up to three Battery (0x0055) pickups before wcrimb_1 by
-            // forcing eligible early STITM slots to that item ID.
-            let battery_item_id: u16 = 0x0055;
-            let battery_limit_index = field_order
-                .get("wcrimb_1")
-                .copied()
-                .unwrap_or(field_count.saturating_sub(1));
-            let mut guaranteed_batteries_remaining: u8 = 3;
-
-            for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
-                let off_usize = entry.offset as usize;
-                const INNER_HEADER_SIZE: usize = 24;
-
-                if off_usize + INNER_HEADER_SIZE > flevel_bytes.len() {
-                    continue;
-                }
-
-                let header_name_bytes = &flevel_bytes[off_usize..off_usize + 20];
-                let nul_pos = header_name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(header_name_bytes.len());
-                let trimmed = &header_name_bytes[..nul_pos];
-                let field_name = String::from_utf8_lossy(trimmed).trim_end().to_string();
-                if field_name.is_empty() {
-                    continue;
-                }
-
-                if field_name.eq_ignore_ascii_case("blackbg1")
-                    || field_name.eq_ignore_ascii_case("blackbg2")
-                    || field_name.eq_ignore_ascii_case("blackbg3")
-                    || field_name.eq_ignore_ascii_case("blackbg4")
-                    || field_name.eq_ignore_ascii_case("blackbg5")
-                    || field_name.eq_ignore_ascii_case("blackbg6")
-                    || field_name.eq_ignore_ascii_case("tin_1")
-                {
-                    continue;
-                }
-
-                let size_bytes = &flevel_bytes[off_usize + 20..off_usize + 24];
-                let declared_len = u32::from_le_bytes([
-                    size_bytes[0],
-                    size_bytes[1],
-                    size_bytes[2],
-                    size_bytes[3],
-                ]) as usize;
-
-                let comp_start = off_usize + INNER_HEADER_SIZE;
-                let file_end = flevel_archive
-                    .entries
-                    .iter()
-                    .filter_map(|e| {
-                        if e.offset > entry.offset {
-                            Some(e.offset as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .min()
-                    .unwrap_or(flevel_bytes.len());
-
-                if comp_start >= file_end || file_end > flevel_bytes.len() {
-                    continue;
-                }
-
-                let cmp_bytes = flevel_bytes[comp_start..file_end].to_vec();
-
-                if let Ok(mut buf) = field::lzs_decompress(&cmp_bytes) {
-                    // Track whether we changed the field *before* running the
-                    // normal pickup randomisation, so that pure script
-                    // rewrites (like converting the original Keystone BITON
-                    // source into a STITM chest) are still written back.
-                    let mut changed = false;
-
-                    // Before doing any pickup randomisation, give the field
-                    // module a chance to apply a few targeted script
-                    // rewrites that convert specific key-item BITON sources
-                    // into simple chest-style scripts.
-                    if field_name.eq_ignore_ascii_case("clsin2_2") {
-                        // Emit a small debug scan of all BITON Var[1][69]
-                        // usages so we can cross-check against Makou.
-                        let debug = field::debug_scan_sc_keyitems(&buf);
-                        field_pickups_rand_log.push_str(&debug);
-
-                        // Then neutralise Dio's Keystone grant by
-                        // redirecting BITON Var[1][69] to a harmless local
-                        // var and blanking its nearby MESSAGE text. This
-                        // keeps the scene and other rewards intact while
-                        // ensuring only md1stin sets the Keystone bit.
-                        if field::neutralise_clsin2_2_keystone(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "neutralise_clsin2_2_keystone field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("blin65_1")
-                        || field_name.eq_ignore_ascii_case("blin_65_1")
-                    {
-                        // Install Midgar Part #1/#2 helper scripts as
-                        // Entity 15/16 Script 30, and rewire their
-                        // original BITONs into REQ calls so the
-                        // randomiser can treat them as normal pickups.
-                        if field::install_blin65_midgar_part1_req_script(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_blin65_midgar_part1_req_script field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                        if field::install_blin65_midgar_part2_req_script(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_blin65_midgar_part2_req_script field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                        if field::install_blin65_extra_midgar_helpers(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_blin65_extra_midgar_helpers field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("subin_1b") {
-                        if field::install_subin1b_key_to_ancients_req_script(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_subin1b_key_to_ancients_req_script field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("mkt_s1") {
-                        if field::install_mkt_s1_dress_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_mkt_s1_dress_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("mkt_mens") {
-                        if field::install_mkt_mens_wig_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_mkt_mens_wig_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("mkt_m") {
-                        if field::install_mkt_m_tiara_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_mkt_m_tiara_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("mktpb") {
-                        if field::install_mktpb_cologne_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_mktpb_cologne_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("onna_52") {
-                        if field::install_onna_52_underwear_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_onna_52_underwear_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    } else if field_name.eq_ignore_ascii_case("mkt_s3") {
-                        if field::install_mkt_s3_pharmacy_group_helper(&mut buf) {
-                            changed = true;
-                            field_pickups_rand_log.push_str(&format!(
-                                "install_mkt_s3_pharmacy_group_helper field={} applied\n",
-                                field_name,
-                            ));
-                        }
-                    }
-
-                    let (scan_start, scan_end) =
-                        field::get_pc_field_script_range(&buf).unwrap_or((0, buf.len()));
-                    let mut text_layout = field::get_pc_field_text_layout(&buf);
-                    let mut empty_text_slots: Option<Vec<u8>> = text_layout.as_ref().map(
-                        |(texts_base, text_count, positions)| {
-                            field::find_empty_text_slots(
-                                &buf,
-                                *texts_base,
-                                *text_count,
-                                positions,
-                            )
-                        },
-                    );
-
-                    let mut total_stitm = 0usize;
-                    let mut const_stitm = 0usize;
-                    let mut const_itemish = 0usize;
-
-                    if field_name.eq_ignore_ascii_case("md1stin") {
-                        md1stin_decompressed_len = Some(buf.len());
-                        if let Some(off) = field::patch_md1stin_for_early_materia(&mut buf) {
-                            md1stin_setword_offset = Some(off);
-                            changed = true;
-                        }
-                    }
-
-                    let mut rng: Option<StdRng> = {
-                        let mut h: u64 = 0xcbf29ce484222325u64;
-                        for b in field_name.as_bytes() {
-                            h ^= *b as u64;
-                            h = h.wrapping_mul(0x100000001B3_u64);
-                        }
-                        let seed = settings.seed ^ h;
-                        Some(StdRng::seed_from_u64(seed))
-                    };
-
-                    let mut i = scan_start;
-                    while i < scan_end {
-                        let opcode = buf[i];
-                        if opcode == 0x58 {
-                            total_stitm += 1;
-
-                            let off = i;
-                            let banks = buf.get(i + 1).copied().unwrap_or(0);
-                            let item_lo = buf.get(i + 2).copied().unwrap_or(0);
-                            let item_hi = buf.get(i + 3).copied().unwrap_or(0);
-                            let qty = buf.get(i + 4).copied().unwrap_or(0);
-                            let item_id =
-                                u16::from_le_bytes([item_lo, item_hi]);
-                            if let Some(flag) = key_item_placements.get(&(entry_index, off)) {
-                                let bit_mask = flag.bit;
-                                if bit_mask.count_ones() == 1 && off + 4 < buf.len() {
-                                    let bit_index = bit_mask.trailing_zeros() as u8;
-                                    let banks_byte = (flag.bank << 4) | 0;
-
-                                    buf[off] = 0x82;
-                                    buf[off + 1] = banks_byte;
-                                    buf[off + 2] = flag.addr;
-                                    buf[off + 3] = bit_index;
-                                    buf[off + 4] = 0x5F;
-                                    changed = true;
-
-                                    let mut key_text_id: i32 = -1;
-                                    let mut key_text_patched = false;
-
-                                    if let Some((texts_base, text_count, positions)) =
-                                        text_layout.as_mut()
-                                    {
-                                        if let Some((_, text_id)) =
-                                            field::find_nearby_message(
-                                                &buf,
-                                                scan_start,
-                                                scan_end,
-                                                i,
-                                                0xC0,
-                                            )
-                                        {
-                                            key_text_id = text_id as i32;
-                                            key_text_patched =
-                                                field::patch_key_text_in_place(
-                                                    &mut buf,
-                                                    *texts_base,
-                                                    *text_count,
-                                                    positions,
-                                                    text_id,
-                                                    flag.name,
-                                                );
-                                        }
-                                    }
-
-                                    field_pickups_rand_log.push_str(&format!(
-                                        "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
-                                        field_name,
-                                        off,
-                                        flag.name,
-                                        flag.bank,
-                                        flag.addr,
-                                        flag.bit,
-                                        key_text_id,
-                                        key_text_patched,
-                                    ));
-                                }
-
-                                let size = field::opcode_size_pc(&buf, i, scan_end);
-                                if size == 0 {
-                                    break;
-                                }
-                                i += size;
-                                continue;
-                            }
-
-                            if banks == 0 {
-                                const_stitm += 1;
-
-                                if qty >= 1 && qty <= 99 && full_item_pool.contains(&item_id) {
-                                    const_itemish += 1;
-                                    if let Some(r) = rng.as_mut() {
-                                        let mut new_item_id: u16;
-
-                                        // First, guarantee up to three Batteries before wcrimb_1.
-                                        if guaranteed_batteries_remaining > 0
-                                            && entry_index <= battery_limit_index
-                                        {
-                                            new_item_id = battery_item_id;
-                                            guaranteed_batteries_remaining -= 1;
-                                        } else if let Some(id) = guaranteed_remaining.pop() {
-                                            new_item_id = id;
-                                        } else {
-                                            if field_item_pool.is_empty() {
-                                                continue;
-                                            }
-                                            let new_item_idx =
-                                                r.gen_range(0..field_item_pool.len());
-                                            new_item_id = field_item_pool[new_item_idx];
-                                        }
-
-                                        let new_bytes = new_item_id.to_le_bytes();
-                                        if i + 4 < buf.len() {
-                                            buf[i + 2] = new_bytes[0];
-                                            buf[i + 3] = new_bytes[1];
-                                            changed = true;
-
-                                            let mut text_id_log: i32 = -1;
-                                            let mut text_patched = false;
-
-                                            if let Some((texts_base, text_count, positions)) =
-                                                text_layout.as_ref()
-                                            {
-                                                if let Some((msg_off, text_id)) =
-                                                    field::find_nearby_message(
-                                                        &buf,
-                                                        scan_start,
-                                                        scan_end,
-                                                        i,
-                                                        0xC0,
-                                                    )
-                                                {
-                                                    // Primary path: grow Section1 by appending a
-                                                    // new dialog entry for this pickup and point
-                                                    // MESSAGE at it. This avoids reusing shared
-                                                    // text IDs so each randomized pickup can have
-                                                    // its own name-based line.
-                                                    if let Some(new_id) =
-                                                        field::add_dialog_entry_for_pickup(
-                                                            &mut buf,
-                                                            qty,
-                                                            new_item_id,
-                                                            false,
-                                                        )
-                                                    {
-                                                        let arg_off = msg_off + 2;
-                                                        if arg_off < buf.len() {
-                                                            buf[arg_off] = new_id;
-                                                            changed = true;
-                                                        }
-                                                        text_id_log = new_id as i32;
-                                                        text_patched = true;
-
-                                                        text_layout =
-                                                            field::get_pc_field_text_layout(
-                                                                &buf,
-                                                            );
-                                                        empty_text_slots = text_layout
-                                                            .as_ref()
-                                                            .map(|(
-                                                                texts_base,
-                                                                text_count,
-                                                                positions,
-                                                            )| {
-                                                                field::find_empty_text_slots(
-                                                                    &buf,
-                                                                    *texts_base,
-                                                                    *text_count,
-                                                                    positions,
-                                                                )
-                                                            });
-                                                    } else {
-                                                        // Fallback: reuse an empty slot or patch
-                                                        // the original text entry in place.
-                                                        let original_text_id = text_id;
-                                                        let mut target_text_id = text_id;
-                                                        let mut allocated_new = false;
-
-                                                        if let Some(ref mut slots) =
-                                                            empty_text_slots
-                                                        {
-                                                            if let Some(new_id) = slots.pop() {
-                                                                target_text_id = new_id;
-                                                                allocated_new = true;
-
-                                                                let arg_off = msg_off + 2;
-                                                                if arg_off < buf.len() {
-                                                                    buf[arg_off] =
-                                                                        target_text_id;
-                                                                    changed = true;
-                                                                }
-                                                            }
-                                                        }
-
-                                                        let mut patched =
-                                                            field::patch_pickup_text_in_place(
-                                                                &mut buf,
-                                                                *texts_base,
-                                                                *text_count,
-                                                                positions,
-                                                                target_text_id,
-                                                                qty,
-                                                                new_item_id,
-                                                                false,
-                                                            );
-
-                                                        if !patched && allocated_new {
-                                                            if let Some(ref mut slots) =
-                                                                empty_text_slots
-                                                            {
-                                                                slots.push(target_text_id);
-                                                            }
-
-                                                            let arg_off = msg_off + 2;
-                                                            if arg_off < buf.len() {
-                                                                buf[arg_off] =
-                                                                    original_text_id;
-                                                                changed = true;
-                                                            }
-
-                                                            target_text_id = original_text_id;
-                                                            patched =
-                                                                field::patch_pickup_text_in_place(
-                                                                    &mut buf,
-                                                                    *texts_base,
-                                                                    *text_count,
-                                                                    positions,
-                                                                    target_text_id,
-                                                                    qty,
-                                                                    new_item_id,
-                                                                    false,
-                                                                );
-                                                        }
-
-                                                        text_id_log = target_text_id as i32;
-                                                        text_patched = patched;
-                                                    }
-                                                }
-                                            }
-
-                                            let display_name =
-                                                lookup_inventory_name(new_item_id);
-                                            field_pickups_rand_log.push_str(&format!(
-                                                "field={} off=0x{:06X} old_item_id=0x{:04X} new_item_id=0x{:04X} qty={} text_id={} text_patched={} name={}\n",
-                                                field_name,
-                                                off,
-                                                item_id,
-                                                new_item_id,
-                                                qty,
-                                                text_id_log,
-                                                text_patched,
-                                                display_name,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        } else if opcode == 0x5B {
-                            // SMTRA (Set Materia) – handle constant materia grants where
-                            // both B1/B2 and B3/B4 are zero, so T is a literal materia ID
-                            // and AP is a literal 3-byte value.
-                            if let Some(r) = rng.as_mut() {
-                                if i + 6 < buf.len() {
-                                    let off = i;
-                                    let b1b2 = buf.get(i + 1).copied().unwrap_or(0);
-                                    let b3b4 = buf.get(i + 2).copied().unwrap_or(0);
-                                    let materia_id = buf.get(i + 3).copied().unwrap_or(0);
-
-                                    // Only randomise when all bank nibbles are zero
-                                    // (pure constant call).
-                                    if b1b2 == 0 && b3b4 == 0 {
-                                        if field::is_field_materia_id_allowed(materia_id)
-                                            && !smtra_materia_pool.contains(&materia_id)
-                                        {
-                                            smtra_materia_pool.push(materia_id);
-                                        }
-
-                                        let mut new_materia_id = materia_id;
-                                        let pool_len = smtra_materia_pool.len();
-                                        if pool_len > 0 {
-                                            let idx = r.gen_range(0..pool_len);
-                                            new_materia_id = smtra_materia_pool[idx];
-
-                                            if pool_len > 1 && new_materia_id == materia_id {
-                                                let mut alt_idx = r.gen_range(0..(pool_len - 1));
-                                                if alt_idx >= idx {
-                                                    alt_idx += 1;
-                                                }
-                                                new_materia_id = smtra_materia_pool[alt_idx];
-                                            }
-                                        }
-
-                                        if new_materia_id != materia_id {
-                                            buf[i + 3] = new_materia_id;
-                                            changed = true;
-                                        }
-
-                                        let mut text_id_log: i32 = -1;
-                                        let mut text_patched = false;
-
-                                        if let Some((texts_base, text_count, positions)) =
-                                            text_layout.as_ref()
-                                        {
-                                            if let Some((msg_off, text_id)) =
-                                                field::find_nearby_message(
-                                                    &buf,
-                                                    scan_start,
-                                                    scan_end,
-                                                    i,
-                                                    0xC0,
-                                                )
-                                            {
-                                                // Primary path: grow Section1 by appending a new
-                                                // dialog entry for this materia pickup and point
-                                                // MESSAGE at it.
-                                                if let Some(new_id) =
-                                                    field::add_dialog_entry_for_pickup(
-                                                        &mut buf,
-                                                        1,
-                                                        new_materia_id as u16,
-                                                        true,
-                                                    )
-                                                {
-                                                    let arg_off = msg_off + 2;
-                                                    if arg_off < buf.len() {
-                                                        buf[arg_off] = new_id;
-                                                        changed = true;
-                                                    }
-                                                    text_id_log = new_id as i32;
-                                                    text_patched = true;
-
-                                                    text_layout =
-                                                        field::get_pc_field_text_layout(&buf);
-                                                    empty_text_slots = text_layout
-                                                        .as_ref()
-                                                        .map(|(
-                                                            texts_base,
-                                                            text_count,
-                                                            positions,
-                                                        )| {
-                                                            field::find_empty_text_slots(
-                                                                &buf,
-                                                                *texts_base,
-                                                                *text_count,
-                                                                positions,
-                                                            )
-                                                        });
-                                                } else {
-                                                    // Fallback: reuse an empty slot or patch the
-                                                    // original text entry in place.
-                                                    let original_text_id = text_id;
-                                                    let mut target_text_id = text_id;
-                                                    let mut allocated_new = false;
-
-                                                    if let Some(ref mut slots) =
-                                                        empty_text_slots
-                                                    {
-                                                        if let Some(new_id) = slots.pop() {
-                                                            target_text_id = new_id;
-                                                            allocated_new = true;
-
-                                                            let arg_off = msg_off + 2;
-                                                            if arg_off < buf.len() {
-                                                                buf[arg_off] =
-                                                                    target_text_id;
-                                                                changed = true;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    let mut patched =
-                                                        field::patch_pickup_text_in_place(
-                                                            &mut buf,
-                                                            *texts_base,
-                                                            *text_count,
-                                                            positions,
-                                                            target_text_id,
-                                                            1,
-                                                            new_materia_id as u16,
-                                                            true,
-                                                        );
-
-                                                    if !patched && allocated_new {
-                                                        if let Some(ref mut slots) =
-                                                            empty_text_slots
-                                                        {
-                                                            slots.push(target_text_id);
-                                                        }
-
-                                                        let arg_off = msg_off + 2;
-                                                        if arg_off < buf.len() {
-                                                            buf[arg_off] = original_text_id;
-                                                            changed = true;
-                                                        }
-
-                                                        target_text_id = original_text_id;
-                                                        patched =
-                                                            field::patch_pickup_text_in_place(
-                                                                &mut buf,
-                                                                *texts_base,
-                                                                *text_count,
-                                                                positions,
-                                                                target_text_id,
-                                                                1,
-                                                                new_materia_id as u16,
-                                                                true,
-                                                            );
-                                                    }
-
-                                                    text_id_log = target_text_id as i32;
-                                                    text_patched = patched;
-                                                }
-                                            }
-                                        }
-
-                                        let materia_name =
-                                            items::lookup_materia_name(new_materia_id);
-                                        field_pickups_rand_log.push_str(&format!(
-                                            "field={} off=0x{:06X} old_materia_id=0x{:02X} new_materia_id=0x{:02X} text_id={} text_patched={} name={}\n",
-                                            field_name,
-                                            off,
-                                            materia_id,
-                                            new_materia_id,
-                                            text_id_log,
-                                            text_patched,
-                                            materia_name,
-                                        ));
-                                    }
-                                }
-                            }
-                        } else if opcode == 0x82 || opcode == 0x83 || opcode == 0x84 {
-                            // BITON / BITOFF / BITXOR – first, log any uses
-                            // that correspond to known key-item flags so we
-                            // can inspect them as potential chest-style
-                            // candidates; then apply Huge Materia remapping
-                            // for Var[1][66].
-                            if i + 3 < scan_end {
-                                let banks = buf[i + 1];
-                                let bank1 = banks >> 4;
-                                let bank2 = banks & 0x0F;
-                                let var = buf[i + 2];
-                                let pos = buf[i + 3];
-
-                                if opcode == 0x82 && bank2 == 0 {
-                                    let mask: u8 = 1u8 << (pos & 7);
-                                    if let Some(flag) = key_item_flags
-                                        .iter()
-                                        .find(|f| f.bank == bank1 && f.addr == var && f.bit == mask)
-                                    {
-                                        let mut msg_id_log: i32 = -1;
-                                        let mut has_msg = false;
-
-                                        if let Some((_, text_id)) = field::find_nearby_message(
-                                            &buf,
-                                            scan_start,
-                                            scan_end,
-                                            i,
-                                            0xC0,
-                                        ) {
-                                            msg_id_log = text_id as i32;
-                                            has_msg = true;
-                                        }
-
-                                        field_pickups_rand_log.push_str(&format!(
-                                            "key_bit field={} off=0x{:06X} key_name={} bank={} addr={} bit_mask=0x{:02X} bit_index={} has_msg={} msg_id={}\n",
-                                            field_name,
-                                            i,
-                                            flag.name,
-                                            flag.bank,
-                                            flag.addr,
-                                            flag.bit,
-                                            pos,
-                                            has_msg,
-                                            msg_id_log,
-                                        ));
-                                    }
-                                }
-
-                                // Huge Materia remap on Var[1][66].
-                                if bank1 == 1 && bank2 == 0 && var == 66 {
-                                    let mut new_pos = pos;
-                                    for (idx, &b) in HUGE_MATERIA_BITS.iter().enumerate() {
-                                        if pos == b {
-                                            new_pos = huge_perm[idx];
-                                            break;
-                                        }
-                                    }
-
-                                    if new_pos != pos {
-                                        buf[i + 3] = new_pos;
-                                        changed = true;
-
-                                        field_pickups_rand_log.push_str(&format!(
-                                            "field={} off=0x{:06X} opcode=0x{:02X} old_bit={} new_bit={}\n",
-                                            field_name,
-                                            i,
-                                            opcode,
-                                            pos,
-                                            new_pos,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        let size = field::opcode_size_pc(&buf, i, scan_end);
-                        if size == 0 {
-                            break;
-                        }
-                        i += size;
-                    }
-
-                    if const_itemish > 0 {
-                        field_index_log.push_str(&format!(
-                            "field={} stitm_total={} stitm_constant={} stitm_constant_itemish={}\n",
-                            field_name, total_stitm, const_stitm, const_itemish
-                        ));
-                    }
-
-                    if changed {
-                        if let Ok(new_payload) = field::lzs_compress(&buf) {
-                            let new_lzs_size = new_payload.len() as u32;
-                            let mut body = Vec::with_capacity(4 + new_payload.len());
-                            body.extend_from_slice(&new_lzs_size.to_le_bytes());
-                            body.extend_from_slice(&new_payload);
-                            field_replacements
-                                .insert(field_name.to_ascii_lowercase(), body);
-                        }
-                    }
-                }
-            }
+            let (
+                replacements,
+                md1stin_len,
+                md1stin_setword,
+                field_index_log,
+                field_pickups_rand_log,
+            ) = randomize_field_pickups_in_flevel(&flevel_bytes, &flevel_archive, &settings)?;
+
+            field_replacements = replacements;
+            md1stin_decompressed_len = md1stin_len;
+            md1stin_setword_offset = md1stin_setword;
 
             if settings.debug {
                 let index_path = out_root.join("field_stitm_index.txt");

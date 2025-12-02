@@ -225,6 +225,39 @@ pub(crate) fn randomize_enemy_drops_in_scene_archive(
     }
 }
 
+fn decode_enemy_name_from_scene_block(scene: &[u8], base: usize) -> Option<String> {
+    const ENEMY_NAME_OFFSET: usize = 0x00;
+    const ENEMY_NAME_LEN: usize = 32;
+
+    if base + ENEMY_NAME_OFFSET + ENEMY_NAME_LEN > scene.len() {
+        return None;
+    }
+
+    let bytes = &scene[base + ENEMY_NAME_OFFSET..base + ENEMY_NAME_OFFSET + ENEMY_NAME_LEN];
+    let mut out = String::new();
+
+    for &code in bytes {
+        if code == 0xFF {
+            break;
+        }
+        let ch = code.wrapping_add(0x20);
+        if (0x20..=0x7E).contains(&ch) {
+            out.push(ch as char);
+        }
+    }
+
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn is_named_boss_enemy(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(upper.as_str(), "GUARD SCORPION" | "LOST NUMBER")
+}
+
 pub(crate) fn randomize_enemy_formations_in_scene_archive(
     archive: &mut SceneArchive,
     settings: &RandomiserSettings,
@@ -259,19 +292,39 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
     }
 
     fn scene_stat_scale_factor(scene_index: usize) -> f32 {
-        // Map scene index 0..=255 roughly into a scale in [0.9, 1.8]. This is
-        // intentionally conservative for a first pass.
-        let t = (scene_index as f32 / 255.0).clamp(0.0, 1.0);
-        0.9 + t * 0.9
+        // Leave the very earliest scenes essentially vanilla so the first
+        // fights are not overly punishing, then ramp stats more aggressively
+        // for mid/late scenes.
+        const EARLY_SAFE_SCENES: usize = 16;
+
+        if scene_index < EARLY_SAFE_SCENES {
+            return 1.0;
+        }
+
+        let max_index = 255.0_f32;
+        let t = ((scene_index.saturating_sub(EARLY_SAFE_SCENES)) as f32
+            / (max_index - EARLY_SAFE_SCENES as f32))
+            .clamp(0.0, 1.0);
+
+        // Scale from ~0.9 up to ~2.2 across the remaining scenes.
+        0.9 + t * 1.3
     }
 
     // Phase 1: shuffle non-boss enemy triplets (the three enemy data blocks
     // per scene) across scenes to change which enemies appear where, without
     // touching scenes that contain probable bosses.
 
+    const EARLY_SAFE_SCENES: usize = 16;
+
     let mut candidate_scenes: Vec<usize> = Vec::new();
 
     for (scene_index, scene) in archive.scenes.iter().enumerate() {
+        // Do not randomise the very earliest scenes so that the first few
+        // battles stay close to vanilla in both formations and stats.
+        if scene_index < EARLY_SAFE_SCENES {
+            continue;
+        }
+
         if scene.len() != NEW_SCENE_SIZE {
             continue;
         }
@@ -281,6 +334,13 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
             let base = ENEMY_DATA_OFFSET + enemy_index * ENEMY_DATA_SIZE;
             if base + ENEMY_DATA_SIZE > scene.len() {
                 continue;
+            }
+
+            if let Some(name) = decode_enemy_name_from_scene_block(scene, base) {
+                if is_named_boss_enemy(&name) {
+                    has_boss = true;
+                    break;
+                }
             }
 
             let level_off = base + ENEMY_LEVEL_OFFSET;
@@ -388,6 +448,12 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
             ]);
             if old_hp == 0 {
                 continue;
+            }
+
+            if let Some(name) = decode_enemy_name_from_scene_block(scene, base) {
+                if is_named_boss_enemy(&name) {
+                    continue;
+                }
             }
 
             if is_probable_boss(old_hp, level) {

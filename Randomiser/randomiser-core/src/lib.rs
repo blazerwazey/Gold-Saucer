@@ -677,7 +677,8 @@ fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSet
     const MODEL_INDEX_OFFSET: usize = 12;
 
     for file in archive.files.iter_mut() {
-        if file.dir_id != 5 {
+        // Weapon data lives in KERNEL.BIN section 6 (dir_id == 6).
+        if file.dir_id != 6 {
             continue;
         }
 

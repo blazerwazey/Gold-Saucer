@@ -1665,7 +1665,7 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
         let mut rng_eq = StdRng::seed_from_u64(settings.seed ^ 0x7777_1111_u64);
         for char_index in 0..max_chars {
             let record_base = char_index * CHARACTER_RECORD_SIZE;
-            if settings.randomize_starting_weapons && !settings.keep_weapon_appearance {
+            if settings.randomize_starting_weapons {
                 if let Some((start, end_incl)) = weapon_class_range_for_char(char_index) {
                     let count = end_incl.wrapping_sub(start).wrapping_add(1);
                     if count > 0 {
@@ -1758,6 +1758,21 @@ fn randomize_starting_equipment_and_materia(kernel_data: &mut [u8], settings: &R
             kernel_data[slot_offset + 1] = 0;
             kernel_data[slot_offset + 2] = 0;
             kernel_data[slot_offset + 3] = 0;
+        }
+
+        // Give Barret a single random starting materia in his weapon so he
+        // always has at least one orb equipped.
+        if NUM_WEAPON_SLOTS > 0 {
+            let barret_slot_offset = barret_weapon_start;
+            if barret_slot_offset + MATERIA_SLOT_SIZE <= kernel_data.len() {
+                let materia_index = rng.gen_range(0..materia_pool.len());
+                let materia_id = materia_pool[materia_index];
+
+                kernel_data[barret_slot_offset] = materia_id;
+                kernel_data[barret_slot_offset + 1] = 0;
+                kernel_data[barret_slot_offset + 2] = 0;
+                kernel_data[barret_slot_offset + 3] = 0;
+            }
         }
 
         // Also drop 2–3 extra random materia into the Party Materia stock.

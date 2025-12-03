@@ -147,7 +147,7 @@ impl Default for RandomiserApp {
             logo,
 
             randomize_enemy_drops: true,
-            randomize_enemies: false,
+            randomize_enemies: true,
             randomize_shops: true,
             randomize_equipment: true,
             randomize_starting_materia: true,

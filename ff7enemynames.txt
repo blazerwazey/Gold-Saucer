@@ -1,0 +1,51 @@
+﻿Scene 67:   {Mystery Ninja [0161]} , {Mystery Ninja [0162]}
+Scene 68:   {Mystery Ninja [0163]} , {Mystery Ninja [0164]}
+Scene 69:   {Mystery Ninja [0165]} , {Mystery Ninja [0166]}
+Scene 70:   {Ultimate Weapon [014D]} , {Ultimate Weapon [014E]} , {Ultimate Weapon [014F]}
+Scene 71:   {Ultimate Weapon [014E]} , {Ultimate Weapon [014F]} , {Ultimate Weapon [0150]}
+Scene 73:   {Ultimate Weapon [014E]}
+Scene 74:   {Mystery Ninja [0166]}
+Scene 81:   {Guard Scorpion [0016]}
+Scene 91:   {Air Buster [0021]}
+Scene 96:   {Aps [0025]}
+Scene 103:   {Turks:Reno [0030]} , {Pyramid [0031]}
+Scene 114:   {Sample:H0512 [0040]} , {Sample:H0512-opt [0041]} , [NONE]
+Scene 116:   {Rufus [0044]} , {Dark Nation [0045]}
+Scene 117:   {Midgar Zolom [0051]}
+Scene 120:   {Bottomswell [005B]} , {Waterpolo [005C]} , [NONE]
+Scene 122:   {Jenova▪BIRTH [005F]} , [NONE] , [NONE]
+Scene 134:   {Turks:Reno [007F]} , {Turks:Rude [0080]}
+Scene 138:   {Gi Spector [0086]} , {Soul Fire [008A]} , {Gi Nattak [008B]}
+Scene 143:   {Ying [0097]} , {Yang [0098]} , {Ying/Yang [0099]}
+Scene 144:   {Lost Number [009A]} , {Lost Number [009B]} , {Lost Number [009C]}
+Scene 148:   {Materia Keeper [00A3]}
+Scene 150:   {Palmer [00A4]}
+Scene 154:   {Rapps [00B1]}
+Scene 155:   {Gorkii [00B2]}
+Scene 156:   {Shake [00B3]} , {Chekhov [00B4]} , {Staniv [00B5]}
+Scene 157:   {Godo [00B6]}
+Scene 161:   {Demons Gate [00C3]}
+Scene 163:   {Red Dragon [00C1]}
+Scene 167:   {Jenova▪LIFE [00C4]}
+Scene 169:   {Snow [00D2]}
+Scene 185:   {Schizo(Right) [00E4]} , {Schizo(Left) [00E5]} , {Jenova▪DEATH [00EA]}
+Scene 195:   {Carry Armor [0102]} , {Right Arm [0103]} , {Left Arm [0104]}
+Scene 201:   {Turks:Reno [0112]} , {Turks:Rude [0113]}
+Scene 204:   {Turks:Rude [0119]}
+Scene 210:   {Turks:Elena [0128]} , {Turks:Reno [0129]} , {Turks:Rude [012A]}
+Scene 211:   {Proud Clod [012B]} , {Jamar Armor [012C]} 
+Scene 214:   {Hojo [0131]} , {Bad Rap Sample [016A]} , {Poodler Sample [016B]}
+Scene 215:   {Helletic Hojo [0132]} , {Right Arm [0133]} , {Left Arm [0134]}
+Scene 216:   {Lifeform-Hojo N [0135]} , [NONE] , [NONE]
+Scene 227:   {Jenova▪SYNTHESIS [0144]} , [NONE] , [NONE]
+Scene 228:   {Bizarro▪Sephiroth [0145]} , [NONE] , [NONE]
+Scene 229:   {Bizarro▪Sephiroth [0146]} , [NONE] , [NONE]
+Scene 230:   {Bizarro▪Sephiroth [014A]} , [NONE] , [NONE]
+Scene 231:   {Safer▪Sephiroth [014B]} , {Sephiroth [014C]} , [NONE]
+Scene 232:   {Bizarro▪Sephiroth [0147]} , [NONE] , [NONE]
+Scene 233:   {Bizarro▪Sephiroth [0148]} , [NONE] , [NONE]
+Scene 234:   {Bizarro▪Sephiroth [0149]} , [NONE] , [NONE]
+Scene 243:   {Proud Clod [012B]}
+Scene 245:   {Diamond Weapon [000A]} , {Ruby Weapon [000B]} , {Ruby's Tentacle [000C]}
+Scene 246:   {Emerald Weapon [000D]} , {Leg [000E]} , {Eye [000F]}
+Scene 247:   {Ultimate Weapon [014F]}

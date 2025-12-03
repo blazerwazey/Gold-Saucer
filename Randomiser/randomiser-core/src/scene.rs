@@ -255,7 +255,69 @@ fn decode_enemy_name_from_scene_block(scene: &[u8], base: usize) -> Option<Strin
 
 fn is_named_boss_enemy(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    matches!(upper.as_str(), "GUARD SCORPION" | "LOST NUMBER" | "PALMER")
+
+    // Any Jenova or Sephiroth variant is always treated as a boss, regardless
+    // of punctuation between the words.
+    if upper.contains("JENOVA") || upper.contains("SEPHIROTH") {
+        return true;
+    }
+
+    matches!(
+        upper.as_str(),
+        // Early / mid-game scripted bosses and special encounters.
+        "GUARD SCORPION"
+            | "MYSTERY NINJA"
+            | "ULTIMATE WEAPON"
+            | "AIR BUSTER"
+            | "APS"
+            | "TURKS:RENO"
+            | "PYRAMID"
+            | "SAMPLE:H0512"
+            | "SAMPLE:H0512-OPT"
+            | "RUFUS"
+            | "DARK NATION"
+            | "MIDGAR ZOLOM"
+            | "BOTTOMSWELL"
+            | "WATERPOLO"
+            | "TURKS:RUDE"
+            | "GI SPECTOR"
+            | "SOUL FIRE"
+            | "GI NATTAK"
+            | "MATERIA KEEPER"
+            | "LOST NUMBER"
+            | "PALMER"
+            | "RAPPS"
+            | "GORKII"
+            | "SHAKE"
+            | "CHEKHOV"
+            | "STANIV"
+            | "GODO"
+            | "DEMONS GATE"
+            | "RED DRAGON"
+            | "SNOW"
+            | "MOTOR BALL"
+            | "HELI GUNNER"
+            | "HUNDRED GUNNER"
+            | "SCHIZO(RIGHT)"
+            | "SCHIZO(LEFT)"
+            | "CARRY ARMOR"
+            | "RIGHT ARM"
+            | "LEFT ARM"
+            | "TURKS:ELENA"
+            | "PROUD CLOD"
+            | "JAMAR ARMOR"
+            | "HOJO"
+            | "BAD RAP SAMPLE"
+            | "POODLER SAMPLE"
+            | "HELLETIC HOJO"
+            | "LIFEFORM-HOJO N"
+            | "DIAMOND WEAPON"
+            | "RUBY WEAPON"
+            | "RUBY'S TENTACLE"
+            | "EMERALD WEAPON"
+            | "LEG"
+            | "EYE"
+    )
 }
 
 pub(crate) fn randomize_enemy_formations_in_scene_archive(
@@ -270,6 +332,10 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
     // Enemy data offsets within each ENEMY_DATA_SIZE block, from the
     // Battle_Scenes documentation (ff7-flat-wiki):
     const ENEMY_LEVEL_OFFSET: usize = 0x20; // 1 byte
+    const ENEMY_STR_OFFSET: usize = 0x24; // 1 byte
+    const ENEMY_DEF_OFFSET: usize = 0x25; // 1 byte
+    const ENEMY_MAG_OFFSET: usize = 0x26; // 1 byte
+    const ENEMY_MDEF_OFFSET: usize = 0x27; // 1 byte
     const ENEMY_HP_OFFSET: usize = 0xA4; // 4 bytes u32
     const ENEMY_EXP_OFFSET: usize = 0xA8; // 4 bytes u32
     const ENEMY_GIL_OFFSET: usize = 0xAC; // 4 bytes u32
@@ -321,15 +387,17 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
 
     // Phase 1: shuffle non-boss enemy triplets (the three enemy data blocks
     // per scene) across scenes to change which enemies appear where, without
-    // touching scenes that contain probable bosses.
+    // touching scenes that contain probable bosses. Additionally, keep a
+    // sizeable chunk of the earliest scenes fixed so that early-game fields
+    // cannot pull in mid/late-game formations.
 
-    const EARLY_SAFE_SCENES: usize = 16;
+    const EARLY_SAFE_SCENES: usize = 64;
 
     let mut candidate_scenes: Vec<usize> = Vec::new();
 
     for (scene_index, scene) in archive.scenes.iter().enumerate() {
-        // Do not randomise the very earliest scenes so that the first few
-        // battles stay close to vanilla in both formations and stats.
+        // Do not randomise the earliest scenes so that the opening portion of
+        // the game stays close to vanilla in both formations and stats.
         if scene_index < EARLY_SAFE_SCENES {
             continue;
         }
@@ -482,8 +550,32 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
                 scene[gil_off + 3],
             ]);
 
+            // Scale HP directly with the scene difficulty factor.
             let new_hp_f = (old_hp as f32 * scale).round().clamp(1.0, 9_999_999.0);
             let new_hp = new_hp_f as u32;
+
+            // Scale core stats (level, strength, defense, magic, magic defense)
+            // with the same factor so enemies that appear early are also less
+            // dangerous offensively/defensively.
+            let stat_scale = scale;
+
+            let new_level_f = (level as f32 * stat_scale).round().clamp(1.0, 99.0);
+            let new_level = new_level_f as u8;
+
+            let str_off = base + ENEMY_STR_OFFSET;
+            let def_off = base + ENEMY_DEF_OFFSET;
+            let mag_off = base + ENEMY_MAG_OFFSET;
+            let mdef_off = base + ENEMY_MDEF_OFFSET;
+
+            let old_str = scene[str_off];
+            let old_def = scene[def_off];
+            let old_mag = scene[mag_off];
+            let old_mdef = scene[mdef_off];
+
+            let new_str_f = (old_str as f32 * stat_scale).round().clamp(1.0, 255.0);
+            let new_def_f = (old_def as f32 * stat_scale).round().clamp(1.0, 255.0);
+            let new_mag_f = (old_mag as f32 * stat_scale).round().clamp(1.0, 255.0);
+            let new_mdef_f = (old_mdef as f32 * stat_scale).round().clamp(1.0, 255.0);
 
             // Use a milder factor for rewards so EXP/Gil don't explode.
             let reward_scale = 0.5 * (1.0 + scale);
@@ -491,6 +583,12 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
             let new_gil_f = (old_gil as f32 * reward_scale).round().clamp(0.0, 9_999_999.0);
             let new_exp = new_exp_f as u32;
             let new_gil = new_gil_f as u32;
+
+            scene[level_off] = new_level;
+            scene[str_off] = new_str_f as u8;
+            scene[def_off] = new_def_f as u8;
+            scene[mag_off] = new_mag_f as u8;
+            scene[mdef_off] = new_mdef_f as u8;
 
             scene[hp_off..hp_off + 4].copy_from_slice(&new_hp.to_le_bytes());
             scene[exp_off..exp_off + 4].copy_from_slice(&new_exp.to_le_bytes());

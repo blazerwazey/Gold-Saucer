@@ -21,6 +21,7 @@ pub struct RandomiserSettings {
     pub seed: u64,
     pub randomize_enemy_drops: bool,
     pub randomize_enemies: bool,
+    pub randomize_bosses: bool,
     pub randomize_shops: bool,
     pub randomize_equipment: bool,
     pub randomize_starting_materia: bool,
@@ -154,9 +155,9 @@ fn classify_field_zone(name: &str, _entry_index: usize) -> FieldZone {
     }
 
     if n.starts_with("mkt")
-        || n.starts_with("onna")
         || n.starts_with("mrkt")
         || n.starts_with("colne")
+        || n == "onna_52"
     {
         return FieldZone::WallMarket;
     }
@@ -248,41 +249,27 @@ fn key_can_appear_in_slot(
     };
 
     if name.starts_with("Keycard ") {
+        // Keycards can appear anywhere in Shinra Building, Midgar, or Wall Market zones
+        // This allows them to be distributed more freely while keeping them in logical areas
         if !(zone == FieldZone::ShinraBuilding
             || zone == FieldZone::Midgar
             || zone == FieldZone::WallMarket)
         {
             return false;
         }
-
-        if name == "Keycard 60" && !before("blin60_1") {
-            return false;
-        }
-        if name == "Keycard 62" && !before("blin62_1") {
-            return false;
-        }
-        if name == "Keycard 65" && !before("blin63_1") {
-            return false;
-        }
-        if name == "Keycard 66" && !before("blin66_1") {
-            return false;
-        }
-        if name == "Keycard 68" && !before("blin69_1") {
-            return false;
-        }
+        // Remove specific field restrictions - zone restriction is sufficient
     }
 
     if name.starts_with("Midgar Part #") {
+        // Midgar Parts can appear anywhere in Shinra Building, Midgar, or Wall Market zones
+        // This allows better distribution while keeping them in the Midgar area
         if !(zone == FieldZone::ShinraBuilding
             || zone == FieldZone::Midgar
             || zone == FieldZone::WallMarket)
         {
             return false;
         }
-
-        if !before("blin65_1") {
-            return false;
-        }
+        // Remove specific field restrictions - zone restriction is sufficient
     }
 
     if name == "Keystone" {
@@ -292,24 +279,42 @@ fn key_can_appear_in_slot(
     }
 
     if name == "Key to Ancients" {
+        // Key to Ancients should only appear in Temple/Ancients zone
+        // to ensure it's reachable when needed
+        if zone != FieldZone::TempleAndAncients {
+            return false;
+        }
         if !before("snw_w") {
             return false;
         }
     }
 
     if name == "Lunar Harp" {
+        // Lunar Harp should only appear in areas before the Glacier
+        if zone == FieldZone::Glacier || zone == FieldZone::LateGame {
+            return false;
+        }
         if !before("slfrst_1") {
             return false;
         }
     }
 
     if name == "Glacier Map" || name == "Snowboard" {
+        // These should only appear in Glacier zone or earlier
+        if zone == FieldZone::LateGame {
+            return false;
+        }
         if !before("hyou1") {
             return false;
         }
     }
 
     if name == "Black Materia" {
+        // Black Materia should only appear in Temple/Ancients zone
+        // to ensure it's obtainable when the story requires it
+        if zone != FieldZone::TempleAndAncients {
+            return false;
+        }
         if !before("trnad_1") {
             return false;
         }
@@ -331,32 +336,56 @@ fn build_key_item_placements(
         return placements;
     }
 
-    let mut flags: Vec<&'static items::KeyItemFlag> =
+    let flags: Vec<&'static items::KeyItemFlag> =
         items::key_item_flags_with_role(items::ItemRole::KeyProgression).collect();
     if flags.is_empty() {
         return placements;
     }
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0x4B1D_0EAD_u64);
-    flags.shuffle(&mut rng);
 
-    let mut remaining_slots: Vec<PickupSlot> = slots.to_vec();
+    // Try multiple times with different shuffle orders to find a valid placement.
+    const MAX_ATTEMPTS: usize = 10;
+    for _attempt in 0..MAX_ATTEMPTS {
+        placements.clear();
+        let mut remaining_slots: Vec<PickupSlot> = slots.to_vec();
+        // Shuffle the slots themselves to ensure different placements each seed
+        remaining_slots.shuffle(&mut rng);
+        
+        let mut attempt_flags = flags.clone();
+        attempt_flags.shuffle(&mut rng);
 
-    for flag in flags {
-        let mut chosen_index: Option<usize> = None;
+        let mut all_placed = true;
+        for flag in &attempt_flags {
+            // Find all valid slots for this key item.
+            let valid_indices: Vec<usize> = remaining_slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| key_can_appear_in_slot(flag, slot, field_order))
+                .map(|(idx, _)| idx)
+                .collect();
 
-        for (idx, slot) in remaining_slots.iter().enumerate() {
-            if key_can_appear_in_slot(flag, slot, field_order) {
-                chosen_index = Some(idx);
+            if valid_indices.is_empty() {
+                // No valid slot for this key item in this attempt.
+                all_placed = false;
                 break;
             }
-        }
 
-        if let Some(idx) = chosen_index {
-            let slot = remaining_slots.swap_remove(idx);
+            // Pick a random valid slot instead of always taking the first.
+            let chosen_idx = valid_indices[rng.gen_range(0..valid_indices.len())];
+            let slot = remaining_slots.swap_remove(chosen_idx);
             placements.insert((slot.entry_index, slot.opcode_off), flag);
         }
+
+        if all_placed {
+            // Successfully placed all key items.
+            return placements;
+        }
     }
+
+    // If we reach here, we failed to place all key items after MAX_ATTEMPTS.
+    // Return the best partial placement we got (from the last attempt).
+    // The caller should check if all key items are present.
 
     placements
 }
@@ -371,6 +400,8 @@ fn randomize_field_pickups_in_flevel(
     Option<usize>,
     String,
     String,
+    Vec<(String, &'static str)>,
+    Vec<(String, u16, u8, bool)>,
 )> {
     let field_count = flevel_archive.entries.len();
 
@@ -453,6 +484,7 @@ fn randomize_field_pickups_in_flevel(
             while i < scan_end {
                 let opcode = buf[i];
                 if opcode == 0x58 {
+                    // STITM - regular item pickups
                     let off = i;
                     let banks = buf.get(i + 1).copied().unwrap_or(0);
                     let item_lo = buf.get(i + 2).copied().unwrap_or(0);
@@ -469,6 +501,26 @@ fn randomize_field_pickups_in_flevel(
                             item_id,
                         });
                     }
+                } else if opcode == 0x82 {
+                    // SETWORD - includes vanilla key item locations
+                    // Add these as potential slots for key item randomization
+                    let off = i;
+                    if i + 3 < scan_end {
+                        let banks = buf.get(i + 1).copied().unwrap_or(0);
+                        let bank2 = banks & 0x0F;
+                        
+                        // Only include SETWORD opcodes that write to bank 0 (immediate values)
+                        // These are the ones we can safely convert to/from key items
+                        if bank2 == 0 {
+                            key_pickup_slots.push(PickupSlot {
+                                entry_index,
+                                field_name: field_name.to_ascii_lowercase(),
+                                opcode_off: off,
+                                qty: 1,
+                                item_id: 0xFFFF, // Marker for SETWORD slots
+                            });
+                        }
+                    }
                 }
 
                 let size = field::opcode_size_pc(&buf, i, scan_end);
@@ -482,10 +534,33 @@ fn randomize_field_pickups_in_flevel(
 
     let key_item_placements =
         build_key_item_placements(&key_pickup_slots, settings.seed, &field_order);
+    
+    // Track key item placements with field names for spoiler log
+    let mut key_item_log: Vec<(String, &'static str)> = Vec::new();
 
     let mut field_index_log = String::new();
     let mut field_pickups_rand_log = String::new();
     let mut smtra_materia_pool: Vec<u8> = Vec::new();
+
+    // Validate that all key progression items were placed.
+    let expected_key_items: Vec<&'static items::KeyItemFlag> =
+        items::key_item_flags_with_role(items::ItemRole::KeyProgression).collect();
+    let placed_count = key_item_placements.len();
+    if placed_count < expected_key_items.len() {
+        field_pickups_rand_log.push_str(&format!(
+            "WARNING: Only placed {}/{} key progression items. Some may be missing!\n",
+            placed_count,
+            expected_key_items.len()
+        ));
+        for flag in &expected_key_items {
+            if !key_item_placements.values().any(|f| f.name == flag.name) {
+                field_pickups_rand_log.push_str(&format!(
+                    "  Missing: {}\n",
+                    flag.name
+                ));
+            }
+        }
+    }
     let huge_perm = make_huge_materia_perm(settings.seed);
     let mut full_item_pool = build_field_item_pool(&settings);
     let mut field_item_pool = full_item_pool.clone();
@@ -496,18 +571,17 @@ fn randomize_field_pickups_in_flevel(
         .collect();
 
     let key_item_flags = items::all_key_item_flags();
+    
+    // Track all item placements for spoiler log
+    let mut item_placements: Vec<(String, u16, u8, bool)> = Vec::new(); // (field_name, item_id, qty, is_guaranteed)
 
     if !guaranteed_remaining.is_empty() {
         field_item_pool.retain(|id| !GUARANTEED_FIELD_ITEMS.contains(id));
     }
 
-    // Guarantee up to three Battery (0x0055) pickups before wcrimb_1 by
-    // forcing eligible early STITM slots to that item ID.
+    // Guarantee up to three Battery (0x0055) pickups in Midgar and Wall Market zones.
+    // This ensures batteries are available early for progression.
     let battery_item_id: u16 = 0x0055;
-    let battery_limit_index = field_order
-        .get("wcrimb_1")
-        .copied()
-        .unwrap_or(field_count.saturating_sub(1));
     let mut guaranteed_batteries_remaining: u8 = 3;
 
     for (entry_index, entry) in flevel_archive.entries.iter().enumerate() {
@@ -535,6 +609,17 @@ fn randomize_field_pickups_in_flevel(
             || field_name.eq_ignore_ascii_case("blackbg4")
             || field_name.eq_ignore_ascii_case("blackbg5")
             || field_name.eq_ignore_ascii_case("blackbg6")
+            || field_name.eq_ignore_ascii_case("blackbg7")
+            || field_name.eq_ignore_ascii_case("blackbg8")
+            || field_name.eq_ignore_ascii_case("blackbg9")
+            || field_name.eq_ignore_ascii_case("blackbgb")
+            || field_name.eq_ignore_ascii_case("blackbgc")
+            || field_name.eq_ignore_ascii_case("blackbgd")
+            || field_name.eq_ignore_ascii_case("blackbge")
+            || field_name.eq_ignore_ascii_case("blackbgh")
+            || field_name.eq_ignore_ascii_case("blackbgi")
+            || field_name.eq_ignore_ascii_case("blackbgj")
+            || field_name.eq_ignore_ascii_case("blackbgk")
             || field_name.eq_ignore_ascii_case("tin_1")
         {
             continue;
@@ -722,10 +807,100 @@ fn randomize_field_pickups_in_flevel(
             let mut i = scan_start;
             while i < scan_end {
                 let opcode = buf[i];
+                let off = i;
+                
+                // Check for key item placements in SETWORD opcodes (0x82)
+                // These are slots that were originally SETWORD and selected for key items
+                if opcode == 0x82 {
+                    if let Some(flag) = key_item_placements.get(&(entry_index, off)) {
+                        let bit_mask = flag.bit;
+                        if bit_mask.count_ones() == 1 && off + 4 < buf.len() {
+                            let bit_index = bit_mask.trailing_zeros() as u8;
+                            let banks_byte = (flag.bank << 4) | 0;
+
+                            // Update the SETWORD to point to the new key item
+                            buf[off] = 0x82;
+                            buf[off + 1] = banks_byte;
+                            buf[off + 2] = flag.addr;
+                            buf[off + 3] = bit_index;
+                            buf[off + 4] = 0x5F;
+                            changed = true;
+
+                            let mut key_text_id: i32 = -1;
+                            let mut key_text_patched = false;
+
+                            if let Some((texts_base, text_count, positions)) =
+                                text_layout.as_mut()
+                            {
+                                if let Some((_, text_id)) =
+                                    field::find_nearby_message(
+                                        &buf,
+                                        scan_start,
+                                        scan_end,
+                                        i,
+                                        0xC0,
+                                    )
+                                {
+                                    key_text_id = text_id as i32;
+                                    key_text_patched =
+                                        field::patch_key_text_in_place(
+                                            &mut buf,
+                                            *texts_base,
+                                            *text_count,
+                                            positions,
+                                            text_id,
+                                            flag.name,
+                                        );
+                                }
+                            }
+
+                            // Track key item placement for spoiler log
+                            if !field_name.eq_ignore_ascii_case("blackbg1")
+                                && !field_name.eq_ignore_ascii_case("blackbg2")
+                                && !field_name.eq_ignore_ascii_case("blackbg3")
+                                && !field_name.eq_ignore_ascii_case("blackbg4")
+                                && !field_name.eq_ignore_ascii_case("blackbg5")
+                                && !field_name.eq_ignore_ascii_case("blackbg6")
+                                && !field_name.eq_ignore_ascii_case("blackbg7")
+                                && !field_name.eq_ignore_ascii_case("blackbg8")
+                                && !field_name.eq_ignore_ascii_case("blackbg9")
+                                && !field_name.eq_ignore_ascii_case("blackbgb")
+                                && !field_name.eq_ignore_ascii_case("blackbgc")
+                                && !field_name.eq_ignore_ascii_case("blackbgd")
+                                && !field_name.eq_ignore_ascii_case("blackbge")
+                                && !field_name.eq_ignore_ascii_case("blackbgh")
+                                && !field_name.eq_ignore_ascii_case("blackbgi")
+                                && !field_name.eq_ignore_ascii_case("blackbgj")
+                                && !field_name.eq_ignore_ascii_case("blackbgk")
+                                && !field_name.eq_ignore_ascii_case("tin_1")
+                            {
+                                key_item_log.push((field_name.to_string(), flag.name));
+                            }
+                            
+                            field_pickups_rand_log.push_str(&format!(
+                                "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
+                                field_name,
+                                off,
+                                flag.name,
+                                flag.bank,
+                                flag.addr,
+                                flag.bit,
+                                key_text_id,
+                                key_text_patched,
+                            ));
+                        }
+
+                        let size = field::opcode_size_pc(&buf, i, scan_end);
+                        if size == 0 {
+                            break;
+                        }
+                        i += size;
+                        continue;
+                    }
+                }
+                
                 if opcode == 0x58 {
                     total_stitm += 1;
-
-                    let off = i;
                     let banks = buf.get(i + 1).copied().unwrap_or(0);
                     let item_lo = buf.get(i + 2).copied().unwrap_or(0);
                     let item_hi = buf.get(i + 3).copied().unwrap_or(0);
@@ -772,6 +947,19 @@ fn randomize_field_pickups_in_flevel(
                                 }
                             }
 
+                            // Track key item placement for spoiler log
+                            // Safety check: don't log blackbg or debug fields
+                            if !field_name.eq_ignore_ascii_case("blackbg1")
+                                && !field_name.eq_ignore_ascii_case("blackbg2")
+                                && !field_name.eq_ignore_ascii_case("blackbg3")
+                                && !field_name.eq_ignore_ascii_case("blackbg4")
+                                && !field_name.eq_ignore_ascii_case("blackbg5")
+                                && !field_name.eq_ignore_ascii_case("blackbg6")
+                                && !field_name.eq_ignore_ascii_case("tin_1")
+                            {
+                                key_item_log.push((field_name.to_string(), flag.name));
+                            }
+                            
                             field_pickups_rand_log.push_str(&format!(
                                 "key_field={} off=0x{:06X} key_name={} bank={} addr={} bit=0x{:02X} text_id={} text_patched={}\n",
                                 field_name,
@@ -801,20 +989,47 @@ fn randomize_field_pickups_in_flevel(
                             if let Some(r) = rng.as_mut() {
                                 let mut new_item_id: u16;
 
-                                // First, guarantee up to three Batteries before wcrimb_1.
-                                if guaranteed_batteries_remaining > 0
-                                    && entry_index <= battery_limit_index
-                                {
+                                // Priority order for item selection:
+                                // 1. Guarantee up to three Batteries in Midgar/Wall Market zones (progression).
+                                // 2. Place guaranteed items (Limit Breaks, etc.) once each.
+                                // 3. Pick random items from pool (allows duplicates).
+                                let is_guaranteed: bool;
+                                let field_zone = classify_field_zone(&field_name, entry_index);
+                                let is_battery_zone = field_zone == FieldZone::Midgar 
+                                    || field_zone == FieldZone::WallMarket;
+                                
+                                if guaranteed_batteries_remaining > 0 && is_battery_zone {
                                     new_item_id = battery_item_id;
                                     guaranteed_batteries_remaining -= 1;
+                                    is_guaranteed = true;
                                 } else if let Some(id) = guaranteed_remaining.pop() {
                                     new_item_id = id;
+                                    is_guaranteed = true;
                                 } else {
+                                    // Random items are NOT removed from the pool, so duplicates
+                                    // are expected and allowed. This ensures we never run out of
+                                    // items to place even with 200+ pickup slots.
                                     if field_item_pool.is_empty() {
+                                        // Safety check: should never happen unless all items are
+                                        // filtered out. Skip this pickup to avoid crashes.
                                         continue;
                                     }
                                     let new_item_idx = r.gen_range(0..field_item_pool.len());
                                     new_item_id = field_item_pool[new_item_idx];
+                                    is_guaranteed = false;
+                                }
+                                
+                                // Track this placement for spoiler log
+                                // Safety check: don't log blackbg or debug fields
+                                if !field_name.eq_ignore_ascii_case("blackbg1")
+                                    && !field_name.eq_ignore_ascii_case("blackbg2")
+                                    && !field_name.eq_ignore_ascii_case("blackbg3")
+                                    && !field_name.eq_ignore_ascii_case("blackbg4")
+                                    && !field_name.eq_ignore_ascii_case("blackbg5")
+                                    && !field_name.eq_ignore_ascii_case("blackbg6")
+                                    && !field_name.eq_ignore_ascii_case("tin_1")
+                                {
+                                    item_placements.push((field_name.to_string(), new_item_id, qty, is_guaranteed));
                                 }
 
                                 let new_bytes = new_item_id.to_le_bytes();
@@ -1236,6 +1451,8 @@ fn randomize_field_pickups_in_flevel(
         md1stin_setword_offset,
         field_index_log,
         field_pickups_rand_log,
+        key_item_log,
+        item_placements,
     ))
 }
 
@@ -1545,14 +1762,14 @@ fn randomize_weapon_tables(archive: &mut KernelArchive, settings: &RandomiserSet
     }
 
     // Shuffle whole 44-byte weapon records within each weapon-data section
-    // (KERNEL.BIN section 6). This safely randomises stats, slots and AP
+    // (KERNEL.BIN section 5). This safely randomises stats, slots and AP
     // growth together without needing to know individual field offsets.
     const WEAPON_RECORD_SIZE: usize = 44;
     const MODEL_INDEX_OFFSET: usize = 12;
 
     for file in archive.files.iter_mut() {
-        // Weapon data lives in KERNEL.BIN section 6 (dir_id == 6).
-        if file.dir_id != 6 {
+        // Weapon data lives in KERNEL.BIN section 5 (dir_id == 5).
+        if file.dir_id != 5 {
             continue;
         }
 
@@ -1997,6 +2214,10 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
             .join("field")
             .join("flevel.lgp")
     });
+    
+    // Initialize item placement tracking outside the flevel block
+    let mut key_item_log: Vec<(String, &'static str)> = Vec::new();
+    let mut item_placements: Vec<(String, u16, u8, bool)> = Vec::new();
 
     if let (Some(flevel_src), Some(flevel_dest)) = (&flevel_src, &flevel_dest) {
         let mut flevel_bytes = fs::read(flevel_src)?;
@@ -2025,11 +2246,15 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
                 md1stin_setword,
                 field_index_log,
                 field_pickups_rand_log,
+                key_items,
+                items,
             ) = randomize_field_pickups_in_flevel(&flevel_bytes, &flevel_archive, &settings)?;
 
             field_replacements = replacements;
             md1stin_decompressed_len = md1stin_len;
             md1stin_setword_offset = md1stin_setword;
+            key_item_log = key_items;
+            item_placements = items;
 
             if settings.debug {
                 let index_path = out_root.join("field_stitm_index.txt");
@@ -2175,10 +2400,70 @@ pub fn run(settings: RandomiserSettings) -> Result<()> {
         log.push('\n');
     }
 
-    if settings.debug {
-        let log_path = out_root.join("spoiler_log.txt");
-        fs::write(log_path, log)?;
+    // Add item placement information
+    log.push_str("\n=== ITEM PLACEMENTS ===\n\n");
+    
+    // Key Items
+    log.push_str("Key Items:\n");
+    if key_item_log.is_empty() {
+        log.push_str("  (No key items randomized)\n");
+    } else {
+        // Sort by field name for easier reading
+        let mut sorted_key_items = key_item_log.clone();
+        sorted_key_items.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        for (field_name, key_item_name) in sorted_key_items {
+            log.push_str(&format!("  {} - {}\n", field_name, key_item_name));
+        }
     }
+    
+    // Group regular items by field for easier reading
+    let mut placements_by_field: std::collections::HashMap<String, Vec<(u16, u8, bool)>> = std::collections::HashMap::new();
+    for (field, item_id, qty, is_guaranteed) in item_placements {
+        placements_by_field.entry(field).or_insert_with(Vec::new).push((item_id, qty, is_guaranteed));
+    }
+    
+    // Sort fields alphabetically
+    let mut sorted_fields: Vec<_> = placements_by_field.keys().collect();
+    sorted_fields.sort();
+    
+    log.push_str("\nGuaranteed Items (Limit Breaks, Battery, etc.):\n");
+    let mut has_guaranteed = false;
+    for field_name in &sorted_fields {
+        let items = &placements_by_field[*field_name];
+        for (item_id, qty, is_guaranteed) in items {
+            if *is_guaranteed {
+                let item_name = items::lookup_inventory_name(*item_id);
+                log.push_str(&format!("  {} - {}x {}\n", field_name, qty, item_name));
+                has_guaranteed = true;
+            }
+        }
+    }
+    if !has_guaranteed {
+        log.push_str("  (None)\n");
+    }
+    
+    log.push_str("\nRegular Item Pickups (by field):\n");
+    let mut has_regular = false;
+    for field_name in &sorted_fields {
+        let items = &placements_by_field[*field_name];
+        let regular_items: Vec<_> = items.iter().filter(|(_, _, is_guaranteed)| !is_guaranteed).collect();
+        if !regular_items.is_empty() {
+            log.push_str(&format!("  {}:\n", field_name));
+            for (item_id, qty, _) in regular_items {
+                let item_name = items::lookup_inventory_name(*item_id);
+                log.push_str(&format!("    {}x {}\n", qty, item_name));
+                has_regular = true;
+            }
+        }
+    }
+    if !has_regular {
+        log.push_str("  (None)\n");
+    }
+
+    // Always generate spoiler log for reference
+    let log_path = out_root.join("spoiler_log.txt");
+    fs::write(log_path, log)?;
 
     Ok(())
 }

@@ -365,11 +365,10 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
         const MAX_SCENE_INDEX: usize = 255;
 
         if scene_index <= EASY_END_SCENE {
-            // Early scenes: scale HP/EXP/Gil from ~0.7 up to 1.0 so the very
-            // start is forgiving and only reaches vanilla by the end of
-            // Midgar / early world.
+            // Early scenes: scale from 0.3 (very weak) up to 1.0 (vanilla).
+            // This ensures even late-game enemies are manageable when shuffled early.
             let t = (scene_index as f32 / EASY_END_SCENE as f32).clamp(0.0, 1.0);
-            return 0.7 + t * 0.3;
+            return 0.3 + t * 0.7;
         }
 
         if scene_index <= MID_END_SCENE {
@@ -384,16 +383,40 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
         let t = (scene_index.saturating_sub(MID_END_SCENE) as f32 / span).clamp(0.0, 1.0);
         1.4 + t * 0.8
     }
+    
+    fn get_hp_cap_for_scene(scene_index: usize) -> u32 {
+        // Hard caps on HP to prevent overpowered enemies in early areas.
+        // Reference: Early enemies after Midgar have ~300-500 HP.
+        const EARLY_END_SCENE: usize = 64;
+        const MID_END_SCENE: usize = 160;
+        
+        if scene_index <= EARLY_END_SCENE {
+            // Reactor 1 through Midgar: cap HP to keep it manageable.
+            // Ramp from 200 HP (scene 8) to 800 HP (scene 64).
+            let t = ((scene_index.saturating_sub(8)) as f32 / (EARLY_END_SCENE - 8) as f32).clamp(0.0, 1.0);
+            let cap = 200.0 + t * 600.0;
+            cap as u32
+        } else if scene_index <= MID_END_SCENE {
+            // Post-Midgar to mid-game: ramp from 800 to 5000 HP.
+            let span = (MID_END_SCENE - EARLY_END_SCENE) as f32;
+            let t = ((scene_index - EARLY_END_SCENE) as f32 / span).clamp(0.0, 1.0);
+            let cap = 800.0 + t * 4200.0;
+            cap as u32
+        } else {
+            // Late game: no cap, let scaling handle it.
+            9_999_999
+        }
+    }
 
-    // Phase 1: shuffle non-boss enemy triplets (the three enemy data blocks
-    // per scene) across scenes to change which enemies appear where, without
-    // touching scenes that contain probable bosses. Additionally, keep a
-    // sizeable chunk of the earliest scenes fixed so that early-game fields
-    // cannot pull in mid/late-game formations.
+    // Phase 1a: Identify boss and non-boss scenes separately.
+    // Bosses will be shuffled among themselves, non-bosses among themselves.
+    // Keep a small number of the earliest scenes fixed so that the very first
+    // encounters (tutorial fights) stay vanilla.
 
-    const EARLY_SAFE_SCENES: usize = 64;
+    const EARLY_SAFE_SCENES: usize = 8;
 
     let mut candidate_scenes: Vec<usize> = Vec::new();
+    let mut boss_scenes: Vec<usize> = Vec::new();
 
     for (scene_index, scene) in archive.scenes.iter().enumerate() {
         // Do not randomise the earliest scenes so that the opening portion of
@@ -446,13 +469,19 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
             }
         }
 
-        if !has_boss {
+        if has_boss {
+            boss_scenes.push(scene_index);
+        } else {
             candidate_scenes.push(scene_index);
         }
     }
 
     if candidate_scenes.len() >= 2 {
-        let original_scenes = archive.scenes.clone();
+        // Only clone the scenes we're actually going to shuffle, not the entire archive.
+        let mut original_scenes: Vec<Vec<u8>> = Vec::with_capacity(candidate_scenes.len());
+        for &idx in &candidate_scenes {
+            original_scenes.push(archive.scenes[idx].clone());
+        }
         let mut perm = candidate_scenes.clone();
 
         let mut rng = StdRng::seed_from_u64(settings.seed ^ 0xA1B2_C3D4_u64);
@@ -465,15 +494,14 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
             }
         }
 
-        for (dst_scene_index, src_scene_index) in
-            candidate_scenes.iter().copied().zip(perm.iter().copied())
-        {
+        for (i, &dst_scene_index) in candidate_scenes.iter().enumerate() {
+            let src_scene_index = perm[i];
             if dst_scene_index == src_scene_index {
                 continue;
             }
 
             let dst_scene = &mut archive.scenes[dst_scene_index];
-            let src_scene = &original_scenes[src_scene_index];
+            let src_scene = &original_scenes[i];
 
             if dst_scene.len() != NEW_SCENE_SIZE || src_scene.len() != NEW_SCENE_SIZE {
                 continue;
@@ -487,8 +515,50 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
         }
     }
 
+    // Phase 1b: Shuffle boss scenes among themselves.
+    // This keeps bosses in boss slots but randomizes which boss you fight where.
+    if settings.randomize_bosses && boss_scenes.len() >= 2 {
+        let mut original_boss_scenes: Vec<Vec<u8>> = Vec::with_capacity(boss_scenes.len());
+        for &idx in &boss_scenes {
+            original_boss_scenes.push(archive.scenes[idx].clone());
+        }
+        let mut boss_perm = boss_scenes.clone();
+
+        let mut rng = StdRng::seed_from_u64(settings.seed ^ 0xB055_FACE_u64);
+        let mut i = boss_perm.len();
+        while i > 1 {
+            i -= 1;
+            let j = rng.gen_range(0..=i);
+            if i != j {
+                boss_perm.swap(i, j);
+            }
+        }
+
+        for (i, &dst_scene_index) in boss_scenes.iter().enumerate() {
+            let src_scene_index = boss_perm[i];
+            if dst_scene_index == src_scene_index {
+                continue;
+            }
+
+            let dst_scene = &mut archive.scenes[dst_scene_index];
+            let src_scene = &original_boss_scenes[i];
+
+            if dst_scene.len() != NEW_SCENE_SIZE || src_scene.len() != NEW_SCENE_SIZE {
+                continue;
+            }
+
+            // Swap entire boss scene to keep formations, AI, and camera consistent.
+            *dst_scene = src_scene.clone();
+        }
+    }
+
     // Phase 2: apply scene-based stat scaling to non-boss enemies.
+    // Skip early scenes that were excluded from shuffling to keep them truly vanilla.
     for (scene_index, scene) in archive.scenes.iter_mut().enumerate() {
+        if scene_index < EARLY_SAFE_SCENES {
+            continue;
+        }
+
         if scene.len() != NEW_SCENE_SIZE {
             continue;
         }
@@ -550,8 +620,10 @@ pub(crate) fn randomize_enemy_formations_in_scene_archive(
                 scene[gil_off + 3],
             ]);
 
-            // Scale HP directly with the scene difficulty factor.
-            let new_hp_f = (old_hp as f32 * scale).round().clamp(1.0, 9_999_999.0);
+            // Scale HP with the scene difficulty factor, then apply a hard cap
+            // to prevent late-game enemies from being too strong in early areas.
+            let hp_cap = get_hp_cap_for_scene(scene_index);
+            let new_hp_f = (old_hp as f32 * scale).round().clamp(1.0, hp_cap as f32);
             let new_hp = new_hp_f as u32;
 
             // Scale core stats (level, strength, defense, magic, magic defense)

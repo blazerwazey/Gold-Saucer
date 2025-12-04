@@ -21,6 +21,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     randomize_enemies: bool,
 
+    #[arg(long, default_value_t = false)]
+    randomize_bosses: bool,
+
     #[arg(long, default_value_t = true)]
     randomize_shops: bool,
 
@@ -98,6 +101,7 @@ fn main() {
         seed: args.seed.expect("seed is required unless --debug-field-lzs is used"),
         randomize_enemy_drops: args.randomize_enemy_drops,
         randomize_enemies: args.randomize_enemies,
+        randomize_bosses: args.randomize_bosses,
         randomize_shops: args.randomize_shops,
         randomize_equipment: args.randomize_equipment,
         randomize_starting_materia: args.randomize_starting_materia,

@@ -92,6 +92,7 @@ struct RandomiserApp {
 
     randomize_enemy_drops: bool,
     randomize_enemies: bool,
+    randomize_bosses: bool,
     randomize_shops: bool,
     randomize_equipment: bool,
     randomize_starting_materia: bool,
@@ -148,6 +149,7 @@ impl Default for RandomiserApp {
 
             randomize_enemy_drops: true,
             randomize_enemies: true,
+            randomize_bosses: false,
             randomize_shops: true,
             randomize_equipment: true,
             randomize_starting_materia: true,
@@ -309,6 +311,10 @@ impl eframe::App for RandomiserApp {
                         &mut self.randomize_enemy_drops,
                         "Randomise enemy drops",
                     );
+                    ui.checkbox(
+                        &mut self.randomize_bosses,
+                        "Randomise bosses (In testing)",
+                    );
                 }
                 ConfigTab::Shops => {
                     ui.label("Shop randomisation:");
@@ -384,6 +390,7 @@ impl eframe::App for RandomiserApp {
                     seed,
                     randomize_enemy_drops: self.randomize_enemy_drops,
                     randomize_enemies: self.randomize_enemies,
+                    randomize_bosses: self.randomize_bosses,
                     randomize_shops: self.randomize_shops,
                     randomize_equipment: self.randomize_equipment,
                     randomize_starting_materia: self.randomize_starting_materia,

@@ -4,12 +4,11 @@ A randomizer for Final Fantasy VII (Steam PC version) built with Qt 6, ff7tk, an
 
 ## Features
 
-- ✅ **Field Pickup Randomization** - Randomizes STITM/SMTRA item pickups across all field maps, with automatic text updates so the in-game message matches the new item
-- 🚧 **Key Item Randomization** (WIP) - Shuffles key items into valid STITM locations respecting a 16-sphere progression system to keep the game completable
-- ✅ **Shop Randomization** - Randomizes shop inventories directly in ff7.exe, category-aware (weapon shops get weapons, materia shops get materia, etc.)
+- ✅ **Field Pickup Randomization** - Randomizes item pickups across all field maps, with automatic text updates so the in-game message matches the new item
+- 🚧 **Key Item Randomization** (WIP) - Shuffles key items into valid locations respecting a 16-sphere progression system to keep the game completable
+- ✅ **Shop Randomization** - Randomizes shop inventories using hext patches, category-aware (weapon shops get weapons, materia shops get materia, etc.)
 - 🔄 **Enemy Randomization** (Coming Soon) - Randomizes enemy stats, levels, HP, MP, and rewards
 - ✅ **Starting Equipment Randomization** - Randomizes initial character equipment
-- ✅ **Debug map exclusion** - blackbg* debug maps are automatically excluded from all randomization
 - ✅ **Safe output** - All modifications go to a separate output folder; your original FF7 installation is never touched
 
 ## Requirements

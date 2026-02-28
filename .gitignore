@@ -1,0 +1,99 @@
+# Build directories
+cmake-build-*/
+Gold Saucer v0.0.1/
+dist/
+build/
+
+# IDE files
+.vscode/
+.vs/
+*.vcxproj*
+*.sln
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Qt files
+*.pro.user*
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+Makefile*
+
+# Object files
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.swp
+*.swo
+*~
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.map
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# Test results
+CTestTestfile.cmake
+
+# Randomizer output files
+output/
+*.hext
+field_randomization_debug.txt
+enemy_debug.txt
+shop_debug.txt
+GoldSaucer_enemy_debug.txt
+GoldSaucer_shop_debug.txt
+GoldSaucer_field_randomization_debug.txt
+
+# Config files (may contain user paths)
+*.json
+*.ini
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# FF7 game files (referenced but not part of project)
+*.lgp
+*.bin
+ff7.exe
+
+# Other program source code folders (referenced but not part of project)
+/ff7tk/
+/ff7-scarlet-canary/
+/ff7-tools/
+/Makou Reactor - Field Editor/
+/zlib-1.3.1/
+/ulgp_v1.3.2/
+/ff7tk-1.3.1.3/
+/MinHook_134_lib/
+/FF7-exe-Editor-main/
+/makou_test/

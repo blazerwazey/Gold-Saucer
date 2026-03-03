@@ -11,6 +11,14 @@
 #include <ff7tk/data/FF7Text.h>
 #include <ff7tk/data/FF7Item.h>
 #include <algorithm>
+#include <array>
+#include <limits>
+
+namespace {
+    constexpr int MOMENT_GAME_START    = 0;
+    constexpr int MOMENT_MIDGAR_ESCAPE = 1008; // MainProgress threshold when Shinra HQ changes
+    constexpr int MOMENT_FOREVER       = std::numeric_limits<int>::max();
+}
 
 // ============================================================================
 // Constants
@@ -312,7 +320,8 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
 
         // Write new BITONs at STITM locations (STITM=5 bytes → BITON=4 + RET=1)
         for (const KeyItemPlacement& p : keyItemMod->placements) {
-            if (p.targetOffset + 4 < decompressed.size()) {
+            int requiredBytes = p.targetIsBiton ? 4 : 5;
+            if (p.targetOffset + requiredBytes - 1 < decompressed.size()) {
                 // Debug: Show original bytes before replacement
                 QString originalBytes;
                 for (int i = 0; i < 8 && p.targetOffset + i < decompressed.size(); ++i) {
@@ -325,7 +334,8 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 decompressed[p.targetOffset + 1] = static_cast<char>(p.keyItem.bankByte);
                 decompressed[p.targetOffset + 2] = static_cast<char>(p.keyItem.address);
                 decompressed[p.targetOffset + 3] = static_cast<char>(p.keyItem.bit);
-                decompressed[p.targetOffset + 4] = static_cast<char>(0x5F); // NOP
+                if (!p.targetIsBiton)
+                    decompressed[p.targetOffset + 4] = static_cast<char>(0x5F); // NOP to pad former STITM slot
                 
                 // Debug: Show new bytes after replacement
                 QString newBytes;
@@ -335,7 +345,8 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 debugStream << "  KEY_ITEM REPLACED  @" << p.targetOffset
                             << " new:      " << newBytes << "\n";
                 debugStream << "  KEY_ITEM BITON @" << p.targetOffset
-                            << " -> " << p.keyName << "\n";
+                            << " -> " << p.keyName
+                            << (p.targetIsBiton ? " (existing BITON host)\n" : "\n");
                 totalMods++;
             }
             modifications.append(
@@ -1038,7 +1049,7 @@ static const quint32 KEY_SNOWBOARD        = 0x4602;
 int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
 {
     static const QSet<QString> sphere0 = {
-        "mds7st1","mds7st2","mds7st3","mds7_w1","mds7_w2","mds7_w3",
+        "mds7st3","mds7_w1","mds7_w2","mds7_w3",
         "md1stin","md1_1","md1_2","nmkin_1","nmkin_2","nmkin_3","nmkin_4","nmkin_5",
         "nrthmk","southmk1","southmk2",
         "md8_1","md8_2","md8_3","md8_4","md8brdg1","md8brdg2",
@@ -1046,18 +1057,18 @@ int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
         "7min1","7min2","7min3","sector1","sector2"
     };
     static const QSet<QString> sphere1 = {
-        "mkt_ia","mkt_s1","mkt_s2","mkt_s3","mkt_w","mkt_mens",
+        "mkt_s1","mkt_s2","mkt_s3","mkt_w","mkt_mens",
         "mkt_m","mkt_pub","mktpb","mkt_inn",
         "onna_1","onna_2","onna_3","onna_4","onna_5","onna_51","onna_52",
-        "colne_1","colne_2","colne_3","colne_4","colne_5","colne_6",
         "mds5_1","mds5_2","mds5_3","mds5_4","mds5_5","church","church2"
     };
     static const QSet<QString> sphere2 = {
-        "blin1","blin2_1","blin2_2","blin2_3","blin59"
+        "colne_1","colne_2","colne_3","colne_4","colne_5","colne_6",
+        "mds7st1","mds7st2",
     };
-    static const QSet<QString> sphere3 = { "blin60" };
+    static const QSet<QString> sphere3 = { "blin1","blin2_1","blin2_2","blin2_3","blin59" };
     static const QSet<QString> sphere4 = {
-        "blin61","blin62_1","blin62_2","blin63_1","blin63_2","blin64"
+        "blin60","blin61","blin62_1","blin62_2","blin63_1","blin63_2","blin64"
     };
     static const QSet<QString> sphere5 = { "blin65_1","blin65_2" };
     static const QSet<QString> sphere6 = {
@@ -1078,7 +1089,7 @@ int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
         "ujunon1","ujunon2","ujunon3","junmin1","junmin2",
         "junonr1","junonr2","junonr3","junonr4",
         "jetin1","jetin2","jetin3",
-        "condor1","condor2","convil_1","convil_2","convil_3","convil_4",
+        "condor1","condor2","convil_1","convil_2","convil_3","convil_4", "delmin12"
         "corel1","corel2","corel3","corelin",
         "ncorel1","ncorel2","ncorel3","ncorel4","ncoin1","ncoin2","ncoin3",
         "mtcrl_1","mtcrl_2","mtcrl_3","mtcrl_4","mtcrl_5","mtcrl_6","mtcrl_7","mtcrl_8","mtcrl_9",
@@ -1105,8 +1116,6 @@ int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
     };
     static const QSet<QString> sphere11 = {
         "trnad_1","trnad_2","trnad_3","trnad_4",
-        "delmin1","delmin2","delmin3","delmin4","delmin5","delmin6",
-        "delmin7","delmin8","delmin9","delmin10","delmin11","delmin12"
     };
     static const QSet<QString> sphere12 = {
         "bonevil","bonevil2","slfrst_1","slfrst_2","slfrst_3"
@@ -1114,7 +1123,7 @@ int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
     static const QSet<QString> sphere13 = {
         "ancnt1","ancnt2","ancnt3","ancnt4",
         "anfrst_1","anfrst_2","anfrst_3","anfrst_4","anfrst_5",
-        "losin1","losin2","losin3","losinn"
+        "losin1","losin2","losin3","losinn", "mkt_ia"
     };
     static const QSet<QString> sphere14 = {
         "hyou1","hyou2","hyou3","hyou4","hyou5_1","hyou5_2","hyou5_3","hyou5_4",
@@ -1165,16 +1174,10 @@ int FieldPickupRandomizer_ff7tk::getKeyItemMinSphere(quint32 keyItemId)
     case KEY_KEYCARD_60: case KEY_PHS:
     case KEY_MIDGAR_PARTS_1: case KEY_MIDGAR_PARTS_2: case KEY_MIDGAR_PARTS_3:
     case KEY_MIDGAR_PARTS_4: case KEY_MIDGAR_PARTS_5:
-        return 0;
-    case KEY_KEYCARD_62:  return 3;
-    case KEY_KEYCARD_65:  return 4;
-    case KEY_KEYCARD_66:  return 5;
-    case KEY_KEYCARD_68:  return 6;
+    case KEY_KEYCARD_62: case KEY_KEYCARD_65: case KEY_KEYCARD_66: case KEY_KEYCARD_68: 
     case KEY_GOLD_TICKET: case KEY_KEYSTONE: case KEY_LUNAR_HARP:
-    case KEY_SNOWBOARD:   return 8;
-    case KEY_BLACK_MATERIA: return 11;
-    case KEY_KEY_TO_ANCIENTS: return 12;
-    case KEY_A_COUPON: case KEY_B_COUPON: case KEY_C_COUPON:
+    case KEY_SNOWBOARD: case KEY_BLACK_MATERIA: 
+    case KEY_KEY_TO_ANCIENTS: case KEY_A_COUPON: case KEY_B_COUPON: case KEY_C_COUPON:
         return 0; // Available from start
     default: return 99;
     }
@@ -1188,10 +1191,11 @@ int FieldPickupRandomizer_ff7tk::getKeyItemMaxSphere(quint32 keyItemId)
     case KEY_GLASS_TIARA: case KEY_RUBY_TIARA: case KEY_DIAMOND_TIARA:
     case KEY_COLOGNE: case KEY_FLOWER_COLOGNE: case KEY_SEXY_COLOGNE:
     case KEY_MEMBERS_CARD: case KEY_LINGERIE: case KEY_MYSTERY_PANTIES:
-    case KEY_BIKINI_BRIEFS: case KEY_PHARMACY_COUPON: case KEY_DISINFECTANT:
-    case KEY_DEODORANT: case KEY_DIGESTIVE:
+    case KEY_BIKINI_BRIEFS: 
+    case KEY_DEODORANT: 
         return 1;
-    case KEY_KEYCARD_60:  return 2;
+    case KEY_DIGESTIVE: case KEY_PHARMACY_COUPON: case KEY_DISINFECTANT:
+    case KEY_KEYCARD_60:  return 3;
     case KEY_KEYCARD_62: case KEY_KEYCARD_65:
     case KEY_MIDGAR_PARTS_1: case KEY_MIDGAR_PARTS_2: case KEY_MIDGAR_PARTS_3:
     case KEY_MIDGAR_PARTS_4: case KEY_MIDGAR_PARTS_5:
@@ -1202,9 +1206,111 @@ int FieldPickupRandomizer_ff7tk::getKeyItemMaxSphere(quint32 keyItemId)
     case KEY_LUNAR_HARP:  return 11;
     case KEY_SNOWBOARD:   return 13;
     case KEY_A_COUPON: case KEY_B_COUPON: case KEY_C_COUPON:
-        return 3; // Available before blin63_1 (sphere 4)
+        return 6;
     default: return 99;
     }
+}
+
+int FieldPickupRandomizer_ff7tk::getKeyItemMinMoment(quint32 keyItemId)
+{
+    switch (keyItemId) {
+    case KEY_GOLD_TICKET:
+    case KEY_KEYSTONE:
+    case KEY_LUNAR_HARP:
+    case KEY_BLACK_MATERIA:
+    case KEY_KEY_TO_ANCIENTS:
+    case KEY_SNOWBOARD:
+        return MOMENT_MIDGAR_ESCAPE;
+    default:
+        return MOMENT_GAME_START;
+    }
+}
+
+int FieldPickupRandomizer_ff7tk::getKeyItemMaxMoment(quint32 keyItemId)
+{
+    switch (keyItemId) {
+    case KEY_COTTON_DRESS: case KEY_SATIN_DRESS: case KEY_SILK_DRESS:
+    case KEY_WIG: case KEY_DYED_WIG: case KEY_BLONDE_WIG:
+    case KEY_GLASS_TIARA: case KEY_RUBY_TIARA: case KEY_DIAMOND_TIARA:
+    case KEY_COLOGNE: case KEY_FLOWER_COLOGNE: case KEY_SEXY_COLOGNE:
+    case KEY_MEMBERS_CARD: case KEY_LINGERIE: case KEY_MYSTERY_PANTIES:
+    case KEY_BIKINI_BRIEFS: case KEY_PHARMACY_COUPON: case KEY_DISINFECTANT:
+    case KEY_DEODORANT: case KEY_DIGESTIVE:
+    case KEY_KEYCARD_60: case KEY_KEYCARD_62: case KEY_KEYCARD_65:
+    case KEY_KEYCARD_66: case KEY_KEYCARD_68:
+    case KEY_MIDGAR_PARTS_1: case KEY_MIDGAR_PARTS_2: case KEY_MIDGAR_PARTS_3:
+    case KEY_MIDGAR_PARTS_4: case KEY_MIDGAR_PARTS_5:
+    case KEY_A_COUPON: case KEY_B_COUPON: case KEY_C_COUPON:
+        return MOMENT_MIDGAR_ESCAPE - 1;
+    default:
+        return MOMENT_FOREVER;
+    }
+}
+
+QPair<int, int> FieldPickupRandomizer_ff7tk::getStitmMomentWindow(const QString& fieldName, int scriptOffset)
+{
+    QString lower = fieldName.toLower();
+    if (lower == "blin63_1") {
+        if (scriptOffset < 10000)
+            return {MOMENT_GAME_START, MOMENT_MIDGAR_ESCAPE - 1};
+        return {MOMENT_MIDGAR_ESCAPE, MOMENT_FOREVER};
+    }
+    return {MOMENT_GAME_START, MOMENT_FOREVER};
+}
+
+bool FieldPickupRandomizer_ff7tk::requiresMirroredBitons(const QString& fieldName)
+{
+    static const QSet<QString> mirroredFields = {
+        QStringLiteral("mkt_mens"),
+        QStringLiteral("mkt_m"),
+        QStringLiteral("mktpb"),
+        QStringLiteral("mkt_s1")
+    };
+    return mirroredFields.contains(fieldName.trimmed().toLower());
+}
+
+FieldPickupRandomizer_ff7tk::WardrobeCategory
+FieldPickupRandomizer_ff7tk::getWardrobeCategory(quint32 keyItemId)
+{
+    switch (keyItemId) {
+    case KEY_COTTON_DRESS: case KEY_SATIN_DRESS: case KEY_SILK_DRESS:
+        return WardrobeCategory::Dress;
+    case KEY_WIG: case KEY_DYED_WIG: case KEY_BLONDE_WIG:
+        return WardrobeCategory::Wig;
+    case KEY_GLASS_TIARA: case KEY_RUBY_TIARA: case KEY_DIAMOND_TIARA:
+        return WardrobeCategory::Tiara;
+    case KEY_COLOGNE: case KEY_FLOWER_COLOGNE: case KEY_SEXY_COLOGNE:
+        return WardrobeCategory::Cologne;
+    case KEY_LINGERIE: case KEY_MYSTERY_PANTIES: case KEY_BIKINI_BRIEFS:
+        return WardrobeCategory::Underwear;
+    default:
+        return WardrobeCategory::None;
+    }
+}
+
+QString FieldPickupRandomizer_ff7tk::wardrobeCategoryName(WardrobeCategory category)
+{
+    switch (category) {
+    case WardrobeCategory::Dress:     return QStringLiteral("Dress");
+    case WardrobeCategory::Wig:       return QStringLiteral("Wig");
+    case WardrobeCategory::Tiara:     return QStringLiteral("Tiara");
+    case WardrobeCategory::Cologne:   return QStringLiteral("Cologne");
+    case WardrobeCategory::Underwear: return QStringLiteral("Underwear");
+    default:                          return QStringLiteral("None");
+    }
+}
+
+QPair<int, int> FieldPickupRandomizer_ff7tk::getFieldMomentWindow(const QString& fieldName)
+{
+    int sphere = getFieldSphere(fieldName);
+
+    if (sphere >= 0 && sphere <= 7)
+        return {MOMENT_GAME_START, MOMENT_MIDGAR_ESCAPE - 1};
+
+    if (sphere >= 8 && sphere <= 99)
+        return {MOMENT_MIDGAR_ESCAPE, MOMENT_FOREVER};
+
+    return {MOMENT_GAME_START, MOMENT_FOREVER};
 }
 
 QString FieldPickupRandomizer_ff7tk::getKeyItemName(quint16 saveOffset, quint8 bit)
@@ -1248,7 +1354,7 @@ void FieldPickupRandomizer_ff7tk::collectKeyItemsAndStitm(
     // Exclude md1stin: variable-gated entities make placed key items unobtainable
     if (fieldName.toLower() == "md1stin") return;
 
-    // Exclude onna_5 from key item randomization
+    // Exclude onna_5 from key item randomization, I dont know why this field keeps triggering the STITM detection
     if (fieldName == "onna_5") return;
 
     QByteArray decompressed = LZS::decompressAllWithHeader(fieldData);
@@ -1274,6 +1380,8 @@ void FieldPickupRandomizer_ff7tk::collectKeyItemsAndStitm(
     int scriptEnd   = sec0DataStart + posTexts;
     if (scriptStart >= scriptEnd || scriptEnd > fileSize) return;
 
+    QPair<int, int> fieldWindow = getFieldMomentWindow(fieldName);
+
     for (int i = scriptStart; i < scriptEnd - 5; ++i) {
         quint8 opcode = static_cast<quint8>(decompressed.at(i));
 
@@ -1285,7 +1393,18 @@ void FieldPickupRandomizer_ff7tk::collectKeyItemsAndStitm(
                 memcpy(&itemId, decompressed.constData() + i + 2, 2);
                 quint8 qty = static_cast<quint8>(decompressed.at(i + 4));
                 if (itemId <= MAX_ITEM_ID && qty >= 1 && qty <= 99) {
-                    stitmLocations.append({fileIndex, i});
+                    QPair<int, int> window = getStitmMomentWindow(fieldName, i);
+                    int minMoment = std::max(fieldWindow.first, window.first);
+                    int maxMoment = std::min(fieldWindow.second, window.second);
+                    if (minMoment > maxMoment)
+                        continue;
+                    GlobalStitmLocation loc;
+                    loc.fileIndex     = fileIndex;
+                    loc.scriptOffset  = i;
+                    loc.minGameMoment = minMoment;
+                    loc.maxGameMoment = maxMoment;
+                    loc.isBiton       = false;
+                    stitmLocations.append(loc);
                 }
             }
             i += 4;
@@ -1315,6 +1434,14 @@ void FieldPickupRandomizer_ff7tk::collectKeyItemsAndStitm(
                     quint16 saveOffset = 0x0BA4 + address;
                     debugStream << "  KEY_ITEM: '" << getKeyItemName(saveOffset, bitNum)
                                 << "' in " << fieldName << " @" << i << "\n";
+
+                    GlobalStitmLocation bitonLoc;
+                    bitonLoc.fileIndex     = fileIndex;
+                    bitonLoc.scriptOffset  = i;
+                    bitonLoc.minGameMoment = fieldWindow.first;
+                    bitonLoc.maxGameMoment = fieldWindow.second;
+                    bitonLoc.isBiton       = true;
+                    stitmLocations.append(bitonLoc);
                 }
             }
             i += 3;
@@ -1335,7 +1462,15 @@ FieldPickupRandomizer_ff7tk::performKeyItemSwaps(
     debugStream << "STITM locations: " << stitmLocations.size() << "\n\n";
 
     // Build sphere-aware STITM location list
-    struct SphereStitm { int fileIndex; int scriptOffset; QString fieldName; int sphere; };
+    struct SphereStitm {
+        int fileIndex;
+        int scriptOffset;
+        QString fieldName;
+        int sphere;
+        int minMoment;
+        int maxMoment;
+        bool isBiton;
+    };
     QVector<SphereStitm> sphereLocs;
     for (const auto& loc : stitmLocations) {
         SphereStitm s;
@@ -1343,8 +1478,14 @@ FieldPickupRandomizer_ff7tk::performKeyItemSwaps(
         s.scriptOffset = loc.scriptOffset;
         s.fieldName    = allFileNames[loc.fileIndex];
         s.sphere       = getFieldSphere(s.fieldName);
+        s.minMoment    = loc.minGameMoment;
+        s.maxMoment    = loc.maxGameMoment;
+        s.isBiton      = loc.isBiton;
         sphereLocs.append(s);
     }
+
+    std::array<bool, static_cast<int>(WardrobeCategory::Underwear) + 1> wardrobeCategoryUsed{};
+    wardrobeCategoryUsed.fill(false);
 
     // Sort key items by maxSphere (most restrictive first)
     QVector<QPair<quint32, GlobalKeyItem>> sorted;
@@ -1366,21 +1507,37 @@ FieldPickupRandomizer_ff7tk::performKeyItemSwaps(
         const GlobalKeyItem& keyItem = kv.second;
         int minSphere = getKeyItemMinSphere(keyItemId);
         int maxSphere = getKeyItemMaxSphere(keyItemId);
+        int minMoment = getKeyItemMinMoment(keyItemId);
+        int maxMoment = getKeyItemMaxMoment(keyItemId);
+        WardrobeCategory wardrobeCategory = getWardrobeCategory(keyItemId);
+        int wardrobeIndex = static_cast<int>(wardrobeCategory);
 
         quint16 saveOffset = 0x0BA4 + keyItem.address;
         QString keyName = getKeyItemName(saveOffset, keyItem.bit);
 
+        if (wardrobeCategory != WardrobeCategory::None && wardrobeCategoryUsed[wardrobeIndex]) {
+            debugStream << "  SKIP: '" << keyName << "' – wardrobe category '"
+                        << wardrobeCategoryName(wardrobeCategory)
+                        << "' already satisfied\n";
+            continue;
+        }
+
         QVector<int> validIndices;
         for (int i = 0; i < sphereLocs.size(); ++i) {
             if (usedLocIndices.contains(i)) continue;
-            int s = sphereLocs[i].sphere;
-            if (s >= minSphere && s <= maxSphere)
-                validIndices.append(i);
+            const SphereStitm& candidate = sphereLocs[i];
+            int s = candidate.sphere;
+            if (s < minSphere || s > maxSphere)
+                continue;
+            if (candidate.maxMoment < minMoment || candidate.minMoment > maxMoment)
+                continue;
+            validIndices.append(i);
         }
 
         if (validIndices.isEmpty()) {
             debugStream << "  SKIP: '" << keyName << "' – no valid STITM in spheres "
-                        << minSphere << "-" << maxSphere << "\n";
+                        << minSphere << "-" << maxSphere
+                        << ", moments " << minMoment << "-" << maxMoment << "\n";
             continue;
         }
 
@@ -1416,7 +1573,29 @@ FieldPickupRandomizer_ff7tk::performKeyItemSwaps(
             p.keyItem      = keyItem;
             p.keyName      = keyName;
             p.targetOffset = target.scriptOffset;
+            p.targetIsBiton = target.isBiton;
             fieldMods[target.fieldName].placements.append(p);
+
+            if (target.isBiton && requiresMirroredBitons(target.fieldName)) {
+                for (int j = 0; j < sphereLocs.size(); ++j) {
+                    if (j == pick) continue;
+                    const SphereStitm& mirror = sphereLocs[j];
+                    if (!mirror.isBiton) continue;
+                    if (!mirror.fieldName.compare(target.fieldName, Qt::CaseInsensitive) == 0)
+                        continue;
+                    if (usedLocIndices.contains(j)) continue;
+                    usedLocIndices.insert(j);
+                    KeyItemPlacement mirrorPlacement = p;
+                    mirrorPlacement.targetOffset = mirror.scriptOffset;
+                    mirrorPlacement.targetIsBiton = true;
+                    fieldMods[mirror.fieldName].placements.append(mirrorPlacement);
+                    debugStream << "    MIRROR: '" << keyName << "' duplicated in "
+                                << mirror.fieldName << " @" << mirror.scriptOffset << "\n";
+                }
+            }
+
+            if (wardrobeCategory != WardrobeCategory::None)
+                wardrobeCategoryUsed[wardrobeIndex] = true;
 
             placed++;
             debugStream << "  PLACED: '" << keyName << "' -> " << target.fieldName

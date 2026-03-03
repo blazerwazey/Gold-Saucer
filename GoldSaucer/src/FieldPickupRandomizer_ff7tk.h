@@ -120,15 +120,28 @@ private:
     struct GlobalStitmLocation {
         int fileIndex;
         int scriptOffset;
+        int minGameMoment;
+        int maxGameMoment;
+        bool isBiton{false};
     };
     struct KeyItemPlacement {
         GlobalKeyItem keyItem;
         QString keyName;
         int targetOffset;   // offset in target field (was STITM)
+        bool targetIsBiton{false};
     };
     struct KeyItemFieldMod {
         QVector<int>               bitonNopOffsets;  // original BITONs to NOP
         QVector<KeyItemPlacement>  placements;       // new BITONs to write
+    };
+
+    enum class WardrobeCategory {
+        None = 0,
+        Dress,
+        Wig,
+        Tiara,
+        Cologne,
+        Underwear,
     };
 
     // --- Core workflow ---
@@ -172,6 +185,13 @@ private:
     static int getFieldSphere(const QString& fieldName);
     static int getKeyItemMinSphere(quint32 keyItemId);
     static int getKeyItemMaxSphere(quint32 keyItemId);
+    static int getKeyItemMinMoment(quint32 keyItemId);
+    static int getKeyItemMaxMoment(quint32 keyItemId);
+    static QPair<int, int> getStitmMomentWindow(const QString& fieldName, int scriptOffset);
+    static QPair<int, int> getFieldMomentWindow(const QString& fieldName);
+    static WardrobeCategory getWardrobeCategory(quint32 keyItemId);
+    static QString wardrobeCategoryName(WardrobeCategory category);
+    static bool requiresMirroredBitons(const QString& fieldName);
     static QString getKeyItemName(quint16 saveOffset, quint8 bit);
 
     // --- Helpers ---

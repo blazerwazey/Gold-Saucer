@@ -5,6 +5,10 @@
 #include <QDir>
 #include <QDebug>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <algorithm>
 #include <cstring>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +62,12 @@ bool ShopRandomizer::randomize()
     }
     if (logOk) log << "Found EXE: " << exePath << "\n";
 
+    // --- detect the exe build (classic Steam vs 2026 re-release) -------------
+    if (!detectExeLayout(exePath, log)) {
+        if (logOk) log << "ERROR: unrecognised ff7_en.exe build (shop table not found)\n";
+        return false;
+    }
+
     // --- Shop randomization now uses hext patches only - no exe copying needed ---
     if (logOk) log << "Using hext patch method - no exe copying required\n";
 
@@ -68,6 +78,17 @@ bool ShopRandomizer::randomize()
         return false;
     }
     if (logOk) log << "Read " << shops.size() << " shops from exe\n\n";
+
+    // --- Archipelago shop slots (read before randomizing so reserved token
+    //     ids are kept out of normal stock) -----------------------------------
+    loadApShops(log);
+
+    // --- price tables -> tiered eligible-item pools --------------------------
+    if (!readPrices(exePath, log)) {
+        if (logOk) log << "ERROR: Failed to read price tables from exe\n";
+        return false;
+    }
+    buildTieredPools(log);
 
     // --- randomize -----------------------------------------------------------
     int modified = 0;
@@ -90,12 +111,15 @@ bool ShopRandomizer::randomize()
                        << ") type=" << static_cast<int>(t)
                        << " items=" << s.itemCount << "\n";
 
-        randomizeShop(s, log);
+        randomizeShop(i, s, log);
         modified++;
         if (logOk) log << "\n";
     }
 
     if (logOk) log << "\nShops randomized: " << modified << " / " << shops.size() << "\n";
+
+    // --- inject Archipelago shop slots (token items) -------------------------
+    applyApShops(shops, log);
 
     // --- generate hext patch --------------------------------------------------
     if (!generateHextPatch(outputPath, shops)) {
@@ -157,6 +181,44 @@ QString ShopRandomizer::findFF7Exe() const
 // Read / write 80 shop records from/to the exe
 // ─────────────────────────────────────────────────────────────────────────────
 
+bool ShopRandomizer::detectExeLayout(const QString& exePath, QTextStream& log)
+{
+    QFile f(exePath);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+
+    auto looksLikeShopTable = [&](qint64 pos) -> bool {
+        // Probe: the first 10 shop records must all be structurally valid.
+        if (!f.seek(pos)) return false;
+        const QByteArray raw = f.read(10 * ExeShopRecord::RECORD_BYTES);
+        if (raw.size() != 10 * ExeShopRecord::RECORD_BYTES) return false;
+        for (int i = 0; i < 10; ++i) {
+            const char* d = raw.constData() + i * ExeShopRecord::RECORD_BYTES;
+            const quint16 type = static_cast<quint8>(d[0]) | (static_cast<quint8>(d[1]) << 8);
+            const quint8  cnt  = static_cast<quint8>(d[2]);
+            if (type > 8 || cnt > ExeShopRecord::SLOT_COUNT) return false;
+        }
+        return true;
+    };
+
+    const qint64 candidates[] = { SHOP_POS_CLASSIC, SHOP_POS_2026 };
+    for (qint64 c : candidates) {
+        if (looksLikeShopTable(c)) {
+            m_shopPos         = c;
+            m_itemPricePos    = c + ITEM_PRICE_DELTA;
+            m_materiaPricePos = c + MATERIA_PRICE_DELTA;
+            f.close();
+            log << "Exe layout: shop table @0x" << QString::number(c, 16).toUpper()
+                << (c == SHOP_POS_2026 ? " (2026 re-release)" : " (classic Steam)")
+                << ", prices @0x" << QString::number(m_itemPricePos, 16).toUpper()
+                << "/0x" << QString::number(m_materiaPricePos, 16).toUpper() << "\n";
+            return true;
+        }
+    }
+    f.close();
+    return false;
+}
+
 bool ShopRandomizer::readShops(const QString& exePath, QVector<ExeShopRecord>& shops)
 {
     QFile f(exePath);
@@ -165,13 +227,13 @@ bool ShopRandomizer::readShops(const QString& exePath, QVector<ExeShopRecord>& s
         return false;
     }
 
-    if (f.size() < SHOP_INVENTORY_POS + NUM_SHOPS * ExeShopRecord::RECORD_BYTES) {
+    if (f.size() < m_shopPos + NUM_SHOPS * ExeShopRecord::RECORD_BYTES) {
         qDebug() << "ShopRandomizer: exe too small – wrong file?";
         f.close();
         return false;
     }
 
-    f.seek(SHOP_INVENTORY_POS);
+    f.seek(m_shopPos);
     shops.resize(NUM_SHOPS);
 
     for (int i = 0; i < NUM_SHOPS; ++i) {
@@ -221,8 +283,10 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
 
     // Write each shop as a hext entry
     for (int i = 0; i < NUM_SHOPS && i < shops.size(); ++i) {
-        qint64 address = SHOP_INVENTORY_POS + i * ExeShopRecord::RECORD_BYTES;
-        
+        // FFNx Hext patches live memory, so use the virtual address, not the
+        // file offset.
+        qint64 address = SHOP_INVENTORY_VA + i * ExeShopRecord::RECORD_BYTES;
+
         // Build the shop record bytes
         QByteArray rec(ExeShopRecord::RECORD_BYTES, '\0');
         char* d = rec.data();
@@ -246,7 +310,9 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
         }
         hexBytes = hexBytes.trimmed();
 
-        hext << "+0x" << QString::number(address, 16).toUpper() << " " << hexBytes << "\n";
+        // FFNx Hext line format: "<VA> = <space-separated bytes>".
+        // (A leading "+" would be parsed as a global offset, not a patch.)
+        hext << QString::number(address, 16).toUpper() << " = " << hexBytes << "\n";
     }
 
     hextFile.close();
@@ -255,98 +321,245 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Archipelago shop slots
+// ─────────────────────────────────────────────────────────────────────────────
+
+void ShopRandomizer::loadApShops(QTextStream& log)
+{
+    m_apShops.clear();
+    m_reservedTokens.clear();
+    m_reservedMateria.clear();
+
+    QString apJson = m_parent->m_config.getApJsonPath();
+    if (apJson.isEmpty()) {
+        log << "AP shops: no apJsonPath configured — skipping AP shop slots\n";
+        return;
+    }
+    QFile f(apJson);
+    if (!f.open(QIODevice::ReadOnly)) {
+        log << "AP shops: cannot open " << apJson << "\n";
+        return;
+    }
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+
+    const QJsonArray shops = doc.object().value("shops").toArray();
+    for (const QJsonValue& v : shops) {
+        const QJsonObject o = v.toObject();
+        int shopId = o.value("shop_id").toInt(-1);
+        int token  = o.value("token_id").toInt(-1);
+        const bool isMateria = (o.value("token_type").toString("item") == "materia");
+        // item tokens are composite ids (0x000–0x13F); materia tokens are 0x00–0x5A.
+        const int maxToken = isMateria ? MATERIA_MAX_ID : (COMPOSITE_COUNT - 1);
+        if (shopId < 0 || token < 0 || token > maxToken)
+            continue;
+        m_apShops.append({ shopId, static_cast<quint16>(token), isMateria });
+        if (isMateria) m_reservedMateria.insert(static_cast<quint16>(token));
+        else           m_reservedTokens.insert(static_cast<quint16>(token));
+    }
+    log << "AP shops: " << m_apShops.size() << " slot(s), "
+        << m_reservedTokens.size() << " item + " << m_reservedMateria.size()
+        << " materia reserved token id(s)\n";
+}
+
+void ShopRandomizer::applyApShops(QVector<ExeShopRecord>& shops, QTextStream& log)
+{
+    for (const ApShopSlot& e : m_apShops) {
+        const int     shopId = e.shopId;
+        const quint16 token  = e.token;
+        if (shopId < 0 || shopId >= shops.size()) {
+            log << "AP shop: skip bad shop_id " << shopId << "\n";
+            continue;
+        }
+        ExeShopRecord& s = shops[shopId];
+        // Append the AP token as a new slot so normal stock is preserved; if the
+        // shop is already full (10 slots), overwrite the last slot.
+        int slot = s.itemCount;
+        if (slot >= ExeShopRecord::SLOT_COUNT)
+            slot = ExeShopRecord::SLOT_COUNT - 1;
+        s.entries[slot].type    = e.isMateria ? 1 : 0;  // 1 = materia, 0 = item/weapon/etc.
+        s.entries[slot].index   = token;
+        s.entries[slot].padding = 0;
+        if (s.itemCount < ExeShopRecord::SLOT_COUNT)
+            s.itemCount = static_cast<quint8>(slot + 1);
+        log << "AP shop " << shopId << " (" << shopName(shopId) << "): "
+            << (e.isMateria ? "materia" : "item") << " token 0x"
+            << QString::number(token, 16) << " at slot " << slot << "\n";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Per-shop randomization (category-aware)
 // ─────────────────────────────────────────────────────────────────────────────
 
-void ShopRandomizer::randomizeShop(ExeShopRecord& shop, QTextStream& log)
+void ShopRandomizer::randomizeShop(int shopId, ExeShopRecord& shop, QTextStream& log)
 {
+    const int tier = shopTier(shopId);
     for (int i = 0; i < shop.itemCount && i < ExeShopRecord::SLOT_COUNT; ++i) {
         ExeShopSlot& entry = shop.entries[i];
         quint16 oldIndex = entry.index;
         qint32  oldType  = entry.type;
 
         if (shop.shopType == ExeShopType::Materia) {
-            // Materia shop – keep type=1, randomize materia ID
+            // Materia shop – keep type=1, pick a price-appropriate materia
             entry.type  = 1;
-            entry.index = randomMateria();
+            entry.index = pickTiered(CatMateria, tier);
         } else {
-            // Non-materia shop – pick from the appropriate category
+            // Non-materia shop – pick from the appropriate category at this tier
             entry.type  = 0;
-            entry.index = randomFromCategory(shop.shopType);
+            entry.index = randomFromCategory(shop.shopType, tier);
         }
         entry.padding = 0;
 
         log << "  [" << i << "] type " << oldType << " idx " << oldIndex
-            << " -> type " << entry.type << " idx " << entry.index << "\n";
+            << " -> type " << entry.type << " idx " << entry.index
+            << " (tier " << tier << ")\n";
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Random item generators
+// Price tables -> tiered eligible-item pools
 // ─────────────────────────────────────────────────────────────────────────────
 
-quint16 ShopRandomizer::randomItem() const
+bool ShopRandomizer::readPrices(const QString& exePath, QTextStream& log)
 {
-    // Consumable items 0x00–0x68  (105 items)
-    return static_cast<quint16>(
-        std::uniform_int_distribution<int>(0, ITEM_COUNT - 1)(
-            const_cast<std::mt19937&>(m_rng)));
+    QFile f(exePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        log << "readPrices: cannot open " << exePath << "\n";
+        return false;
+    }
+    m_itemPrices.resize(COMPOSITE_COUNT);
+    m_materiaPrices.resize(MATERIA_MAX_ID + 1);
+
+    f.seek(m_itemPricePos);
+    QByteArray ib = f.read(static_cast<qint64>(COMPOSITE_COUNT) * 4);
+    f.seek(m_materiaPricePos);
+    QByteArray mb = f.read(static_cast<qint64>(MATERIA_MAX_ID + 1) * 4);
+    f.close();
+
+    if (ib.size() != COMPOSITE_COUNT * 4 || mb.size() != (MATERIA_MAX_ID + 1) * 4) {
+        log << "readPrices: short read (item " << ib.size()
+            << " materia " << mb.size() << ")\n";
+        return false;
+    }
+    for (int i = 0; i < COMPOSITE_COUNT; ++i)
+        std::memcpy(&m_itemPrices[i], ib.constData() + i * 4, 4);
+    for (int i = 0; i <= MATERIA_MAX_ID; ++i)
+        std::memcpy(&m_materiaPrices[i], mb.constData() + i * 4, 4);
+
+    log << "readPrices: loaded " << COMPOSITE_COUNT << " item + "
+        << (MATERIA_MAX_ID + 1) << " materia prices\n";
+    return true;
 }
 
-quint16 ShopRandomizer::randomWeapon() const
+void ShopRandomizer::buildTieredPools(QTextStream& log)
 {
-    // Weapons: composite index 0x80 + (0..127)
-    return WEAPON_START + static_cast<quint16>(
-        std::uniform_int_distribution<int>(0, WEAPON_COUNT - 1)(
-            const_cast<std::mt19937&>(m_rng)));
+    // Materia ids with no real entry (would render as broken materia).
+    static const QSet<quint16> kMateriaGaps = {
+        0x16, 0x26, 0x2D, 0x2E, 0x2F, 0x3F, 0x42, 0x43
+    };
+
+    auto split = [&](int cat, QVector<QPair<quint32, quint16>>& priced) {
+        std::sort(priced.begin(), priced.end(),
+                  [](const QPair<quint32, quint16>& a, const QPair<quint32, quint16>& b) {
+                      return a.first < b.first;  // ascending by price
+                  });
+        const int n = priced.size();
+        for (int t = 0; t < NUM_TIERS; ++t) {
+            m_pool[cat][t].clear();
+            const int lo = n * t / NUM_TIERS;
+            const int hi = n * (t + 1) / NUM_TIERS;
+            for (int k = lo; k < hi; ++k)
+                m_pool[cat][t].append(priced[k].second);
+        }
+        log << "  pool cat " << cat << ": " << n << " sellable -> tiers ["
+            << m_pool[cat][0].size() << "," << m_pool[cat][1].size() << ","
+            << m_pool[cat][2].size() << "]\n";
+    };
+
+    // Composite categories (items/weapons/armor/accessories) share m_itemPrices.
+    struct CatRange { int cat; int start; int end; };  // inclusive composite ids
+    const CatRange comp[] = {
+        { CatItem,      0x00,            ITEM_COUNT - 1 },
+        { CatWeapon,    WEAPON_START,    WEAPON_START + WEAPON_COUNT - 1 },
+        { CatArmor,     ARMOR_START,     ARMOR_START + ARMOR_COUNT - 1 },
+        { CatAccessory, ACCESSORY_START, ACCESSORY_START + ACCESSORY_COUNT - 1 },
+    };
+    for (const CatRange& cr : comp) {
+        QVector<QPair<quint32, quint16>> priced;
+        for (int id = cr.start; id <= cr.end && id < COMPOSITE_COUNT; ++id) {
+            const quint32 price = m_itemPrices[id];
+            if (price < SELLABLE_MIN) continue;                       // unsellable sentinel
+            if (m_reservedTokens.contains(static_cast<quint16>(id))) continue; // AP token id
+            priced.append(qMakePair(price, static_cast<quint16>(id)));
+        }
+        split(cr.cat, priced);
+    }
+
+    // Materia (own price table); skip gaps + unsellable (Enemy Skill, KOTR, Masters).
+    {
+        QVector<QPair<quint32, quint16>> priced;
+        for (int id = 0; id <= MATERIA_MAX_ID; ++id) {
+            if (kMateriaGaps.contains(static_cast<quint16>(id))) continue;
+            if (m_reservedMateria.contains(static_cast<quint16>(id))) continue; // AP token
+            const quint32 price = m_materiaPrices[id];
+            if (price < SELLABLE_MIN) continue;
+            priced.append(qMakePair(price, static_cast<quint16>(id)));
+        }
+        split(CatMateria, priced);
+    }
 }
 
-quint16 ShopRandomizer::randomArmor() const
+int ShopRandomizer::shopTier(int id) const
 {
-    return ARMOR_START + static_cast<quint16>(
-        std::uniform_int_distribution<int>(0, ARMOR_COUNT - 1)(
-            const_cast<std::mt19937&>(m_rng)));
+    // World-progression tiers (see shopName()): 0 = early, 1 = mid, 2 = late.
+    if (id <= 25) return 0;                                 // Midgar, Kalm, Fort Condor D1, Junon, Cargo
+    if (id >= 51 && id <= 59) return 0;                     // Fort Condor D2, Junon D2
+    if ((id >= 26 && id <= 42) || (id >= 60 && id <= 64))  // Costa..Rocket Town (+disc-2 copies)
+        return 1;
+    return 2;                                               // Wutai, Temple, Icicle, Mideel, Bone Village
 }
 
-quint16 ShopRandomizer::randomAccessory() const
+quint16 ShopRandomizer::pickTiered(int category, int tier) const
 {
-    return ACCESSORY_START + static_cast<quint16>(
-        std::uniform_int_distribution<int>(0, ACCESSORY_COUNT - 1)(
-            const_cast<std::mt19937&>(m_rng)));
+    if (category < 0 || category >= CatCOUNT)
+        return 0;
+    // Prefer the requested tier; fall back to the nearest non-empty tier so a
+    // sparse category (e.g. armor) never leaves a slot unfilled.
+    for (int d = 0; d < NUM_TIERS; ++d) {
+        for (int t : { tier + d, tier - d }) {
+            if (t < 0 || t >= NUM_TIERS) continue;
+            const QVector<quint16>& pool = m_pool[category][t];
+            if (!pool.isEmpty()) {
+                const int idx = std::uniform_int_distribution<int>(0, pool.size() - 1)(
+                    const_cast<std::mt19937&>(m_rng));
+                return pool[idx];
+            }
+        }
+    }
+    return (category == CatMateria) ? 0x35 : 0x00;  // Restore / Potion (safe defaults)
 }
 
-quint16 ShopRandomizer::randomMateria() const
-{
-    return static_cast<quint16>(
-        std::uniform_int_distribution<int>(0, MATERIA_COUNT - 1)(
-            const_cast<std::mt19937&>(m_rng)));
-}
-
-quint16 ShopRandomizer::randomFromCategory(ExeShopType shopType) const
+quint16 ShopRandomizer::randomFromCategory(ExeShopType shopType, int tier) const
 {
     switch (shopType) {
     case ExeShopType::Weapon:
-        return randomWeapon();
+        return pickTiered(CatWeapon, tier);
     case ExeShopType::Accessory:
-        return randomAccessory();
+        return pickTiered(CatAccessory, tier);
     case ExeShopType::Materia:
-        return randomMateria();   // shouldn't reach here but just in case
+        return pickTiered(CatMateria, tier);   // shouldn't reach here but just in case
     case ExeShopType::General:
-    case ExeShopType::Tool: {
-        // Mixed shop – pick from any non-materia category
-        int roll = std::uniform_int_distribution<int>(0, 3)(
-            const_cast<std::mt19937&>(m_rng));
-        switch (roll) {
-        case 0:  return randomItem();
-        case 1:  return randomWeapon();
-        case 2:  return randomArmor();
-        default: return randomAccessory();
-        }
-    }
+    case ExeShopType::Tool:
+        // Mixed shop – any non-materia category (CatItem..CatAccessory = 0..3).
+        return pickTiered(
+            std::uniform_int_distribution<int>(CatItem, CatAccessory)(
+                const_cast<std::mt19937&>(m_rng)),
+            tier);
     case ExeShopType::Item:
     case ExeShopType::Item2:
     default:
-        return randomItem();
+        return pickTiered(CatItem, tier);
     }
 }
 

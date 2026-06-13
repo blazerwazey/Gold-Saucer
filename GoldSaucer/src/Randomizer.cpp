@@ -3,18 +3,31 @@
 #include "ShopRandomizer.h"
 #include "FieldPickupRandomizer_ff7tk.h"
 #include "StartingEquipmentRandomizer.h"
+#include "CraterBarrierPatcher.h"
 #include <QFile>
 #include <QDir>
 #include <QDebug>
 
+QString Randomizer::resolveFF7Root(const QString& path)
+{
+    // 2026 Steam re-release: FFNx engine (ff7_en.exe) + data live in ff7/workingdir.
+    const QString nested = QDir(path).filePath("ff7/workingdir");
+    if (QFile::exists(QDir(nested).filePath("ff7_en.exe"))) {
+        qDebug() << "Detected 2026 re-release layout; using FF7 root:" << nested;
+        return nested;
+    }
+    return path;
+}
+
 Randomizer::Randomizer(const QString& ff7Path, const Config& config)
-    : m_ff7Path(ff7Path)
+    : m_ff7Path(resolveFF7Root(ff7Path))
     , m_config(config)
     , m_rng(config.getSeed())
     , m_enemyRandomizer(nullptr)
     , m_shopRandomizer(nullptr)
     , m_fieldPickupRandomizer(nullptr)
     , m_startingEquipmentRandomizer(nullptr)
+    , m_craterBarrierPatcher(nullptr)
 {
     initializeRandomizers();
 }
@@ -25,6 +38,7 @@ Randomizer::~Randomizer()
     delete m_shopRandomizer;
     delete m_fieldPickupRandomizer;
     delete m_startingEquipmentRandomizer;
+    delete m_craterBarrierPatcher;
 }
 
 void Randomizer::initializeRandomizers()
@@ -33,6 +47,7 @@ void Randomizer::initializeRandomizers()
     m_shopRandomizer = new ShopRandomizer(this);
     m_fieldPickupRandomizer = new FieldPickupRandomizer_ff7tk(this);
     m_startingEquipmentRandomizer = new StartingEquipmentRandomizer(this);
+    m_craterBarrierPatcher = new CraterBarrierPatcher(m_ff7Path, getOutputPath());
 }
 
 bool Randomizer::validateFF7Installation()
@@ -144,6 +159,15 @@ bool Randomizer::randomizeStartingEquipment()
     }
     
     return m_startingEquipmentRandomizer->randomize();
+}
+
+bool Randomizer::applyCraterBarrier()
+{
+    if (!m_craterBarrierPatcher) {
+        qDebug() << "Error: Crater barrier patcher not initialized";
+        return false;
+    }
+    return m_craterBarrierPatcher->patch();
 }
 
 QString Randomizer::getOutputPath() const

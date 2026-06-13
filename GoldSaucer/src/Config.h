@@ -80,7 +80,13 @@ public:
     
     void setFF7Path(const QString& path);
     QString getFF7Path() const;
-    
+
+    void setApJsonPath(const QString& path);
+    QString getApJsonPath() const;
+
+    void setFreeRoam(bool enabled);
+    bool getFreeRoam() const;
+
     void setDefaults();
     
 private:
@@ -112,4 +118,10 @@ private:
     
     // FF7 installation path
     QString m_ff7Path;
+
+    // Archipelago JSON path (output from AP generator, consumed by Gold Saucer)
+    QString m_apJsonPath;
+
+    // Free Roam mode: start on world map at game moment 1603
+    bool m_freeRoam;
 };

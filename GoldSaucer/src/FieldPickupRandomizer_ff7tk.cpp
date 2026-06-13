@@ -7,6 +7,9 @@
 #include <QTextStream>
 #include <QFileInfo>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <LZS>
 #include <ff7tk/data/FF7Text.h>
 #include <ff7tk/data/FF7Item.h>
@@ -99,11 +102,30 @@ bool FieldPickupRandomizer_ff7tk::randomize()
         debugStream << "Files     : " << allFiles.size() << "\n\n";
     }
 
+    // --- load Archipelago JSON (AP mode only) --------------------------------
+    bool apMode = m_parent && m_parent->m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
+    if (apMode) {
+        QString apJson = m_parent->m_config.getApJsonPath();
+        if (apJson.isEmpty()) {
+            if (debugOk) debugStream << "AP JSON: path not configured in config.json (apJsonPath)\n";
+            return false;
+        }
+        if (!loadApJson(apJson, debugStream)) {
+            if (debugOk) debugStream << "AP JSON: failed to load " << apJson << "\n";
+            return false;
+        }
+    }
+
     // --- key item randomization (global pass, before per-file processing) ---
-    bool keyItemEnabled = m_parent && m_parent->m_config.getKeyItemRandomization();
+    // Disable key item randomization in AP mode - AP handles all item placement
+    bool keyItemEnabled = m_parent && m_parent->m_config.getKeyItemRandomization() && !apMode;
     if (debugOk) {
         debugStream << "Key Item Randomization: "
-                    << (keyItemEnabled ? "ENABLED" : "DISABLED") << "\n\n";
+                    << (keyItemEnabled ? "ENABLED" : "DISABLED");
+        if (apMode && m_parent && m_parent->m_config.getKeyItemRandomization()) {
+            debugStream << " (disabled in AP mode)";
+        }
+        debugStream << "\n\n";
     }
 
     // --- key item placement plan (computed but NOT applied to LGP yet) ------
@@ -117,8 +139,7 @@ bool FieldPickupRandomizer_ff7tk::randomize()
         for (int idx = 0; idx < allFiles.size(); ++idx) {
             const QString& fn = allFiles[idx];
             if (fn.startsWith("blackbg")) continue;
-            if (fn == "onna_5") continue; // Exclude onna_5 from key item collection
-            if (fn == "mkt_w") continue; // Exclude mkt_w from key item collection
+            if (fn == "onna_5") continue; // onna_5 has no key item BITONs but triggers false STITM detections
 
             QByteArray fd = lgp.fileData(fn);
             if (fd.isEmpty()) continue;
@@ -254,10 +275,17 @@ bool FieldPickupRandomizer_ff7tk::randomize()
         }
     }
 
+    // --- Archipelago verification log -------------------------------------
+    if (apMode && !m_apBitonEntries.isEmpty()) {
+        writeArchipelagoSidecar(outputPath, debugStream);
+    }
+
     // --- summary ------------------------------------------------------------
     if (debugOk) {
         debugStream << "\n=== Summary ===\n";
         debugStream << "Files with STITM changes: " << filesWithChanges << "\n";
+        if (apMode)
+            debugStream << "Archipelago BITONs assigned: " << m_apBitonEntries.size() << "\n";
         debugStream << "Session completed: "
                     << QDateTime::currentDateTime().toString() << "\n";
         debugFile.close();
@@ -356,18 +384,25 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         }
     }
 
+    // --- Free Roam MAPJUMP injection (must run before STITM scan) -----------
+    bool freeRoam = m_parent && m_parent->m_config.getFreeRoam();
+    if (freeRoam && fieldName.toLower() == "md1stin") {
+        if (injectFreeRoamMapJump(decompressed, fieldName, debugStream))
+            totalMods++;
+    }
+
+    // --- Free Roam diagnostics (disabled): the Rocket Town soft-lock was traced
+    //     to the rckt/rckt2 'cloud' init gating UC(disable control)+MENU2 on
+    //     Var[3][130] bit 3 (the first-visit intro flag), now pre-set in the
+    //     md1stin injection above. dumpFieldScripts() is kept for future use.
+    //     To re-enable, dump fields whose lowercased name startsWith("rckt"/"rkt").
+
+    // --- Archipelago mode vs. normal randomization -------------------------
+    bool apMode = m_parent && m_parent->m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
+
     // --- STITM (items) ------------------------------------------------------
     // Key item BITONs are already written, so scan won't match those offsets.
     QVector<STITMInfo> stitmCandidates = scanForSTITM(decompressed, fieldName, debugStream);
-
-    // Special case: md1stin has multiple entities gated by a variable, each
-    // with 2 STITMs.  Only one entity fires, so randomize 2 items once and
-    // apply the same pair to every entity so all items are obtainable.
-    bool isMd1stin = (fieldName.toLower() == "md1stin");
-    
-    // Special case: mkt_w has multiple entities that need to give the same items
-    // to ensure all items are obtainable regardless of which entity fires
-    bool isMktW = (fieldName.toLower() == "mkt_w");
 
     // Collect valid candidates first
     QVector<int> validIndices;
@@ -376,48 +411,94 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             validIndices.append(idx);
     }
 
-    if (isMd1stin && validIndices.size() >= 2) {
-        // Pick 2 items that every entity will share
-        quint16 sharedItems[2] = { getRandomItem(1), getRandomItem(1) };
-        debugStream << "  md1stin special: syncing all entities to items "
-                    << getItemName(sharedItems[0]) << " (" << sharedItems[0] << ") and "
-                    << getItemName(sharedItems[1]) << " (" << sharedItems[1] << ")\n";
-
-        for (int v = 0; v < validIndices.size(); ++v) {
-            STITMInfo& info = stitmCandidates[validIndices[v]];
-            quint16 newItemID = sharedItems[v % 2];
-            if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
-                modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
-                totalMods++;
+    if (apMode) {
+        // md1stin has multiple entity copies of 2 logical pickups (v%2 pattern).
+        // All even-indexed copies share BITON A; all odd-indexed copies share BITON B.
+        if (fieldName.toLower() == "md1stin" && validIndices.size() >= 2) {
+            // Each parity slot caches the (bankByte, addr, bit) we just wrote
+            // so subsequent copies of the same logical pickup share the same
+            // BITON.  bankByte is sourced from byte 1 of the rewritten op so
+            // we stay consistent with whatever bank applySTITMAsArchipelago
+            // resolved from the JSON (could be bank 1 or bank 3).
+            struct ParityBiton { quint8 bankByte; quint8 addr; quint8 bit; };
+            QMap<int, ParityBiton> bitonByParity; // 0=even, 1=odd
+            for (int v = 0; v < validIndices.size(); ++v) {
+                int parity = v % 2;
+                STITMInfo& info = stitmCandidates[validIndices[v]];
+                if (!bitonByParity.contains(parity)) {
+                    if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream)) {
+                        ParityBiton pb;
+                        pb.bankByte = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 1]));
+                        pb.addr     = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 2]));
+                        pb.bit      = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 3]));
+                        bitonByParity[parity] = pb;
+                        totalMods++;
+                    }
+                } else {
+                    const ParityBiton& pb = bitonByParity[parity];
+                    if (info.offset + STITM_SIZE <= decompressed.size()) {
+                        decompressed[info.offset]     = static_cast<char>(BITON_OPCODE);
+                        decompressed[info.offset + 1] = static_cast<char>(pb.bankByte);
+                        decompressed[info.offset + 2] = static_cast<char>(pb.addr);
+                        decompressed[info.offset + 3] = static_cast<char>(pb.bit);
+                        decompressed[info.offset + 4] = static_cast<char>(0x5F);
+                        totalMods++;
+                        debugStream << "  AP_STITM @" << info.offset
+                                    << "  (md1stin copy parity=" << parity << ") "
+                                    << getItemName(info.originalItemID)
+                                    << " -> reusing BITON bank=" << ((pb.bankByte >> 4) & 0x0F)
+                                    << " addr=0x" << QString::number(pb.addr, 16)
+                                    << " bit=" << pb.bit << "\n";
+                    }
+                }
             }
-        }
-    } else if (isMktW && validIndices.size() >= 2) {
-        // Pick items that every entity will share (same logic as md1stin)
-        QVector<quint16> sharedItems;
-        for (int i = 0; i < validIndices.size(); ++i) {
-            sharedItems.append(getRandomItem(1));
-        }
-        debugStream << "  mkt_w special: syncing all entities to items\n";
-        for (int i = 0; i < sharedItems.size(); ++i) {
-            debugStream << "    Item " << i << ": " << getItemName(sharedItems[i]) << " (" << sharedItems[i] << ")\n";
-        }
-
-        for (int v = 0; v < validIndices.size(); ++v) {
-            STITMInfo& info = stitmCandidates[validIndices[v]];
-            quint16 newItemID = sharedItems[v % sharedItems.size()];
-            if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
-                modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
-                totalMods++;
+        } else {
+            // Archipelago mode: replace each STITM with a unique BITON from the queue
+            for (int idx : validIndices) {
+                STITMInfo& info = stitmCandidates[idx];
+                if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream))
+                    totalMods++;
             }
         }
     } else {
-        // Normal per-STITM randomization
-        for (int idx : validIndices) {
-            STITMInfo& info = stitmCandidates[idx];
-            quint16 newItemID = getRandomItem(1);
-            if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
-                modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
-                totalMods++;
+        // Normal randomization
+        bool isMd1stin = (fieldName.toLower() == "md1stin");
+        bool isMktW    = (fieldName.toLower() == "mkt_w");
+
+        if (isMd1stin && validIndices.size() >= 2) {
+            quint16 sharedItems[2] = { getRandomItem(1), getRandomItem(1) };
+            debugStream << "  md1stin special: syncing all entities to items "
+                        << getItemName(sharedItems[0]) << " (" << sharedItems[0] << ") and "
+                        << getItemName(sharedItems[1]) << " (" << sharedItems[1] << ")\n";
+            for (int v = 0; v < validIndices.size(); ++v) {
+                STITMInfo& info = stitmCandidates[validIndices[v]];
+                quint16 newItemID = sharedItems[v % 2];
+                if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
+                    modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
+                    totalMods++;
+                }
+            }
+        } else if (isMktW && validIndices.size() >= 2) {
+            QVector<quint16> sharedItems;
+            for (int i = 0; i < validIndices.size(); ++i)
+                sharedItems.append(getRandomItem(1));
+            debugStream << "  mkt_w special: syncing all entities to items\n";
+            for (int v = 0; v < validIndices.size(); ++v) {
+                STITMInfo& info = stitmCandidates[validIndices[v]];
+                quint16 newItemID = sharedItems[v % sharedItems.size()];
+                if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
+                    modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
+                    totalMods++;
+                }
+            }
+        } else {
+            for (int idx : validIndices) {
+                STITMInfo& info = stitmCandidates[idx];
+                quint16 newItemID = getRandomItem(1);
+                if (applySTITMRandomization(info, decompressed, newItemID, debugStream)) {
+                    modifications.append(OpcodeModification(info.offset, getItemName(newItemID), false));
+                    totalMods++;
+                }
             }
         }
     }
@@ -426,10 +507,71 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     QVector<SMTRAInfo> smtraCandidates = scanForSMTRA(decompressed, fieldName, debugStream);
     for (SMTRAInfo& info : smtraCandidates) {
         if (!validateSMTRA(info)) continue;
-        quint8 newMateriaID = getRandomMateria();
-        if (applySMTRARandomization(info, decompressed, newMateriaID, debugStream)) {
-            modifications.append(OpcodeModification(info.offset, getMateriaName(newMateriaID), true));
-            totalMods++;
+        if (apMode) {
+            if (applySMTRAAsArchipelago(info, decompressed, fieldName, debugStream))
+                totalMods++;
+        } else {
+            quint8 newMateriaID = getRandomMateria();
+            if (applySMTRARandomization(info, decompressed, newMateriaID, debugStream)) {
+                modifications.append(OpcodeModification(info.offset, getMateriaName(newMateriaID), true));
+                totalMods++;
+            }
+        }
+    }
+
+    // --- Vanilla BITON replacement for Key Items in AP mode -----------------
+    if (apMode) {
+        int vanillaMods = replaceVanillaBitonsForAP(decompressed, fieldName, debugStream);
+        if (vanillaMods > 0) {
+            totalMods += vanillaMods;
+        }
+    }
+
+    // --- mktpb old-man visibility patch (AP mode only) ----------------------
+    // Vanilla mktpb init runs:
+    //   Var[5][16] = 0
+    //   if $KeyItems bit 0 (Cotton Dress)  -> Var[5][16] |= 1
+    //   if $KeyItems bit 1 (Satin Dress)   -> Var[5][16] |= 1
+    //   if $KeyItems bit 2 (Silk Dress)    -> Var[5][16] |= 1
+    // Var[5][16] != 0 hides the old man who hands out the Pharmacy Coupon.
+    // When AP delivers a dress remotely the key-item bit at 0x40 is set, so
+    // the old man permanently disappears on the next mktpb entry, soft-locking
+    // the disguise quest.  NOP the three "Var[5][16] |= 1" BITONs so the
+    // initial "Var[5][16] = 0" stands and the old man stays visible
+    // regardless of the player's dress inventory.
+    if (apMode && fieldName.toLower() == "mktpb") {
+        // The "Var[5][16] |= 1" instructions use OR (0x91), not BITON.
+        // OpcodeBinaryOperation layout:
+        //   [0] 0x91 opcode (OR, 8-bit)
+        //   [1] banks: dest var bank=5 (high nibble) | value src bank=0 -> 0x50
+        //   [2] var address = 0x10  (decimal 16)
+        //   [3] value       = 0x01
+        static const char kOldManHidePattern[4] = {
+            static_cast<char>(0x91), 0x50, 0x10, 0x01
+        };
+        int patchCount = 0;
+        for (int i = 0; i + 4 <= decompressed.size(); ++i) {
+            if (decompressed[i]     == kOldManHidePattern[0] &&
+                decompressed[i + 1] == kOldManHidePattern[1] &&
+                decompressed[i + 2] == kOldManHidePattern[2] &&
+                decompressed[i + 3] == kOldManHidePattern[3]) {
+                decompressed[i]     = static_cast<char>(0x5F); // NOP x4
+                decompressed[i + 1] = static_cast<char>(0x5F);
+                decompressed[i + 2] = static_cast<char>(0x5F);
+                decompressed[i + 3] = static_cast<char>(0x5F);
+                debugStream << "  AP_MKTPB old-man patch @" << i
+                            << ": NOP'd BITON Var[5][16] |= 1\n";
+                ++patchCount;
+                i += 3; // skip past matched bytes
+            }
+        }
+        if (patchCount > 0) {
+            debugStream << "  AP_MKTPB: patched " << patchCount
+                        << " old-man-hide BITON(s)\n";
+            totalMods += patchCount;
+        } else {
+            debugStream << "  AP_MKTPB WARN: expected old-man-hide pattern "
+                           "(82 50 10 00) not found in mktpb script\n";
         }
     }
 
@@ -455,6 +597,532 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                     << totalMods << " opcode(s)\n\n";
     }
     return totalMods > 0;
+}
+
+// ============================================================================
+// injectFreeRoamMapJump
+//
+// Overwrites the first 10 bytes of entity 0, script 0 in md1stin with a
+// MAPJUMP to wm1 (field ID 2 = outside Kalm) on new game start.
+//
+// MAPJUMP opcode (0x60) layout - 10 bytes total (9 operand bytes, per
+// PyFF7 / Makou opcode table where mjump = 9 args):
+//   [0]    0x60  opcode
+//   [1-2]  field ID    uint16 LE
+//   [3-4]  X           int16 LE   (ignored for wm* dummy fields)
+//   [5-6]  Y           int16 LE   (ignored for wm* dummy fields)
+//   [7-8]  triangle ID uint16 LE  (ignored for wm* dummy fields)
+//   [9]    direction   uint8      (ignored for wm* dummy fields)
+//   [10]   0x00 RET    appended so script 0 halts cleanly after the field
+//                      change is queued (prevents executing leftover bytes
+//                      from the opcodes we partially overwrote).
+//
+// Field ID 0x002 = wm1 (Outside Kalm). The WM engine reads which wm* field
+// you jumped from (Special Variable 6) and sets world map coordinates from
+// its own script table - X/Y/triangle/direction in the MAPJUMP bytes are
+// ignored for wm* dummy fields.
+// ============================================================================
+
+// Returns the total byte length (including the opcode byte) of the FF7 field
+// script opcode at `pos`, or -1 if the opcode is invalid/unknown or would run
+// past the end of the buffer. Operand counts are from the standard FF7 opcode
+// table (cf. PyFF7 / Makou Reactor). SPECIAL (0x0F) and KAWAI (0x28) are
+// variable length and handled explicitly.
+static int fieldOpcodeLength(const QByteArray& d, int pos, int fileSize)
+{
+    // Operand byte counts (excluding the 1-byte opcode). -1 = invalid opcode.
+    static const int kOperands[256] = {
+        /*00*/  0, 2, 2, 2, 2, 2, 2, 1,  1,14, 5, 5,-1,-1, 1, 0,
+        /*10*/  1, 2, 1, 2, 5, 6, 7, 8,  7, 8,-1,-1,-1,-1,-1,-1,
+        /*20*/ 10, 1, 4, 2, 2, 8, 1, 1,  0, 0, 1, 1, 4, 6, 1, 9,
+        /*30*/  3, 3, 3, 1, 1, 3, 4, 7,  5, 5, 5, 3, 0, 0, 0, 0,
+        /*40*/  2, 4, 5, 1,-1, 4,-1, 4,  6, 3, 1, 1,-1, 4,-1, 4,
+        /*50*/  9, 5, 3, 1, 1, 2, 6, 6,  4, 4, 4, 6, 7, 9, 7, 0,
+        /*60*/  9, 1, 4, 5, 5, 0, 8, 0,  8, 1, 6, 8, 0, 3, 2, 5,
+        /*70*/  3, 1, 2, 3, 3, 7, 3, 4,  3, 4, 2, 2, 2, 2, 1, 2,
+        /*80*/  3, 4, 3, 3, 3, 3, 4, 3,  4, 3, 4, 3, 4, 3, 4, 3,
+        /*90*/  4, 3, 4, 3, 4, 2, 2, 2,  2, 2, 3, 4, 5, 6, 6,10,
+        /*a0*/  1, 1, 2, 2, 1,10, 8, 8,  5, 5, 1, 3, 0, 5, 2, 2,
+        /*b0*/  4, 4, 3, 2, 5, 5, 1, 3,  4, 3, 2, 4, 4, 3,-1, 1,
+        /*c0*/ 10, 7,14,11, 0, 2, 2, 1,  1, 1, 3, 2, 2, 2, 1, 1,
+        /*d0*/ 12, 1, 1,15, 9, 9, 3, 3,  2, 0,14, 1, 3, 0, 0,10,
+        /*e0*/  3, 3, 2, 2, 2, 4, 4, 4,  6, 9, 9, 4, 4, 7, 7,10,
+        /*f0*/  1, 4,13, 1, 1, 1, 1, 3,  1, 0, 2, 1, 1, 5, 2, 0,
+    };
+
+    if (pos < 0 || pos >= fileSize)
+        return -1;
+    quint8 op = static_cast<quint8>(d.at(pos));
+
+    if (op == 0x0F) {  // SPECIAL: 2-byte header (0x0F + sub) + sub operands
+        if (pos + 1 >= fileSize)
+            return -1;
+        quint8 sub = static_cast<quint8>(d.at(pos + 1));
+        int subOps;
+        switch (sub) {
+            case 0xF5: subOps = 1; break;  // arrow
+            case 0xF6: subOps = 4; break;  // pname
+            case 0xF7: subOps = 2; break;  // gmspd
+            case 0xF8: subOps = 2; break;  // smspd
+            case 0xF9: subOps = 0; break;  // flmat
+            case 0xFA: subOps = 0; break;  // flitm
+            case 0xFB: subOps = 1; break;  // btlck
+            case 0xFC: subOps = 1; break;  // mvlck
+            case 0xFD: subOps = 2; break;  // spcnm
+            case 0xFE: subOps = 0; break;  // rsglb
+            case 0xFF: subOps = 0; break;  // clitm
+            default:   return -1;
+        }
+        int len = 2 + subOps;
+        return (pos + len <= fileSize) ? len : -1;
+    }
+
+    if (op == 0x28) {  // KAWAI: total length is encoded in the second byte
+        if (pos + 1 >= fileSize)
+            return -1;
+        int len = static_cast<quint8>(d.at(pos + 1));
+        if (len < 2)
+            return -1;
+        return (pos + len <= fileSize) ? len : -1;
+    }
+
+    int ops = kOperands[op];
+    if (ops < 0)
+        return -1;
+    int len = 1 + ops;
+    return (pos + len <= fileSize) ? len : -1;
+}
+
+bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
+    QByteArray& decompressed,
+    const QString& fieldName,
+    QTextStream& debugStream)
+{
+    debugStream << "  MAPJUMP_DBG: enter, fileSize=" << decompressed.size() << "\n";
+    const int fileSize = decompressed.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) {
+        debugStream << "  MAPJUMP_DBG: too small\n";
+        return false;
+    }
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, decompressed.constData() + 6, 9 * 4);
+
+    quint32 sec0 = sectionPositions[0];
+    debugStream << "  MAPJUMP_DBG: sec0=" << sec0 << "\n";
+    if (sec0 + 4 >= static_cast<quint32>(fileSize)) {
+        debugStream << "  MAPJUMP_DBG: sec0 out of range\n";
+        return false;
+    }
+
+    int sec0DataStart = static_cast<int>(sec0) + 4;
+    debugStream << "  MAPJUMP_DBG: sec0DataStart=" << sec0DataStart << "\n";
+    if (sec0DataStart + 8 > fileSize) {
+        debugStream << "  MAPJUMP_DBG: sec0DataStart+8 out of range\n";
+        return false;
+    }
+
+    // FF7SCRIPTHEADER layout (all offsets from sec0DataStart):
+    //   +0  u16 unknown1
+    //   +2  u8  nEntities
+    //   +3  u8  nModels
+    //   +4  u16 wStringOffset
+    //   +6  u16 nAkaoOffsets
+    //   +8..+31 scale + blanks + creator + name  (24 bytes)
+    //   = 32 bytes fixed header
+    //   then: szEntities[nEntities][8]
+    //   then: dwAkaoOffsets[nAkaoOffsets] (u32 each = 4 bytes)
+    //   then: vEntityScripts[nEntities][32] (u16 each)
+    if (sec0DataStart + 8 > fileSize) return false;
+    quint8  nbEntities   = static_cast<quint8>(decompressed.at(sec0DataStart + 2));
+    quint16 nAkaoOffsets = 0;
+    memcpy(&nAkaoOffsets, decompressed.constData() + sec0DataStart + 6, 2);
+    debugStream << "  MAPJUMP_DBG: nbEntities=" << nbEntities
+                << " nAkaoOffsets=" << nAkaoOffsets << "\n";
+    if (nbEntities == 0) {
+        debugStream << "  MAPJUMP_DBG: nbEntities==0\n";
+        return false;
+    }
+
+    // Script offset table: 32-byte fixed + 8*N entity names + 4*nAkao Akao offsets
+    int offsetTableStart = sec0DataStart + 32
+                         + 8 * static_cast<int>(nbEntities)
+                         + 4 * static_cast<int>(nAkaoOffsets);
+    debugStream << "  MAPJUMP_DBG: offsetTableStart=" << offsetTableStart << "\n";
+    if (offsetTableStart + 2 > fileSize) {
+        debugStream << "  MAPJUMP_DBG: offsetTableStart out of range\n";
+        return false;
+    }
+
+    // Entity 0, script 0 is the first u16; offsets are relative to sec0DataStart
+    quint16 script0RelOffset;
+    memcpy(&script0RelOffset, decompressed.constData() + offsetTableStart, 2);
+    debugStream << "  MAPJUMP_DBG: script0RelOffset=" << script0RelOffset << "\n";
+
+    int script0AbsStart = sec0DataStart + static_cast<int>(script0RelOffset);
+    debugStream << "  MAPJUMP_DBG: script0AbsStart=" << script0AbsStart << "\n";
+    if (script0AbsStart < 0 || script0AbsStart >= fileSize) {
+        debugStream << "  MAPJUMP_DBG: script0AbsStart out of range\n";
+        return false;
+    }
+
+    // The opening "New party: Cloud" lives in the director's Main script, not
+    // its short Init (script 0). All entities' scripts are packed contiguously
+    // in section 0, so walk the whole bytecode region. Bound the walk at the
+    // start of the AKAO/tutorial blocks (or the string table) so we never parse
+    // non-opcode data.
+    quint16 wStringOffset = 0;
+    memcpy(&wStringOffset, decompressed.constData() + sec0DataStart + 4, 2);
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0) {
+        int akaoTableStart = sec0DataStart + 32 + 8 * static_cast<int>(nbEntities);
+        if (akaoTableStart + 4 <= fileSize) {
+            quint32 firstAkao = 0;
+            memcpy(&firstAkao, decompressed.constData() + akaoTableStart, 4);
+            int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+            if (akaoAbs > script0AbsStart && akaoAbs < walkEnd)
+                walkEnd = akaoAbs;
+        }
+    }
+    if (walkEnd > fileSize || walkEnd <= script0AbsStart)
+        walkEnd = fileSize;
+    debugStream << "  MAPJUMP_DBG: walkEnd=" << walkEnd
+                << " wStringOffset=" << wStringOffset << "\n";
+
+    // Walk opcodes to find PRTYE (0xCA = "New party"). We inject the MAPJUMP
+    // immediately AFTER it so the active party (Cloud) is set up before the
+    // engine transfers to the world map - jumping before that crashes FF7.
+    // Walk across script boundaries (RET is just another opcode here) until we
+    // find the first PRTYE whose first member is Cloud (0x00).
+    int pos = script0AbsStart;
+    int injectAt = -1;
+    int guard = 0;
+    while (pos < walkEnd && guard++ < 100000) {
+        int len = fieldOpcodeLength(decompressed, pos, fileSize);
+        if (len <= 0) {
+            debugStream << "  MAPJUMP_DBG: invalid opcode 0x"
+                        << QString::number(static_cast<quint8>(decompressed.at(pos)), 16)
+                        << " @" << pos << " - aborting injection\n";
+            return false;
+        }
+        quint8 op = static_cast<quint8>(decompressed.at(pos));
+        if (op == 0xCA) {  // PRTYE - New party. Confirm first member is Cloud (0x00).
+            quint8 m0 = (pos + 1 < fileSize) ? static_cast<quint8>(decompressed.at(pos + 1)) : 0xFF;
+            debugStream << "  MAPJUMP_DBG: found PRTYE @" << pos
+                        << " member0=" << m0 << "\n";
+            if (m0 == 0x00) {
+                injectAt = pos + len;  // position right after the party opcode
+                break;
+            }
+        }
+        pos += len;
+    }
+
+    if (injectAt < 0) {
+        debugStream << "  MAPJUMP_DBG: PRTYE (New party: Cloud) not found - aborting\n";
+        return false;
+    }
+    // Injected sequence (after PRTYE, before transferring to the world map).
+    // The skipped Midgar intro normally performs all of this setup; on a NEW
+    // GAME none of it happens, so we replicate the essentials here:
+    //   MENU 6        - Cloud name-entry screen. Sets Cloud's name (default
+    //                   "Cloud" instead of the kernel placeholder "EX-SOLDIER")
+    //                   and initialises the party's average level.
+    //   SETWORD x2    - menu visibility = 0x03FF (all standard commands shown,
+    //                   incl. Materia = bit 2) and locking = 0x0000 (none).
+    //   SETBYTE       - Kalm conversation flags = 0x03 (NPC-spoken bits) to
+    //                   avoid the Kalm progression lock.
+    //   SETWORD       - game moment = 1603.
+    //   MAPJUMP + RET - transfer to wm1 and halt the script cleanly.
+    //
+    // Field memory banks (cf. FF7 savemap): bank 1 maps to savemap 0x0BA4.
+    //   8-bit bank id 0x1 / 16-bit bank id 0x2.
+    //   game moment        = Var[2][0]   (savemap 0x0BA4)
+    //   menu visibility    = Var[2][0x1C](savemap 0x0BC0)
+    //   menu locking       = Var[2][0x1E](savemap 0x0BC2)
+    //   Kalm conv. flags   = Var[1][0x80](savemap 0x0C24)
+    // SET* bank byte = (Dest<<4)|Source; Source 0 = write literal value V.
+    static constexpr quint8  kMenuBank16    = 0x20;   // dest 16-bit bank 1, literal src
+    static constexpr quint8  kMenuBank8     = 0x10;   // dest 8-bit  bank 1, literal src
+    static constexpr quint16 kGameMoment    = 1603;
+    static constexpr quint16 kMenuVisible   = 0x03FF; // Item..Save all visible
+    static constexpr quint16 kMenuLocking   = 0x0000; // nothing locked
+    static constexpr quint8  kKalmFlagsAddr = 0x80;   // Var[1][128]
+    static constexpr quint8  kKalmFlags     = 0x03;   // bits 0 + 1
+
+    // BITON Var[3][128] bit 1 — marks the psdun_2 (Mythril Mines) line-trigger
+    // party-split event as "already played" so Free Roam doesn't fire it and
+    // boot the player back. bank 3 = 8-bit half of the 2nd bank pair; the engine
+    // resolves the savemap offset, so we only encode the bank nibble here.
+    //   banks byte = (addrBank 3 << 4) | (bitSrc 0 = literal) = 0x30
+    static constexpr quint8  kBitOnBanks    = 0x30;   // addr bank 3, literal bit
+    static constexpr quint8  kFreeRoamFlagAddr = 0x80; // Var[3][128]
+    static constexpr quint8  kFreeRoamFlagBit  = 0x01; // "bitON 1" = bit index 1
+
+    // BITON Var[3][130] bit 3 — marks the Rocket Town first-visit intro as
+    // already played. The rckt/rckt2 'cloud' init runs
+    //   IFUB Var[3][130] bitOFF 3 -> UC(01) [disable control] + MENU2(01)
+    // expecting the intro cutscene to re-enable control. On a moment-1603 Free
+    // Roam the bit is OFF and that cutscene never fires, soft-locking the player
+    // on entry. Setting the bit makes the IFUB take the skip branch.
+    static constexpr quint8  kRocketFlagAddr = 0x82; // Var[3][130]
+    static constexpr quint8  kRocketFlagBit  = 0x03; // "bitON 3" = bit index 3
+
+    // MAPJUMP to wm1 (field ID 2 = outside Kalm).
+    // X/Y/triangle/direction are ignored by the WM engine for wm* dummy fields.
+    static constexpr quint16 kFieldId  = 2;   // wm1 = Outside Kalm
+    static constexpr qint16  kSpawnX   = 0;
+    static constexpr qint16  kSpawnY   = 0;
+    static constexpr quint16 kTriangle = 0;
+    static constexpr quint8  kDir      = 0;
+
+    // NOTE: intro music (MUSIC opcode) + a welcome MESSAGE were reverted — they
+    // crashed the field right after the intro movie. The field MUSIC index and a
+    // blocking MESSAGE in this early (pre-interactive) script context are not safe
+    // here without in-game verification (md1stin has only 2 akao entries, so a bad
+    // MUSIC index hard-crashes). overwriteFieldDialog() is kept below for a future,
+    // tested re-add. This is the proven new-game -> world-map injection.
+    auto put16 = [](QByteArray& b, quint16 v) {
+        b.append(static_cast<char>(v & 0xFF));
+        b.append(static_cast<char>((v >> 8) & 0xFF));
+    };
+
+    QByteArray seq;
+    // MENU 6 — name entry for Cloud (char id 0); B=0 (literal), T=6, P=0
+    seq.append(static_cast<char>(0x49));
+    seq.append(static_cast<char>(0x00));
+    seq.append(static_cast<char>(0x06));
+    seq.append(static_cast<char>(0x00));
+    // SETWORD menu visibility (Var[2][0x1C]) = 0x03FF
+    seq.append(static_cast<char>(0x81)); seq.append(static_cast<char>(kMenuBank16));
+    seq.append(static_cast<char>(0x1C)); put16(seq, kMenuVisible);
+    // SETWORD menu locking (Var[2][0x1E]) = 0x0000
+    seq.append(static_cast<char>(0x81)); seq.append(static_cast<char>(kMenuBank16));
+    seq.append(static_cast<char>(0x1E)); put16(seq, kMenuLocking);
+    // SETBYTE Kalm conversation flags (Var[1][0x80]) = 0x03
+    seq.append(static_cast<char>(0x80)); seq.append(static_cast<char>(kMenuBank8));
+    seq.append(static_cast<char>(kKalmFlagsAddr)); seq.append(static_cast<char>(kKalmFlags));
+    // SETWORD game moment (Var[2][0]) = 1603
+    seq.append(static_cast<char>(0x81)); seq.append(static_cast<char>(kMenuBank16));
+    seq.append(static_cast<char>(0x00)); put16(seq, kGameMoment);
+    // BITON Var[3][128] bit 1 — skip psdun_2 (Mythril Mines) party-split trigger
+    seq.append(static_cast<char>(0x82)); seq.append(static_cast<char>(kBitOnBanks));
+    seq.append(static_cast<char>(kFreeRoamFlagAddr)); seq.append(static_cast<char>(kFreeRoamFlagBit));
+    // BITON Var[3][130] bit 3 — skip Rocket Town (rckt/rckt2) entry soft-lock
+    seq.append(static_cast<char>(0x82)); seq.append(static_cast<char>(kBitOnBanks));
+    seq.append(static_cast<char>(kRocketFlagAddr)); seq.append(static_cast<char>(kRocketFlagBit));
+    // MAPJUMP wm1
+    seq.append(static_cast<char>(0x60));
+    put16(seq, kFieldId);
+    put16(seq, static_cast<quint16>(kSpawnX)); put16(seq, static_cast<quint16>(kSpawnY));
+    put16(seq, kTriangle);
+    seq.append(static_cast<char>(kDir));
+    // RET — halt script cleanly after queuing the jump
+    seq.append(static_cast<char>(0x00));
+
+    if (injectAt + seq.size() > walkEnd || injectAt + seq.size() > fileSize) {
+        debugStream << "  MAPJUMP_DBG: not enough room after PRTYE for "
+                    << seq.size() << " bytes - aborting\n";
+        return false;
+    }
+    for (int i = 0; i < seq.size(); ++i)
+        decompressed[injectAt + i] = seq.at(i);
+
+    debugStream << "  FREE_ROAM: injected MENU(name)+menu masks+Kalm flags+SETWORD(gameMoment="
+                << kGameMoment << ")+BITON+MAPJUMP @" << injectAt << " -> wm1 fieldId="
+                << kFieldId << " bytes=" << seq.size() << "\n";
+    return true;
+}
+
+// ============================================================================
+// dumpFieldScripts — decode a field's section-0 entity script table + opcodes.
+//   Diagnostic only (writes to the randomization debug log). Used to locate the
+//   autonomous entry event that freezes the player (no control) on certain maps
+//   at game moment 1603 in Free Roam.
+// ============================================================================
+namespace {
+// Mnemonics for the control-flow / scene opcodes that matter when reading an
+// entry event. Anything not listed prints as its hex byte only.
+QString ff7OpcodeName(quint8 op)
+{
+    switch (op) {
+    case 0x00: return "RET";
+    case 0x01: return "REQ";    case 0x02: return "REQSW";  case 0x03: return "REQEW";
+    case 0x04: return "PREQ";   case 0x05: return "PRQSW";  case 0x06: return "PRQEW";
+    case 0x07: return "RETTO";
+    case 0x10: return "JMPF";   case 0x11: return "JMPFL";
+    case 0x12: return "JMPB";   case 0x13: return "JMPBL";
+    case 0x14: return "IFUB";   case 0x15: return "IFUBL";
+    case 0x16: return "IFSW";   case 0x17: return "IFSWL";
+    case 0x18: return "IFUW";   case 0x19: return "IFUWL";
+    case 0x24: return "WAIT";
+    case 0x25: return "nFADE";  case 0x2F: return "WCLS";
+    case 0x30: return "WSIZW";  case 0x36: return "WMODE";
+    case 0x38: return "MES?";
+    case 0x40: return "MESSAGE";case 0x41: return "MPARA";  case 0x42: return "MPRA2";
+    case 0x48: return "ASK";    case 0x49: return "MENU";   case 0x4A: return "MENU2";
+    case 0x60: return "MAPJUMP";
+    case 0x80: return "SETBYTE";case 0x81: return "SETWORD";
+    case 0x82: return "BITON";  case 0x83: return "BITOFF"; case 0x84: return "BITXOR";
+    case 0x85: return "PLUS!";  case 0x86: return "PLUS2!";
+    case 0x90: return "JMPFF?"; case 0x95: return "MINUS!";
+    case 0xA0: return "MOVA";
+    case 0xC7: return "SOLID";
+    case 0xCA: return "PRTYE";  case 0xCB: return "PRTYA";
+    case 0xD8: return "PMVIE";  case 0xD9: return "MOVIE";  case 0xDA: return "MVIEF";
+    case 0xE0: return "BGON";   case 0xE1: return "BGOFF";
+    case 0xF5: return "AKAO2?"; case 0xFD: return "AKAO";
+    default:   return QString();
+    }
+}
+} // namespace
+
+void FieldPickupRandomizer_ff7tk::dumpFieldScripts(
+    const QByteArray& decompressed, const QString& fieldName, QTextStream& debugStream)
+{
+    const int fileSize = decompressed.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    debugStream << "\n=== FIELD_DUMP " << fieldName << " (size=" << fileSize << ") ===\n";
+    if (fileSize < HEADER_SIZE) { debugStream << "  too small\n"; return; }
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, decompressed.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) { debugStream << "  sec0 out of range\n"; return; }
+
+    quint8  nbEntities   = static_cast<quint8>(decompressed.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, decompressed.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  decompressed.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) { debugStream << "  no entities\n"; return; }
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) {
+        debugStream << "  script table out of range\n"; return;
+    }
+
+    // Walk bound: start of strings or first AKAO block, whichever is first.
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, decompressed.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    debugStream << "  nbEntities=" << nbEntities << " nAkao=" << nAkaoOffsets
+                << " walkEnd=" << walkEnd << "\n";
+
+    auto entityName = [&](int e) {
+        QByteArray nm(decompressed.constData() + namesStart + 8 * e, 8);
+        int z = nm.indexOf('\0'); if (z >= 0) nm.truncate(z);
+        return QString::fromLatin1(nm);
+    };
+
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        // Read this entity's 32 script entry offsets (relative to sec0DataStart).
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, decompressed.constData() + tbl, 64);
+
+        debugStream << "  -- Entity " << e << " '" << entityName(e) << "' scripts: ";
+        for (int s = 0; s < 32; ++s) debugStream << slot[s] << (s == 31 ? "" : ",");
+        debugStream << "\n";
+
+        // Dump each unique script start once, listing the slots that use it.
+        QList<quint16> seen;
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.append(slot[s]);
+            QString users;
+            for (int t = 0; t < 32; ++t) if (slot[t] == slot[s]) users += QString::number(t) + " ";
+            int start = sec0DataStart + static_cast<int>(slot[s]);
+            debugStream << "    [script " << users.trimmed() << "] @rel" << slot[s]
+                        << " abs" << start << ":\n";
+            if (start < 0 || start >= walkEnd) { debugStream << "      (out of range)\n"; continue; }
+
+            int pos = start, guard = 0;
+            while (pos < walkEnd && guard++ < 600) {
+                int len = fieldOpcodeLength(decompressed, pos, fileSize);
+                if (len <= 0) { debugStream << "      @" << pos << " BAD op\n"; break; }
+                quint8 op = static_cast<quint8>(decompressed.at(pos));
+                QString name = ff7OpcodeName(op);
+                QString operands;
+                for (int b = 1; b < len && pos + b < fileSize; ++b)
+                    operands += QString("%1 ").arg(static_cast<quint8>(decompressed.at(pos + b)), 2, 16, QChar('0'));
+                debugStream << "      @" << pos << " "
+                            << QString("%1").arg(op, 2, 16, QChar('0')) << " "
+                            << (name.isEmpty() ? QStringLiteral("") : name)
+                            << (operands.isEmpty() ? QStringLiteral("") : QStringLiteral("  ") + operands.trimmed())
+                            << "\n";
+                pos += len;
+                if (op == 0x00) break;  // RET ends this script body
+            }
+        }
+    }
+    debugStream << "=== END FIELD_DUMP " << fieldName << " ===\n\n";
+}
+
+// ============================================================================
+// overwriteFieldDialog — repurpose an existing dialog string in place.
+//   Field "section 0" header: posTexts (offset to the dialog block, relative to
+//   sec0DataStart) lives at sec0DataStart+4. The dialog block is:
+//     [u16 count][u16 offset x count][text bytes, each 0xFF-terminated]
+//   We pick the longest dialog whose byte span fits the new text + terminator
+//   and overwrite it (padding leftover bytes with 0xFF). No bytes move.
+// ============================================================================
+int FieldPickupRandomizer_ff7tk::overwriteFieldDialog(
+    QByteArray& decompressed, const QByteArray& encoded, QTextStream& debugStream)
+{
+    const int fileSize = decompressed.size();
+    if (fileSize < 6 + 9 * 4) return -1;
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, decompressed.constData() + 6, 9 * 4);
+    const int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 8 > fileSize) return -1;
+
+    quint16 wStringOffset = 0;
+    memcpy(&wStringOffset, decompressed.constData() + sec0DataStart + 4, 2);
+    const int dlgBlock = sec0DataStart + static_cast<int>(wStringOffset);
+    if (dlgBlock + 2 > fileSize) return -1;
+    quint16 nbDialogs = 0;
+    memcpy(&nbDialogs, decompressed.constData() + dlgBlock, 2);
+    if (nbDialogs == 0) return -1;
+
+    // Strip any trailing terminators; we append exactly one when writing.
+    QByteArray body = encoded;
+    while (!body.isEmpty() && static_cast<quint8>(body.back()) == 0xFF) body.chop(1);
+    const int needed = body.size() + 1;  // text + one 0xFF terminator
+
+    int bestId = -1, bestStart = -1, bestCap = -1;
+    for (int id = 0; id < nbDialogs; ++id) {
+        const int ptrPos = dlgBlock + 2 + id * 2;
+        if (ptrPos + 2 > fileSize) break;
+        quint16 rel = 0;
+        memcpy(&rel, decompressed.constData() + ptrPos, 2);
+        const int tStart = dlgBlock + static_cast<int>(rel);
+        if (tStart >= fileSize || tStart < dlgBlock) continue;
+        int tEnd = tStart;
+        while (tEnd < fileSize && static_cast<quint8>(decompressed.at(tEnd)) != 0xFF) tEnd++;
+        if (tEnd >= fileSize) continue;
+        const int cap = (tEnd - tStart) + 1;  // includes the original terminator
+        if (cap >= needed && cap > bestCap) { bestCap = cap; bestId = id; bestStart = tStart; }
+    }
+    if (bestId < 0) {
+        debugStream << "  WELCOME: no dialog slot >= " << needed << " bytes — skipping message\n";
+        return -1;
+    }
+    for (int i = 0; i < body.size(); ++i)
+        decompressed[bestStart + i] = body.at(i);
+    for (int i = body.size(); i < bestCap; ++i)
+        decompressed[bestStart + i] = static_cast<char>(0xFF);
+    debugStream << "  WELCOME: overwrote dialog #" << bestId
+                << " (cap " << bestCap << ", used " << needed << ")\n";
+    return bestId;
 }
 
 // ============================================================================
@@ -711,6 +1379,416 @@ bool FieldPickupRandomizer_ff7tk::applySMTRARandomization(
 }
 
 // ============================================================================
+// loadApJson  –  read Archipelago output JSON and build (field, item_text)
+//               -> (address, bit) lookup queues.
+// ============================================================================
+
+bool FieldPickupRandomizer_ff7tk::loadApJson(
+    const QString& path,
+    QTextStream& debugStream)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        debugStream << "AP JSON: cannot open " << path << "\n";
+        return false;
+    }
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (doc.isNull() || !doc.isObject()) {
+        debugStream << "AP JSON: invalid JSON in " << path << "\n";
+        return false;
+    }
+
+    m_apJsonLookup.clear();
+    m_apJsonLastBiton.clear();
+    m_apBitonEntries.clear();
+
+    QJsonArray placements = doc.object()["placements"].toArray();
+    for (const QJsonValue& v : placements) {
+        QJsonObject p = v.toObject();
+        int bank    = p["bank"].toInt(-1);
+        int address = p["address"].toInt(-1);
+        int bit     = p["bit"].toInt(-1);
+        if (bank < 0 || address < 0 || bit < 0) continue;
+
+        QString field    = p["map"].toString().toLower().trimmed();
+        QString itemText = p["item_text"].toString().toLower().trimmed();
+        if (field.isEmpty() || itemText.isEmpty()) continue;
+
+        // Strip "keyitem: " prefix so item_text matches getItemName() output
+        if (itemText.startsWith("keyitem: "))
+            itemText = itemText.mid(9);
+
+        QString key = field + QChar('|') + itemText;
+        ApBitonCoord coord{
+            static_cast<quint8>(bank),
+            static_cast<quint8>(address),
+            static_cast<quint8>(bit),
+        };
+        m_apJsonLookup[key].enqueue(coord);
+    }
+
+    debugStream << "AP JSON: loaded " << placements.size() << " placements ("
+                << m_apJsonLookup.size() << " unique field|item keys) from "
+                << path << "\n\n";
+    return true;
+}
+
+// ============================================================================
+// applySTITMAsArchipelago  –  replace STITM(5B) with BITON(4B) + NOP(1B)
+//                              using the pre-assigned address/bit from the
+//                              Archipelago JSON.  Falls back with a warning
+//                              if no JSON entry matches.
+// ============================================================================
+
+bool FieldPickupRandomizer_ff7tk::applySTITMAsArchipelago(
+    STITMInfo& info,
+    QByteArray& fieldData,
+    const QString& fieldName,
+    QTextStream& debugStream)
+{
+    if (info.offset + STITM_SIZE > fieldData.size()) return false;
+
+    QString itemName = getItemName(info.originalItemID).toLower().trimmed();
+    QString key      = fieldName.toLower().trimmed() + QChar('|') + itemName;
+
+    ApBitonCoord biton;
+    bool reusedBiton = false;
+    if (m_apJsonLookup.contains(key) && !m_apJsonLookup[key].isEmpty()) {
+        biton = m_apJsonLookup[key].dequeue();
+        m_apJsonLastBiton[key] = biton;
+    } else if (m_apJsonLastBiton.contains(key)) {
+        // Duplicate STITM in the same field — reuse the last BITON so the
+        // location is tracked regardless of which opcode the player triggers.
+        biton = m_apJsonLastBiton[key];
+        reusedBiton = true;
+    } else {
+        debugStream << "  AP_STITM @" << info.offset
+                    << " WARN: no JSON entry for ("
+                    << fieldName << ", " << getItemName(info.originalItemID)
+                    << ") – location will not be tracked\n";
+        return false;
+    }
+    quint8 destBank     = biton.bank;
+    quint8 addr         = biton.address;
+    quint8 bit          = biton.bit;
+    // BITON encodes dest bank in the high nibble of byte 1, src bank in low.
+    // src = 0 always (we write a literal bit, not from another var).
+    quint8 bankByte     = static_cast<quint8>((destBank & 0x0F) << 4);
+
+    fieldData[info.offset]     = static_cast<char>(BITON_OPCODE);
+    fieldData[info.offset + 1] = static_cast<char>(bankByte);
+    fieldData[info.offset + 2] = static_cast<char>(addr);
+    fieldData[info.offset + 3] = static_cast<char>(bit);
+    fieldData[info.offset + 4] = static_cast<char>(0x5F); // NOP – pads former 5th STITM byte
+
+    ApBitonEntry entry;
+    entry.field          = fieldName;
+    entry.offset         = info.offset;
+    entry.isMateria      = false;
+    entry.originalItemId = info.originalItemID;
+    entry.originalName   = getItemName(info.originalItemID);
+    entry.bankByte       = bankByte;
+    entry.address        = addr;
+    entry.bit            = bit;
+    m_apBitonEntries.append(entry);
+
+    debugStream << "  AP_STITM @" << info.offset
+                << "  " << entry.originalName
+                << " (" << info.originalItemID << ")"
+                << " -> BITON bank=" << destBank
+                << " addr=0x" << QString::number(addr, 16)
+                << " bit=" << bit
+                << (reusedBiton ? " (reused)" : "") << "\n";
+    return true;
+}
+
+// ============================================================================
+// applySMTRAAsArchipelago  –  replace SMTRA(7B) with BITON(4B) + NOP×3(3B)
+//                              using the pre-assigned address/bit from JSON.
+// ============================================================================
+
+bool FieldPickupRandomizer_ff7tk::applySMTRAAsArchipelago(
+    SMTRAInfo& info,
+    QByteArray& fieldData,
+    const QString& fieldName,
+    QTextStream& debugStream)
+{
+    if (info.offset + SMTRA_SIZE > fieldData.size()) return false;
+
+    QString materiaName = getMateriaName(info.originalMateriaID).toLower().trimmed();
+    QString key         = fieldName.toLower().trimmed() + QChar('|') + materiaName;
+
+    ApBitonCoord biton;
+    bool reusedBiton = false;
+    if (m_apJsonLookup.contains(key) && !m_apJsonLookup[key].isEmpty()) {
+        biton = m_apJsonLookup[key].dequeue();
+        m_apJsonLastBiton[key] = biton;
+    } else if (m_apJsonLastBiton.contains(key)) {
+        // Duplicate SMTRA in the same field — reuse the last BITON so the
+        // location is tracked regardless of which opcode the player triggers.
+        biton = m_apJsonLastBiton[key];
+        reusedBiton = true;
+    } else {
+        debugStream << "  AP_SMTRA @" << info.offset
+                    << " WARN: no JSON entry for ("
+                    << fieldName << ", " << getMateriaName(info.originalMateriaID)
+                    << ") – location will not be tracked\n";
+        return false;
+    }
+    quint8 destBank     = biton.bank;
+    quint8 addr         = biton.address;
+    quint8 bit          = biton.bit;
+    quint8 bankByte     = static_cast<quint8>((destBank & 0x0F) << 4);
+
+    fieldData[info.offset]     = static_cast<char>(BITON_OPCODE);
+    fieldData[info.offset + 1] = static_cast<char>(bankByte);
+    fieldData[info.offset + 2] = static_cast<char>(addr);
+    fieldData[info.offset + 3] = static_cast<char>(bit);
+    fieldData[info.offset + 4] = static_cast<char>(0x5F); // NOP ×3 – pads former SMTRA bytes
+    fieldData[info.offset + 5] = static_cast<char>(0x5F);
+    fieldData[info.offset + 6] = static_cast<char>(0x5F);
+
+    ApBitonEntry entry;
+    entry.field            = fieldName;
+    entry.offset           = info.offset;
+    entry.isMateria        = true;
+    entry.originalMateriaId = info.originalMateriaID;
+    entry.originalName     = getMateriaName(info.originalMateriaID);
+    entry.bankByte         = bankByte;
+    entry.address          = addr;
+    entry.bit              = bit;
+    m_apBitonEntries.append(entry);
+
+    debugStream << "  AP_SMTRA @" << info.offset
+                << "  " << entry.originalName
+                << " (" << info.originalMateriaID << ")"
+                << " -> BITON bank=" << destBank
+                << " addr=0x" << QString::number(addr, 16)
+                << " bit=" << bit
+                << (reusedBiton ? " (reused)" : "") << "\n";
+    return true;
+}
+
+// ============================================================================
+// replaceVanillaBitonsForAP  –  replace vanilla key-item BITONs with AP BITONs
+//
+// In AP mode, vanilla key items use pre-existing BITON opcodes (not STITM).
+// This function scans for those BITONs and replaces them with AP-allocated
+// BITONs from the JSON lookup, enabling AP tracking for key item locations.
+//
+// Wardrobe categories (Dress, Wig, Tiara, Cologne, Underwear, Medicine) share
+// the same AP BITON within each category, matching vanilla behavior.
+// ============================================================================
+
+// Helper: Get wardrobe category from item name (returns int matching WardrobeCategory enum)
+static int getWardrobeCategoryFromName(const QString& itemName)
+{
+    QString lower = itemName.toLower();
+    if (lower.contains("dress")) return 1;  // Dress
+    if (lower == "wig" || lower == "dyed wig" || lower == "blonde wig") return 2;  // Wig
+    if (lower.contains("tiara")) return 3;  // Tiara
+    if (lower.contains("cologne") || lower == "pharmacy coupon") return 4;  // Cologne
+    if (lower == "lingerie" || lower == "mystery panties" || lower == "bikini briefs") return 5;  // Underwear
+    if (lower == "disinfectant" || lower == "deodorant" || lower == "digestive") return 6;  // Medicine
+    return 0;  // None
+}
+
+// Helper: Get representative item name for wardrobe category lookup
+static QString getCategoryItemName(const QString& itemName)
+{
+    QString lower = itemName.toLower();
+    if (lower.contains("dress")) return "Cotton Dress";
+    if (lower == "wig" || lower == "dyed wig" || lower == "blonde wig") return "Wig";
+    if (lower.contains("tiara")) return "Glass Tiara";
+    if (lower.contains("cologne")) return "Cologne";
+    if (lower == "pharmacy coupon") return "Cologne";  // Same category as cologne
+    if (lower == "lingerie" || lower == "mystery panties" || lower == "bikini briefs") return "Lingerie";
+    if (lower == "disinfectant" || lower == "deodorant" || lower == "digestive") return "Disinfectant";
+    return itemName;
+}
+
+int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
+    QByteArray& decompressed,
+    const QString& fieldName,
+    QTextStream& debugStream)
+{
+    int modified = 0;
+    const int fileSize = decompressed.size();
+
+    // Need at least the 42-byte header (6 + 9*4)
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    // Parse section table
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, decompressed.constData() + 6, 9 * 4);
+    quint32 sec0off = sectionPositions[0];
+    if (sec0off + 4 >= static_cast<quint32>(fileSize)) return 0;
+
+    int sec0DataStart = static_cast<int>(sec0off) + 4;
+    quint8 nbEnt = static_cast<quint8>(decompressed.at(sec0DataStart + 2));
+    int scriptStart = sec0DataStart + 32 + 72 * nbEnt;
+
+    quint16 posTexts;
+    memcpy(&posTexts, decompressed.constData() + sec0DataStart + 4, 2);
+    int scriptEnd = sec0DataStart + posTexts;
+
+    if (scriptStart >= scriptEnd || scriptEnd > fileSize) return 0;
+
+    // Track assigned BITONs per field per wardrobe category (for sharing)
+    QMap<QString, ApBitonCoord> categoryBitons;
+
+    // Scan script section for BITON opcodes
+    for (int i = scriptStart; i < scriptEnd - 4; ++i) {
+        quint8 opcode = static_cast<quint8>(decompressed.at(i));
+
+        if (opcode == BITON_OPCODE && i + 3 < scriptEnd) {
+            quint8 bankByte = static_cast<quint8>(decompressed.at(i + 1));
+            quint8 addr = static_cast<quint8>(decompressed.at(i + 2));
+            quint8 bit = static_cast<quint8>(decompressed.at(i + 3));
+
+            quint8 destBank = (bankByte >> 4) & 0x0F;
+
+            // Key item BITONs are in bank 1-2, addresses 0x40-0x46 (vanilla range)
+            if (destBank >= 1 && destBank <= 2 && addr >= 0x40 && addr <= 0x46) {
+                quint16 saveOffset = 0x0BA4 + addr;
+                QString keyItemName = getKeyItemName(saveOffset, bit);
+
+                if (!keyItemName.isEmpty() && !keyItemName.startsWith("KeyItem@")) {
+                    // Check if this is a wardrobe category item
+                    int categoryInt = getWardrobeCategoryFromName(keyItemName);
+                    bool isWardrobe = (categoryInt != 0);
+                    WardrobeCategory category = static_cast<WardrobeCategory>(categoryInt);
+                    
+                    // For wardrobe items, use the category representative name for lookup
+                    QString lookupItemName = isWardrobe ? getCategoryItemName(keyItemName) : keyItemName;
+                    QString key = fieldName.toLower().trimmed() + QChar('|') + lookupItemName.toLower().trimmed();
+                    
+                    // For wardrobe items, check if we already assigned a BITON for this category in this field
+                    QString categoryKey = fieldName.toLower() + "|" + QString::number(static_cast<int>(category));
+                    ApBitonCoord apBiton;
+                    bool foundBiton = false;
+                    bool reusedBiton = false;
+                    
+                    if (isWardrobe && categoryBitons.contains(categoryKey)) {
+                        // Reuse existing BITON for this category
+                        apBiton = categoryBitons[categoryKey];
+                        foundBiton = true;
+                        reusedBiton = true;
+                    } else if (m_apJsonLookup.contains(key) && !m_apJsonLookup[key].isEmpty()) {
+                        // Get new BITON from queue
+                        apBiton = m_apJsonLookup[key].dequeue();
+                        foundBiton = true;
+                        if (isWardrobe) {
+                            // Cache it for sharing within this category
+                            categoryBitons[categoryKey] = apBiton;
+                        }
+                    }
+
+                    if (foundBiton) {
+                        quint8 newBankByte = static_cast<quint8>((apBiton.bank & 0x0F) << 4);
+                        decompressed[i + 1] = static_cast<char>(newBankByte);
+                        decompressed[i + 2] = static_cast<char>(apBiton.address);
+                        decompressed[i + 3] = static_cast<char>(apBiton.bit);
+
+                        debugStream << "  AP_VANILLA_BITON @" << i
+                                    << " " << keyItemName
+                                    << " -> bank=" << apBiton.bank
+                                    << " addr=0x" << QString::number(apBiton.address, 16)
+                                    << " bit=" << apBiton.bit;
+                        if (reusedBiton) {
+                            debugStream << " (shared " << wardrobeCategoryName(category) << ")";
+                        }
+                        debugStream << "\n";
+
+                        ApBitonEntry entry;
+                        entry.field = fieldName;
+                        entry.offset = i;
+                        entry.isMateria = false;
+                        entry.originalItemId = 0;
+                        entry.originalName = keyItemName;
+                        entry.bankByte = newBankByte;
+                        entry.address = apBiton.address;
+                        entry.bit = apBiton.bit;
+                        m_apBitonEntries.append(entry);
+
+                        modified++;
+                    } else {
+                        debugStream << "  AP_VANILLA_BITON @" << i
+                                    << " WARN: no JSON entry for (" << fieldName << ", " << keyItemName
+                                    << ") – location will not be tracked\n";
+                    }
+                }
+            }
+        }
+    }
+
+    return modified;
+}
+
+// ============================================================================
+// writeArchipelagoSidecar  –  emit archipelago_bitons.json
+//
+// Format:
+//   {
+//     "biton_map": [
+//       {
+//         "field": "mds7st1",
+//         "offset": 2908,
+//         "is_materia": false,
+//         "original_item_id": 32,
+//         "original_name": "Hi-Potion",
+//         "bank": 1,
+//         "address": 128,
+//         "bit": 0
+//       }, ...
+//     ]
+//   }
+//
+// The Archipelago side matches entries by (field, original_name) to
+// location codes and updates locations.json via:
+//   python tools/map_biton_flags.py --ap-sidecar archipelago_bitons.json
+// ============================================================================
+
+void FieldPickupRandomizer_ff7tk::writeArchipelagoSidecar(
+    const QString& outputPath,
+    QTextStream& debugStream) const
+{
+    QString sidecarPath = outputPath + "/archipelago_bitons.json";
+
+    QJsonArray arr;
+    for (const ApBitonEntry& e : m_apBitonEntries) {
+        QJsonObject obj;
+        obj["field"]          = e.field;
+        obj["offset"]         = e.offset;
+        obj["is_materia"]     = e.isMateria;
+        obj["original_item_id"] = e.isMateria
+                                    ? static_cast<int>(e.originalMateriaId)
+                                    : static_cast<int>(e.originalItemId);
+        obj["original_name"]  = e.originalName;
+        obj["bank"]           = static_cast<int>((e.bankByte >> 4) & 0x0F);
+        obj["address"]        = static_cast<int>(e.address);
+        obj["bit"]            = static_cast<int>(e.bit);
+        arr.append(obj);
+    }
+
+    QJsonObject root;
+    root["biton_map"] = arr;
+
+    QFile f(sidecarPath);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QJsonDocument(root).toJson());
+        f.close();
+        debugStream << "\nArchipelago sidecar written: " << sidecarPath
+                    << "  (" << m_apBitonEntries.size() << " entries)\n";
+        qDebug() << "Archipelago sidecar written:" << sidecarPath;
+    } else {
+        debugStream << "\nERROR: could not write Archipelago sidecar: " << sidecarPath << "\n";
+        qDebug() << "ERROR writing Archipelago sidecar:" << f.errorString();
+    }
+}
+
+// ============================================================================
 // updateFieldTexts  –  parse text section in section 0, replace item/materia
 //                      names, rebuild text section with correct offsets.
 //
@@ -845,10 +1923,15 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             }
         }
 
-        // Search forward (up to 500 bytes)
+        // Search forward (up to 500 bytes), but skip past the BITON/STITM bytes
+        // we just wrote. The placement's address byte can equal MESSAGE_OPCODE
+        // (e.g. wardrobe key items use address 0x40 == MESSAGE), which would
+        // otherwise produce a false-positive MESSAGE hit and clobber the byte
+        // immediately after our placement when its textID is patched.
         {
+            const int skipPlacementBytes = 5; // covers 4-byte BITON or 5-byte STITM slot
             int searchEnd = qMin(mod.opcodeOffset + 500, scriptAbsEnd - 2);
-            for (int pos = mod.opcodeOffset; pos < searchEnd; ++pos) {
+            for (int pos = mod.opcodeOffset + skipPlacementBytes; pos < searchEnd; ++pos) {
                 if (static_cast<quint8>(decompressed.at(pos)) == MESSAGE_OPCODE) {
                     quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
@@ -1543,27 +2626,23 @@ FieldPickupRandomizer_ff7tk::performKeyItemSwaps(
 
         QVector<int> filteredIndices = validIndices;
 
+        // Pre-filter: if blin63_1 already has a different key item placed,
+        // exclude all blin63_1 slots so we never conflict and silently drop items.
+        if (!fieldMods["blin63_1"].placements.isEmpty()) {
+            QVector<int> noBlin63;
+            for (int i : filteredIndices) {
+                if (sphereLocs[i].fieldName.toLower() != "blin63_1")
+                    noBlin63.append(i);
+            }
+            if (!noBlin63.isEmpty())
+                filteredIndices = noBlin63;
+        }
+
         int pick = filteredIndices[m_rng.bounded(filteredIndices.size())];
         usedLocIndices.insert(pick);
         const SphereStitm& target = sphereLocs[pick];
-        
-        // Special handling for blin63_1: ensure entity consistency
-        bool skipPlacement = false;
-        if (target.fieldName.toLower() == "blin63_1") {
-            // Check if we already placed a different key item in blin63_1
-            // If so, skip this placement to maintain entity consistency
-            for (const auto& existingPlacement : fieldMods[target.fieldName].placements) {
-                if (existingPlacement.keyName != keyName) {
-                    debugStream << "  SKIP: '" << keyName << "' – blin63_1 already has '" 
-                                << existingPlacement.keyName << "', maintaining entity consistency\n";
-                    usedLocIndices.remove(pick);
-                    skipPlacement = true;
-                    break;
-                }
-            }
-        }
 
-        if (!skipPlacement) {
+        {
             // Record NOP-out of original BITON in source field
             QString srcFieldName = allFileNames[keyItem.fileIndex];
             fieldMods[srcFieldName].bitonNopOffsets.append(keyItem.scriptOffset);
@@ -1690,14 +2769,15 @@ void FieldPickupRandomizer_ff7tk::buildMateriaPool()
 {
     m_materiaPool.clear();
 
-    // FF7 materia IDs 0-90
-    // 0-13:  Magic materia (Fire, Ice, Lightning, Earth, Poison, Gravity,
-    //        Seal, Mystify, Transform, Time, Barrier, Comet, Contain, FullCure)
-    // 14-25: Support materia
-    // 26-38: Command materia
-    // 39-48: Independent materia
-    // 49-90: Summon materia + extras
+    // FF7 KERNEL materia byte values (see ff7tk FF7Materia.h).  Valid bytes
+    // are 0x00..0x5A with gaps at 0x16, 0x26, 0x2D-0x2F, 0x3F, 0x42-0x43
+    // (placeholder slots that render as blank/garbage materia in-game), so
+    // skip them when populating the random pool.
+    static const QSet<quint8> placeholders = {
+        0x16, 0x26, 0x2D, 0x2E, 0x2F, 0x3F, 0x42, 0x43
+    };
     for (quint8 i = 0; i <= MAX_MATERIA_ID; ++i) {
+        if (placeholders.contains(i)) continue;
         m_materiaPool.append(i);
     }
 
@@ -1712,40 +2792,44 @@ quint8 FieldPickupRandomizer_ff7tk::getRandomMateria()
 
 QString FieldPickupRandomizer_ff7tk::getMateriaName(quint8 materiaId) const
 {
+    // Authoritative table from ff7tk FF7Materia.h (KERNEL.bin layout).
+    // Note the gaps at 0x16, 0x26, 0x2D-0x2F, 0x3F, 0x42-0x43 (placeholder
+    // slots, never produced by vanilla SMTRA/AP).
     static const QMap<quint8, QString> names = {
-        {0,  "MP Plus"},        {1,  "HP Plus"},        {2,  "Speed Plus"},
-        {3,  "Magic Plus"},     {4,  "Luck Plus"},      {5,  "EXP Plus"},
-        {6,  "Gil Plus"},       {7,  "Enemy Away"},     {8,  "Enemy Lure"},
-        {9,  "Chocobo Lure"},   {10, "Pre-Emptive"},    {11, "Long Range"},
-        {12, "Mega All"},       {13, "Counter Attack"}, {14, "Slash-All"},
-        {15, "Double Cut"},     {16, "Cover"},          {17, "Underwater"},
-        {18, "HP<->MP"},        {19, "W-Magic"},        {20, "W-Summon"},
-        {21, "W-Item"},         {22, "All"},            {23, "Counter"},
-        {24, "Magic Counter"},  {25, "MP Turbo"},       {26, "MP Absorb"},
-        {27, "HP Absorb"},      {28, "Elemental"},      {29, "Added Effect"},
-        {30, "Sneak Attack"},   {31, "Final Attack"},   {32, "Added Cut"},
-        {33, "Steal as Well"},  {34, "Quadra Magic"},   {35, "Steal"},
-        {36, "Sense"},          {37, "Throw"},          {38, "Morph"},
-        {39, "Deathblow"},      {40, "Manipulate"},     {41, "Mime"},
-        {42, "Enemy Skill"},    {43, "Master Command"}, {44, "Fire"},
-        {45, "Ice"},            {46, "Lightning"},      {47, "Earth"},
-        {48, "Poison"},         {49, "Gravity"},        {50, "Seal"},
-        {51, "Mystify"},        {52, "Transform"},      {53, "Time"},
-        {54, "Barrier"},        {55, "Comet"},          {56, "Contain"},
-        {57, "FullCure"},       {58, "Master Magic"},   {59, "Shield"},
-        {60, "Ultima"},         {61, "Restore"},        {62, "Revive"},
-        {63, "Heal"},           {64, "Destruct"},       {65, "Exit"},
-        {66, "Choco/Mog"},      {67, "Shiva"},          {68, "Ifrit"},
-        {69, "Ramuh"},          {70, "Titan"},          {71, "Odin"},
-        {72, "Leviathan"},      {73, "Bahamut"},        {74, "Kjata"},
-        {75, "Alexander"},      {76, "Phoenix"},        {77, "Neo Bahamut"},
-        {78, "Hades"},          {79, "Typhon"},         {80, "Bahamut ZERO"},
-        {81, "Knights of Round"},{82, "Master Summon"},
+        {0x00, "MP Plus"},         {0x01, "HP Plus"},         {0x02, "Speed Plus"},
+        {0x03, "Magic Plus"},      {0x04, "Luck Plus"},       {0x05, "EXP Plus"},
+        {0x06, "Gil Plus"},        {0x07, "Enemy Away"},      {0x08, "Enemy Lure"},
+        {0x09, "Chocobo Lure"},    {0x0A, "Pre-emptive"},     {0x0B, "Long Range"},
+        {0x0C, "Mega All"},        {0x0D, "Counter Attack"},  {0x0E, "Slash-All"},
+        {0x0F, "Double Cut"},
+        {0x10, "Cover"},           {0x11, "Underwater"},      {0x12, "HP <-> MP"},
+        {0x13, "W-Magic"},         {0x14, "W-Summon"},        {0x15, "W-Item"},
+        {0x17, "All"},             {0x18, "Counter"},         {0x19, "Magic Counter"},
+        {0x1A, "MP Turbo"},        {0x1B, "MP Absorb"},       {0x1C, "HP Absorb"},
+        {0x1D, "Elemental"},       {0x1E, "Added Effect"},    {0x1F, "Sneak Attack"},
+        {0x20, "Final Attack"},    {0x21, "Added Cut"},       {0x22, "Steal-As-Well"},
+        {0x23, "Quadra Magic"},    {0x24, "Steal"},           {0x25, "Sense"},
+        {0x27, "Throw"},           {0x28, "Morph"},           {0x29, "Deathblow"},
+        {0x2A, "Manipulate"},      {0x2B, "Mime"},            {0x2C, "Enemy Skill"},
+        {0x30, "Master Command"},  {0x31, "Fire"},            {0x32, "Ice"},
+        {0x33, "Earth"},           {0x34, "Lightning"},       {0x35, "Restore"},
+        {0x36, "Heal"},            {0x37, "Revive"},          {0x38, "Seal"},
+        {0x39, "Mystify"},         {0x3A, "Transform"},       {0x3B, "Exit"},
+        {0x3C, "Poison"},          {0x3D, "Gravity"},         {0x3E, "Barrier"},
+        {0x40, "Comet"},           {0x41, "Time"},
+        {0x44, "Destruct"},        {0x45, "Contain"},         {0x46, "Full Cure"},
+        {0x47, "Shield"},          {0x48, "Ultima"},          {0x49, "Master Magic"},
+        {0x4A, "Choco/Mog"},       {0x4B, "Shiva"},           {0x4C, "Ifrit"},
+        {0x4D, "Ramuh"},           {0x4E, "Titan"},           {0x4F, "Odin"},
+        {0x50, "Leviathan"},       {0x51, "Bahamut"},         {0x52, "Kujata"},
+        {0x53, "Alexander"},       {0x54, "Phoenix"},         {0x55, "Neo Bahamut"},
+        {0x56, "Hades"},           {0x57, "Typhon"},          {0x58, "Bahamut ZERO"},
+        {0x59, "Knights of the Round"}, {0x5A, "Master Summon"},
     };
 
     auto it = names.find(materiaId);
     if (it != names.end()) return it.value();
-    return QString("Materia_%1").arg(materiaId);
+    return QString("Materia_0x%1").arg(materiaId, 2, 16, QChar('0')).toUpper();
 }
 
 // ============================================================================

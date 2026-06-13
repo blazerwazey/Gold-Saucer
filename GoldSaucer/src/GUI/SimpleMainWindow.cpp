@@ -75,7 +75,7 @@ void SimpleMainWindow::setupUI()
     pathLabel->setToolTip("Path to your Final Fantasy VII installation.\nShould contain the 'data' folder with flevel.lgp, kernel.bin, etc.");
     m_ff7PathEdit = new QLineEdit(this);
     m_ff7PathEdit->setPlaceholderText("Select Final Fantasy VII installation directory...");
-    m_ff7PathEdit->setToolTip("Path to your Final Fantasy VII installation.\nShould contain the 'data' folder with flevel.lgp, kernel.bin, etc.");
+    m_ff7PathEdit->setToolTip("Path to your Final Fantasy VII installation.\nShould contain the 'data' folder with flevel.lgp, kernel.bin, etc.\n(2026 re-release: select the install root — ff7/workingdir is detected automatically.)");
     QPushButton* browseButton = new QPushButton("Browse...", this);
     browseButton->setToolTip("Browse for Final Fantasy VII installation directory.");
     
@@ -146,7 +146,16 @@ void SimpleMainWindow::setupUI()
     m_archipelagoCheckBox->setEnabled(false);
     m_archipelagoCheckBox->setToolTip("Import a valid Archipelago JSON file to enable this option");
     archipelagoLayout->addWidget(m_archipelagoCheckBox);
-    
+
+    // Free Roam toggle (read-only when loaded from AP JSON)
+    m_freeRoamCheckBox = new QCheckBox("Free Roam Mode", this);
+    m_freeRoamCheckBox->setToolTip(
+        "Start on world map at game moment 1603.\n"
+        "Vehicles (Tiny Bronco, Highwind, Submarine) and Midgar (Key to Sector 5) require AP items.\n"
+        "Automatically set when importing an Archipelago JSON with free_roam enabled."
+    );
+    archipelagoLayout->addWidget(m_freeRoamCheckBox);
+
     mainLayout->addLayout(archipelagoLayout);
     
     // Text Replacement Section - REMOVED (now handled automatically by FF7TK field randomization)
@@ -303,7 +312,9 @@ void SimpleMainWindow::startRandomization()
         return;
     }
     
-    if (!ff7Dir.exists("data")) {
+    // Accept both the classic layout (data/ at the root) and the 2026 re-release
+    // (engine + data nested under ff7/workingdir/).
+    if (!ff7Dir.exists("data") && !ff7Dir.exists("ff7/workingdir/data")) {
         QMessageBox::warning(this, "Error", "Invalid FF7 installation: data directory not found");
         return;
     }
@@ -316,7 +327,7 @@ void SimpleMainWindow::startRandomization()
     
     // Update config
     updateConfig();
-    
+
     // Create randomizer and run
     try {
         Randomizer randomizer(ff7Path, m_config);
@@ -375,7 +386,21 @@ void SimpleMainWindow::startRandomization()
             }
             appendConsoleMessage("Starting equipment randomization completed successfully");
         }
-        
+
+        if (m_config.getFreeRoam()) {
+            m_progressBar->setValue(90);
+            QApplication::processEvents();
+
+            appendConsoleMessage("Reactivating Northern Crater barrier (goal gate)...");
+            QApplication::processEvents();
+            if (!randomizer.applyCraterBarrier()) {
+                appendConsoleMessage("WARNING: Crater barrier patch failed — world_us.lgp not found or unrecognised; "
+                                     "crater will remain open");
+            } else {
+                appendConsoleMessage("Crater barrier patch applied to world_us.lgp");
+            }
+        }
+
         // Complete
         m_progressBar->setValue(100);
         m_statusLabel->setText("Randomization Complete!");
@@ -435,7 +460,8 @@ void SimpleMainWindow::updateConfig()
     // Text replacement settings - REMOVED (now handled automatically by FF7TK field randomization)
     // saveTextReplacementSettings();
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
-    
+    m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
+
     // Settings
     m_config.setShopItemPoolSize(m_shopPoolSpin->value());
     m_config.setShopPriceVariance(m_shopPriceSpin->value() / 100.0);
@@ -448,6 +474,7 @@ void SimpleMainWindow::updateConfig()
     m_config.setFF7Path(m_ff7PathEdit->text());
     
     // Archipelago settings
+    m_config.setApJsonPath(m_archipelagoJsonPath);
     if (m_archipelagoModeEnabled && !m_archipelagoJsonPath.isEmpty()) {
         appendConsoleMessage("Archipelago mode will be used for randomization");
     }
@@ -466,6 +493,11 @@ void SimpleMainWindow::applyConfigToUI()
     
     // Archipelago mode (only enable if JSON was imported)
     bool archipelagoConfigEnabled = m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
+    QString savedApJson = m_config.getApJsonPath();
+    if (!savedApJson.isEmpty()) {
+        m_archipelagoJsonPath = savedApJson;
+        m_archipelagoJsonEdit->setText(QFileInfo(savedApJson).fileName());
+    }
     if (archipelagoConfigEnabled && !m_archipelagoJsonPath.isEmpty()) {
         m_archipelagoCheckBox->setChecked(true);
         m_archipelagoCheckBox->setEnabled(true);
@@ -475,6 +507,8 @@ void SimpleMainWindow::applyConfigToUI()
         m_archipelagoCheckBox->setEnabled(false);
         m_archipelagoModeEnabled = false;
     }
+
+    m_freeRoamCheckBox->setChecked(m_config.getFreeRoam());
     
     // Settings
     m_shopPoolSpin->setValue(m_config.getShopItemPoolSize());
@@ -501,9 +535,9 @@ void SimpleMainWindow::appendConsoleMessage(const QString& message)
 void SimpleMainWindow::importArchipelagoJSON()
 {
     QString filePath = QFileDialog::getOpenFileName(this,
-        "Select Archipelago JSON File",
+        "Select Archipelago FF7 File",
         QDir::homePath(),
-        "JSON Files (*.json)");
+        "Archipelago FF7 Files (*.apff7);;JSON Files (*.json);;All Files (*)");
     
     if (filePath.isEmpty()) {
         return;
@@ -517,8 +551,85 @@ void SimpleMainWindow::importArchipelagoJSON()
         return;
     }
     
+    // Sync seed and randomizer settings from AP JSON
+    {
+        QFile seedFile(filePath);
+        if (seedFile.open(QIODevice::ReadOnly)) {
+            QJsonDocument seedDoc = QJsonDocument::fromJson(seedFile.readAll());
+            seedFile.close();
+            QJsonObject seedRoot = seedDoc.object();
+
+            if (seedRoot.contains("seed")) {
+                // AP seeds can be very large (>64-bit). Read as string and fold
+                // into the seed-spin range to keep determinism.
+                QString seedStr = seedRoot["seed"].toVariant().toString();
+                quint64 seedHash = 1469598103934665603ULL; // FNV-1a 64-bit offset
+                for (QChar c : seedStr) {
+                    seedHash ^= static_cast<quint64>(c.unicode());
+                    seedHash *= 1099511628211ULL;
+                }
+                unsigned int apSeed = static_cast<unsigned int>(seedHash % 1000000ULL);
+                m_seedSpin->setValue(static_cast<int>(apSeed));
+                m_config.setSeed(apSeed);
+                appendConsoleMessage(QString("Seed synced from Archipelago JSON: %1 (raw: %2)")
+                    .arg(apSeed).arg(seedStr));
+            }
+
+            QJsonObject opts = seedRoot["options"].toObject();
+
+            if (opts.contains("pickup_rarity_mode")) {
+                int mode = opts["pickup_rarity_mode"].toInt(0);
+                mode = qBound(0, mode, m_pickupCombo->count() - 1);
+                m_pickupCombo->setCurrentIndex(mode);
+                m_config.setPickupRarityMode(mode);
+                appendConsoleMessage(QString("Field Pickup Rarity set from JSON: %1")
+                    .arg(m_pickupCombo->currentText()));
+            }
+
+            if (opts.contains("starting_equipment_tier")) {
+                int tier = opts["starting_equipment_tier"].toInt(1);
+                tier = qBound(0, tier, m_equipmentCombo->count() - 1);
+                m_equipmentCombo->setCurrentIndex(tier);
+                m_config.setStartingEquipmentTier(tier);
+                appendConsoleMessage(QString("Starting Equipment Tier set from JSON: %1")
+                    .arg(m_equipmentCombo->currentText()));
+            }
+
+            // Read free_roam from top-level or rules sub-object
+            bool freeRoamFromJson = false;
+            if (seedRoot.contains("free_roam")) {
+                freeRoamFromJson = seedRoot["free_roam"].toBool(false);
+            } else if (seedRoot.contains("rules")) {
+                freeRoamFromJson = seedRoot["rules"].toObject()["free_roam"].toBool(false);
+            }
+            m_config.setFreeRoam(freeRoamFromJson);
+            m_freeRoamCheckBox->setChecked(freeRoamFromJson);
+            if (freeRoamFromJson) {
+                appendConsoleMessage("Free Roam mode enabled from Archipelago JSON");
+            }
+                        // Load feature flags from the features array (boolean array indexed by Feature enum)
+            if (seedRoot.contains("features")) {
+                QJsonArray features = seedRoot["features"].toArray();
+                if (features.size() >= 4) {
+                    m_config.setFeatureEnabled(Config::EnemyStatsRandomization, features[0].toBool(false));
+                    m_config.setFeatureEnabled(Config::ShopRandomization, features[1].toBool(false));
+                    m_config.setFeatureEnabled(Config::FieldPickupRandomization, features[2].toBool(false));
+                    m_config.setFeatureEnabled(Config::StartingEquipmentRandomization, features[3].toBool(false));
+                    if (features.size() >= 7) {
+                        m_config.setFeatureEnabled(Config::BossProtection, features[6].toBool(false));
+                    }
+                    m_config.setFeatureEnabled(Config::ArchipelagoIntegration, true);
+                    m_config.setFeatureEnabled(Config::TextReplacement, true);
+                    appendConsoleMessage("Feature flags synced from Archipelago JSON");
+                }
+            }
+            applyConfigToUI();  // Update checkboxes to reflect loaded features
+        }
+    }
+
     // Enable Archipelago mode
     m_archipelagoJsonPath = filePath;
+    m_config.setApJsonPath(filePath);
     m_archipelagoJsonEdit->setText(QFileInfo(filePath).fileName());
     m_archipelagoCheckBox->setEnabled(true);
     m_archipelagoCheckBox->setChecked(true);
@@ -530,8 +641,10 @@ void SimpleMainWindow::importArchipelagoJSON()
     QMessageBox::information(this, "Archipelago Enabled", 
         "Archipelago mode has been enabled!\n\n"
         "Foreign items will now appear in:\n"
-        "• Shop inventories (as one-time purchases)\n"
-        "• Field pickups (with colored text)\n\n"
+        "\u2022 Shop inventories (as one-time purchases)\n"
+        "\u2022 Field pickups (with colored text)\n\n"
+        "The seed has been synced from the JSON — starting equipment\n"
+        "and shop randomization will match this Archipelago world.\n\n"
         "The randomizer will use the imported JSON for item mapping.");
 }
 

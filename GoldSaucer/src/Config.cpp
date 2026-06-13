@@ -43,6 +43,12 @@ void Config::setDefaults()
     
     // Output folder - default to "Randomized" next to FF7 installation
     m_outputFolder = "Randomized";
+
+    // Archipelago JSON path - empty by default
+    m_apJsonPath = "";
+
+    // Free Roam mode - disabled by default
+    m_freeRoam = false;
 }
 
 bool Config::loadFromFile(const QString& filename)
@@ -131,7 +137,17 @@ bool Config::loadFromFile(const QString& filename)
     if (root.contains("ff7Path")) {
         m_ff7Path = root["ff7Path"].toString(m_ff7Path);
     }
-    
+
+    // Load Archipelago JSON path
+    if (root.contains("apJsonPath")) {
+        m_apJsonPath = root["apJsonPath"].toString(m_apJsonPath);
+    }
+
+    // Load Free Roam setting
+    if (root.contains("freeRoam")) {
+        m_freeRoam = root["freeRoam"].toBool(false);
+    }
+
     qDebug() << "Config loaded from:" << filename;
     return true;
 }
@@ -183,6 +199,12 @@ bool Config::saveToFile(const QString& filename) const
     
     // Save FF7 path settings
     root["ff7Path"] = m_ff7Path;
+
+    // Save Archipelago JSON path
+    root["apJsonPath"] = m_apJsonPath;
+
+    // Save Free Roam setting
+    root["freeRoam"] = m_freeRoam;
     
     QJsonDocument doc(root);
     
@@ -363,4 +385,24 @@ void Config::setFF7Path(const QString& path)
 QString Config::getFF7Path() const
 {
     return m_ff7Path;
+}
+
+void Config::setApJsonPath(const QString& path)
+{
+    m_apJsonPath = path;
+}
+
+QString Config::getApJsonPath() const
+{
+    return m_apJsonPath;
+}
+
+void Config::setFreeRoam(bool enabled)
+{
+    m_freeRoam = enabled;
+}
+
+bool Config::getFreeRoam() const
+{
+    return m_freeRoam;
 }

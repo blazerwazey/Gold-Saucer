@@ -92,20 +92,30 @@ bool MakouLgpManager::setFileData(const QString &fileName, const QByteArray &dat
         setError("LGP is not open");
         return false;
     }
-    
+
     try {
-        // Use ff7tk's setFileData method like Makou does
-        bool success = _lgp.setFileData(fileName, data);
-        
+        // Archive::setFileData creates a stack QBuffer whose pointer becomes
+        // dangling before pack() reads it -> access violation in ff7tkFormats.dll.
+        // Use a heap-allocated QBuffer (like addFile does) so the pointer stays
+        // valid until pack() is called and the Lgp object is destroyed.
+        QBuffer *buffer = new QBuffer();
+        buffer->setData(data);
+        buffer->open(QIODevice::ReadOnly);
+
+        bool success = _lgp.setFile(fileName, buffer);
+
         if (!success) {
+            delete buffer;
             setError(QString("Failed to set file data: %1").arg(fileName));
             return false;
         }
-        
-        qDebug() << "MakouLgpManager: Successfully updated file:" << fileName 
+
+        // buffer ownership transferred to / kept alive by the Lgp entry.
+        // Do NOT delete it here.
+        qDebug() << "MakouLgpManager: Successfully updated file:" << fileName
                  << "size:" << data.size() << "bytes";
         return true;
-        
+
     } catch (const std::exception &e) {
         setError(QString("Exception setting file data: %1").arg(e.what()));
         return false;
@@ -186,7 +196,27 @@ bool MakouLgpManager::save(const QString &outputPath)
         // If outputPath is different from current path, we need to save as
         if (outputPath != currentPath) {
             qDebug() << "MakouLgpManager: Saving to different path:" << outputPath;
-            
+
+            // ff7tk's Lgp::pack() crashes (access violation in ff7tkFormats.dll)
+            // when the destination archive already exists and cannot be
+            // replaced - it writes a .temp file then faults during the
+            // rename/replace. Remove any existing destination and stale .temp
+            // BEFORE packing, and abort cleanly if the destination is locked
+            // (commonly by 7th Heaven / a running FF7 or mod tool).
+            if (QFile::exists(outputPath)) {
+                if (!QFile::remove(outputPath)) {
+                    setError(QString(
+                        "Cannot overwrite '%1' - the file is locked by another "
+                        "process. Close 7th Heaven, the game, and any FF7 mod "
+                        "tools, then try again.").arg(outputPath));
+                    return false;
+                }
+            }
+            const QString tempPath = outputPath + ".temp";
+            if (QFile::exists(tempPath)) {
+                QFile::remove(tempPath);
+            }
+
             // Use ff7tk's pack method like Makou does
             if (!_lgp.pack(outputPath, nullptr)) {
                 setError(QString("Failed to pack LGP to: %1").arg(outputPath));

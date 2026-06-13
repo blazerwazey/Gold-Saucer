@@ -9,11 +9,13 @@
 #include "ShopRandomizer.h"
 #include "FieldPickupRandomizer_ff7tk.h"
 #include "StartingEquipmentRandomizer.h"
+#include "CraterBarrierPatcher.h"
 
 class EnemyRandomizer;
 class ShopRandomizer;
 class FieldPickupRandomizer_ff7tk;
 class StartingEquipmentRandomizer;
+class CraterBarrierPatcher;
 
 class Randomizer
 {
@@ -30,6 +32,7 @@ public:
     bool randomizeShops();
     bool randomizeFieldPickups();
     bool randomizeStartingEquipment();
+    bool applyCraterBarrier();
     
     bool createBackup(const QString& filePath);
     QString getFF7Path() const { return m_ff7Path; }
@@ -46,7 +49,11 @@ private:
     ShopRandomizer* m_shopRandomizer;
     FieldPickupRandomizer_ff7tk* m_fieldPickupRandomizer;
     StartingEquipmentRandomizer* m_startingEquipmentRandomizer;
-    
+    CraterBarrierPatcher* m_craterBarrierPatcher;
+
     void initializeRandomizers();
     bool validateFF7Installation();
+    // Resolve the effective FF7 data root from the user's selected path. The 2026
+    // Steam re-release nests the engine + data under ff7/workingdir.
+    static QString resolveFF7Root(const QString& path);
 };

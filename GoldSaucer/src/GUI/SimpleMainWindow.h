@@ -44,6 +44,7 @@ private:
     QCheckBox* m_keyItemCheckBox;
     QCheckBox* m_equipmentCheckBox;
     QCheckBox* m_archipelagoCheckBox;
+    QCheckBox* m_freeRoamCheckBox;
     QLineEdit* m_archipelagoJsonEdit;
     
     QSlider* m_nameComplexitySlider;

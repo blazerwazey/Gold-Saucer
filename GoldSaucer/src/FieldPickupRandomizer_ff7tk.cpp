@@ -391,6 +391,66 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             totalMods++;
     }
 
+    // --- Free Roam: suppress the Kalm Traveler gold-chocobo grant ------------
+    // In elmin4_2 the 'choko' entity (script 1) awards a Gold Chocobo into the
+    // stable when the Desert Rose trade sets its trigger bit (savemap addr 0x57
+    // bit 4). In Free Roam the Gold Chocobo must come ONLY from Archipelago
+    // (it gates ocean traversal), so we neutralise the in-game grant while
+    // leaving the trade itself (and thus the AP "Show Gold Chocobo" check, which
+    // fires on bit 4 being set) intact.
+    //
+    // Length-preserving patch: at the start of the grant body insert a JMPFL
+    // straight to the existing `BITOFF 57 04` cleanup, NOP-filling everything in
+    // between (the stable menu, slot search, chocobo data writes, occupancy
+    // BITONs and the count increment). The trigger bit is still cleared at the
+    // end exactly as vanilla, so the chocobo NPC disappears cleanly and nothing
+    // is added to the stable.
+    if (freeRoam && fieldName.toLower() == "elmin4_2") {
+        // 'choko' script 1 @ grant start: IFUBL 33 58 59 02 D9 02
+        static const unsigned char kGrantStart[] = {0x15,0x33,0x58,0x59,0x02,0xD9,0x02};
+        // cleanup: BITOFF (bank 0xF0) addr 0x57 bit 4  — clears the trigger
+        static const unsigned char kGrantTail[]  = {0x83,0xF0,0x57,0x04};
+        auto findUnique = [&](const unsigned char* pat, int n) -> int {
+            int first = -1;
+            for (int i = 0; i + n <= decompressed.size(); ++i) {
+                bool m = true;
+                for (int k = 0; k < n; ++k)
+                    if (static_cast<quint8>(decompressed[i + k]) != pat[k]) { m = false; break; }
+                if (m) {
+                    if (first >= 0) return -2;   // not unique
+                    first = i;
+                }
+            }
+            return first;
+        };
+        int s = findUnique(kGrantStart, sizeof(kGrantStart));
+        int t = findUnique(kGrantTail,  sizeof(kGrantTail));
+        if (s < 0 || t < 0) {
+            debugStream << "  GOLD_CHOCO: anchors not found/unique (s=" << s
+                        << " t=" << t << ") — skipping\n";
+        } else if (static_cast<quint8>(decompressed[s]) == 0x11) {
+            debugStream << "  GOLD_CHOCO: already patched — skipping\n";
+        } else if (t <= s) {
+            debugStream << "  GOLD_CHOCO: tail before start (t=" << t << " s=" << s
+                        << ") — skipping\n";
+        } else {
+            int off = t - (s + 1);               // JMPFL target = (operand addr) + offset
+            if (off > 0xFFFF) {
+                debugStream << "  GOLD_CHOCO: jump distance " << off
+                            << " too large — skipping\n";
+            } else {
+                decompressed[s]     = static_cast<char>(0x11);          // JMPFL
+                decompressed[s + 1] = static_cast<char>(off & 0xFF);    // offset lo
+                decompressed[s + 2] = static_cast<char>((off >> 8) & 0xFF); // offset hi
+                for (int k = s + 3; k < t; ++k)
+                    decompressed[k] = static_cast<char>(0x5F);          // NOP fill
+                debugStream << "  GOLD_CHOCO: suppressed gold-chocobo grant in elmin4_2 "
+                            << "(JMPFL @" << s << " +" << off << " -> BITOFF @" << t << ")\n";
+                totalMods++;
+            }
+        }
+    }
+
     // --- Free Roam diagnostics (disabled): the Rocket Town soft-lock was traced
     //     to the rckt/rckt2 'cloud' init gating UC(disable control)+MENU2 on
     //     Var[3][130] bit 3 (the first-visit intro flag), now pre-set in the
@@ -845,11 +905,14 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     // SET* bank byte = (Dest<<4)|Source; Source 0 = write literal value V.
     static constexpr quint8  kMenuBank16    = 0x20;   // dest 16-bit bank 1, literal src
     static constexpr quint8  kMenuBank8     = 0x10;   // dest 8-bit  bank 1, literal src
-    static constexpr quint16 kGameMoment    = 1603;
+    static constexpr quint16 kGameMoment    = 1997;
     static constexpr quint16 kMenuVisible   = 0x03FF; // Item..Save all visible
     static constexpr quint16 kMenuLocking   = 0x0000; // nothing locked
     static constexpr quint8  kKalmFlagsAddr = 0x80;   // Var[1][128]
     static constexpr quint8  kKalmFlags     = 0x03;   // bits 0 + 1
+    // NOTE: the current disc (savemap 0x0EA4) is NOT field-settable — fields change
+    // it via the DSKCG opcode (engine-handled), never a direct SETBYTE. Free Roam's
+    // "disc 3" is forced by the client writing 0x0EA4 instead (see FF7Client.py).
 
     // BITON Var[3][128] bit 1 — marks the psdun_2 (Mythril Mines) line-trigger
     // party-split event as "already played" so Free Roam doesn't fire it and
@@ -903,7 +966,7 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     // SETBYTE Kalm conversation flags (Var[1][0x80]) = 0x03
     seq.append(static_cast<char>(0x80)); seq.append(static_cast<char>(kMenuBank8));
     seq.append(static_cast<char>(kKalmFlagsAddr)); seq.append(static_cast<char>(kKalmFlags));
-    // SETWORD game moment (Var[2][0]) = 1603
+    // SETWORD game moment (Var[2][0]) = 1997
     seq.append(static_cast<char>(0x81)); seq.append(static_cast<char>(kMenuBank16));
     seq.append(static_cast<char>(0x00)); put16(seq, kGameMoment);
     // BITON Var[3][128] bit 1 — skip psdun_2 (Mythril Mines) party-split trigger

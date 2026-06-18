@@ -120,11 +120,19 @@ static void LoadConfig(const std::string& dir) {
 using GetKernelText_t = char*(__cdecl*)(uint32_t, uint32_t, uint32_t);
 static GetKernelText_t oGetKernelText = nullptr;
 
+// FF7 live game module (== ff7-ultima current_module, verified for goal detection:
+// its game_moment matches our savemap+0xBA4). Field=1, Battle=2, World=3, Menu=5.
+static const uint32_t kCurrentModuleAddr = 0xCBF9DC;
+
 static char* __cdecl hkGetKernelText(uint32_t section, uint32_t index, uint32_t a3) {
-    uint32_t caller = (uint32_t)(uintptr_t)_ReturnAddress();
-    bool inShop = g_menu_shop_loop &&
-                  caller >= g_menu_shop_loop && caller < g_menu_shop_loop + 0x2000;
-    if (inShop && a3 == 8) {
+    // Override shop slot names ONLY while the Menu module is active (current_module
+    // == 5). The shop is part of the menu system, and the AP token ids in g_names
+    // never appear in any OTHER menu (they're reserved, not in the player's
+    // inventory), so the menu-module check alone is a precise gate. This replaces
+    // the old caller-address window, which had to be widened to catch shop draws
+    // (item names at -0x528F, materia at -0x16A9) but then fired during the
+    // field/world new-game setup and crashed. Module gate excludes field(1)/world(3).
+    if (a3 == 8 && *reinterpret_cast<volatile uint8_t*>(kCurrentModuleAddr) == 5) {
         auto it = g_names.find(NameKey(section, index));
         if (it != g_names.end())
             return const_cast<char*>(it->second.c_str());   // custom AP name

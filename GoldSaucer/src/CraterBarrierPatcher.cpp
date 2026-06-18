@@ -46,14 +46,37 @@ const int        kDiamondCondBack = 10; // anchor - 10 = start of the bit test
 const QByteArray kDiamondVanilla  = QByteArray::fromHex("1401fc03"); // push bit
 const QByteArray kDiamondModified = QByteArray::fromHex("10010000"); // push_const 0
 
+// --- Free Roam ambient Diamond Weapon spawns (wm0.ev overworld model loader) --
+// Diamond Weapon (model 10) is loaded in two overworld progress blocks, each
+// gated on the disc-2 story flag Savemap[0xEF6].bit[3] (the "Diamond marches on
+// Midgar" flag set on leaving the Forgotten Capital):
+//   14 01 93 1a  -> push_savemap_bit 6803 (0xEF6.3)
+//   01 02 ?? ??  -> goto_if_false <skip>
+//   00 01        -> reset
+//   10 01 0a 00  -> push_const 10 (Diamond Weapon)
+//   00 03        -> load_model
+// We anchor on the model-10 load and back-walk this exact shape, then rewrite
+// the bit test to push_const 0 so the goto_if_false always skips the load.
+// (0xEF6.3 is read elsewhere for non-spawn logic, so we must NOT blind-replace
+// the bit op — only the back-walked spawn shape qualifies.)
+const QByteArray kDiamondModelLoad   = QByteArray::fromHex("10010a000003"); // push_const 10; load_model
+const QByteArray kAmbientBitVanilla  = QByteArray::fromHex("1401931a");     // push bit 6803 (0xEF6.3)
+const QByteArray kAmbientBitModified = QByteArray::fromHex("10010000");     // push_const 0
+// Shape between the bit test and the load: [bit:4][goto_if_false:2+2][reset:2] = 10 bytes.
+const int        kAmbientGateBack    = 10;
+
 // --- Free Roam crater landing (wm0.ev System fn 9 "crater_landing") ----------
 //   word game_progress ; push_const 1620 ; greater_equal
 //   1C 01 00 00 | 10 01 54 06 | 63 00
-// At game moment 1603 this is never true, so the Highwind descent never fires.
-// Lower the threshold 1620 (0x0654) -> 1580 (0x062C); 1603 >= 1580 passes.
-// Length-preserving (only the constant changes); unique anchor.
+// Vanilla gates the Highwind descent on game_progress >= 1620. In Free Roam (game
+// moment 1997) that is ALWAYS true, so the player could fly to the crater and land
+// even while the barrier is up. Re-gate the descent on crater_lock instead — the
+// same flag the barrier model is gated on — so the descent only fires once the
+// goal items are in (crater_lock=1). Length-preserving (10 bytes -> 10 bytes):
+//   push_savemap_byte 0x183 (crater_lock = 0xD27-0xBA4) ; push_const 1 ; greater_equal
+//   18 01 83 01 | 10 01 01 00 | 63 00   ==>  if crater_lock >= 1 then descend
 const QByteArray kCraterLandVanilla  = QByteArray::fromHex("1C010000100154066300"); // gp >= 1620
-const QByteArray kCraterLandModified = QByteArray::fromHex("1C01000010012C066300"); // gp >= 1580
+const QByteArray kCraterLandModified = QByteArray::fromHex("18018301100101006300"); // crater_lock >= 1
 
 } // namespace
 
@@ -201,6 +224,51 @@ int CraterBarrierPatcher::patchDiamondWeaponSpawn(QByteArray& lgp) const
     return patched;
 }
 
+int CraterBarrierPatcher::patchDiamondAmbientSpawn(QByteArray& lgp) const
+{
+    int dataStart = 0, dataSize = 0;
+    if (!findWm0(lgp, dataStart, dataSize)) {
+        qDebug() << "CraterBarrierPatcher(diamond-ambient): wm0.ev not found in world_us.lgp";
+        return 0;
+    }
+    const int dataEnd = dataStart + dataSize;
+
+    int patched = 0;
+    int from = dataStart;
+    while (true) {
+        const int load = lgp.indexOf(kDiamondModelLoad, from);
+        if (load < 0 || load >= dataEnd) break;
+        from = load + kDiamondModelLoad.size();
+
+        const int bitStart = load - kAmbientGateBack;
+        if (bitStart < dataStart) continue;
+
+        // Back-walk the exact gate shape: bit 6803 ; goto_if_false ?? ; reset.
+        // The goto target (2 bytes) varies per block, so check around it.
+        const QByteArray bitOp = lgp.mid(bitStart, 4);          // 14 01 93 1a  /  10 01 00 00
+        const bool isGotoIf    = lgp.mid(bitStart + 4, 2) == QByteArray::fromHex("0102");
+        const bool isReset     = lgp.mid(bitStart + 8, 2) == QByteArray::fromHex("0001");
+
+        if (bitOp == kAmbientBitModified && isGotoIf && isReset) {
+            qDebug() << "CraterBarrierPatcher(diamond-ambient): site @0x"
+                     + QString::number(load, 16) << "already patched; skipping";
+            continue;
+        }
+        if (bitOp != kAmbientBitVanilla || !isGotoIf || !isReset) {
+            // Not an ambient-spawn gate (e.g. the field-51/Highwind load, which
+            // is handled by patchDiamondWeaponSpawn). Leave it alone.
+            continue;
+        }
+
+        lgp.replace(bitStart, 4, kAmbientBitModified);
+        ++patched;
+        qDebug() << "CraterBarrierPatcher(diamond-ambient): neutralized ambient Diamond Weapon spawn @0x"
+                 + QString::number(load, 16);
+    }
+
+    return patched;
+}
+
 int CraterBarrierPatcher::patchCraterLanding(QByteArray& lgp) const
 {
     int dataStart = 0, dataSize = 0;
@@ -220,7 +288,7 @@ int CraterBarrierPatcher::patchCraterLanding(QByteArray& lgp) const
         return 0;
     }
     lgp.replace(at, kCraterLandVanilla.size(), kCraterLandModified);
-    qDebug() << "CraterBarrierPatcher(landing): lowered crater-landing gate 1620->1580 @0x"
+    qDebug() << "CraterBarrierPatcher(landing): re-gated crater descent on crater_lock @0x"
              + QString::number(at, 16);
     return 1;
 }
@@ -249,8 +317,15 @@ bool CraterBarrierPatcher::patch()
     // spawn on entry from field 51. Non-fatal if absent (logged inside).
     m_diamondSitesPatched = patchDiamondWeaponSpawn(lgp);
 
-    // Free Roam: lower the Northern Crater landing gate (gp>=1620) so the Highwind
-    // descent fires at game moment 1603. Non-fatal if absent (logged inside).
+    // Free Roam: also neutralize the *ambient* Diamond Weapon spawns (model 10
+    // loaded on the overworld once the disc-2 flag 0xEF6.3 is set on leaving the
+    // Forgotten Capital). This is the one the player hits when boarding the
+    // Highwind after the Forgotten Capital. Non-fatal if absent (logged inside).
+    m_diamondAmbientPatched = patchDiamondAmbientSpawn(lgp);
+
+    // Free Roam: re-gate the Northern Crater landing/descent on crater_lock (was
+    // game_progress, always-true in Free Roam) so the Highwind can only descend once
+    // the goal items are in and the barrier is down. Non-fatal if absent (logged).
     m_craterLandingPatched = patchCraterLanding(lgp);
 
     // Ensure data/wm exists, then write the (possibly already-correct) LGP.
@@ -271,7 +346,8 @@ bool CraterBarrierPatcher::patch()
 
     qDebug() << "CraterBarrierPatcher: wrote" << dst
              << "(" << m_sitesPatched << "barrier site(s),"
-             << m_diamondSitesPatched << "Diamond Weapon site(s),"
+             << m_diamondSitesPatched << "Diamond Weapon (field-51) site(s),"
+             << m_diamondAmbientPatched << "Diamond Weapon (ambient) site(s),"
              << m_craterLandingPatched << "crater-landing site(s) newly patched)";
     return true;
 }

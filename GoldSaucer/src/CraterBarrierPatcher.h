@@ -62,6 +62,21 @@ private:
     // Returns 1 if newly patched, 0 if already patched / not found.
     int patchDiamondWeaponSpawn(QByteArray& lgp) const;
 
+    // Neutralize the *ambient* Free Roam Diamond Weapon spawns in wm0.ev. The
+    // overworld model loader (System fn @0x434) loads Diamond Weapon (model 10)
+    // in two progress blocks gated on:
+    //   if Savemap[0xEF6].bit[3] then load_model(Diamond Weapon)
+    // 0xEF6.3 is the disc-2 "Diamond is marching on Midgar" story flag, set when
+    // the player leaves the Forgotten Capital. Free Roam never wants it, so on
+    // each Diamond Weapon (model 10) load that is gated this way we rewrite the
+    // bit test to push_const 0 (always false). The 0xEF6.3 bit is read in several
+    // other (non-spawn) places, so we anchor on the model-10 load and back-walk
+    // the exact "bit 6803 ; goto_if_false ; reset ; load_model 10" shape — only
+    // the two ambient spawns match (the field-51/Highwind path is left to
+    // patchDiamondWeaponSpawn). Length-preserving (4 bytes), validated, idempotent.
+    // Returns the number of sites newly patched.
+    int patchDiamondAmbientSpawn(QByteArray& lgp) const;
+
     // Lower the Northern Crater landing gate in wm0.ev System fn 9 ("crater_landing"):
     //   if Savemap.game_progress >= 1620 then <Highwind descent>
     // Free Roam runs at game moment 1603, so the descent never fires. We rewrite
@@ -75,6 +90,7 @@ private:
     QString m_outputPath;
     int     m_sitesPatched = 0;
     int     m_diamondSitesPatched = 0;
+    int     m_diamondAmbientPatched = 0;
     int     m_craterLandingPatched = 0;
 };
 

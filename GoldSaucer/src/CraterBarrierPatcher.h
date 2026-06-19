@@ -84,6 +84,12 @@ private:
     // Returns 1 if newly patched, 0 if already patched / not found.
     int patchCraterLanding(QByteArray& lgp) const;
 
+    // Free world-map model budget in Free Roam so Ruby (model 29) / Diamond
+    // (model 10) actually render: NOP the decorative Junon cannon (7), Midgar
+    // cannon (20) and Rocket Town rocket (15) load_model calls. Stack-neutral
+    // (push_const + load_model both removed). Returns the number of loads NOP'd.
+    int patchTrimWorldModels(QByteArray& lgp) const;
+
     static quint32 readU32(const QByteArray& d, int off);
 
     QString m_ff7Path;
@@ -92,6 +98,7 @@ private:
     int     m_diamondSitesPatched = 0;
     int     m_diamondAmbientPatched = 0;
     int     m_craterLandingPatched = 0;
+    int     m_modelsTrimmed = 0;
 };
 
 #endif // CRATERBARRIERPATCHER_H

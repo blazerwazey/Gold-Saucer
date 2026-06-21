@@ -56,35 +56,16 @@ const QByteArray kDiamondModified = QByteArray::fromHex("10010000"); // push_con
 //   10 01 0a 00  -> push_const 10 (Diamond Weapon)
 //   00 03        -> load_model
 // We anchor on the model-10 load and back-walk this exact shape, then rewrite
-// the bit test to push_const 0 so the goto_if_false always skips the load.
+// the bit test to push_const 0 so the goto_if_false always skips the load —
+// Diamond never rises from the ocean (his world-map model does not render in
+// Free Roam even at world_progress 4, so he is fully hidden rather than spawned).
 // (0xEF6.3 is read elsewhere for non-spawn logic, so we must NOT blind-replace
 // the bit op — only the back-walked spawn shape qualifies.)
 const QByteArray kDiamondModelLoad   = QByteArray::fromHex("10010a000003"); // push_const 10; load_model
 const QByteArray kAmbientBitVanilla  = QByteArray::fromHex("1401931a");     // push bit 6803 (0xEF6.3)
-const QByteArray kAmbientBitModified = QByteArray::fromHex("10010000");     // push_const 0
+const QByteArray kAmbientBitModified = QByteArray::fromHex("10010000");     // push_const 0 (always-false)
 // Shape between the bit test and the load: [bit:4][goto_if_false:2+2][reset:2] = 10 bytes.
 const int        kAmbientGateBack    = 10;
-
-// --- Free Roam world-map model budget (make Ruby/Diamond render) -------------
-// In Free Roam almost every conditional model load in the overworld init is TRUE
-// at once (cannons intact, Fort Condor active, Ultimate alive, Ruby spawned,
-// barrier forced on, all vehicles owned, chocobos...) — a combination the game
-// never hits in normal play, where progress flags keep most of these OFF. The
-// world map has a budget for simultaneous models; over it, the "extra" models
-// (Ruby model 29, Diamond model 10) get an entity — so collision/encounters
-// still fire — but are NOT drawn (invisible). We free budget by NOP-ing three
-// purely-decorative world-map props (their towns are entered via separate
-// models, so nothing is lost in Free Roam):
-//   push_const 7 ; load_model   -> Junon cannon (Sister Ray @ Junon)
-//   push_const 20; load_model   -> Midgar cannon (Sister Ray @ Midgar)
-//   push_const 15; load_model   -> Rocket Town rocket
-// Replaced with three worldscript NOPs (00 00) each — stack-neutral, since
-// push_const(+1) and load_model(-1) are both removed. Fort Condor (model 12) is
-// a LOCATION, so it is deliberately left alone.
-const QByteArray kPropLoadJunonCannon  = QByteArray::fromHex("100107000003");
-const QByteArray kPropLoadMidgarCannon = QByteArray::fromHex("100114000003"); // 0x14 = 20
-const QByteArray kPropLoadRocket       = QByteArray::fromHex("10010f000003"); // 0x0F = 15
-const QByteArray kPropLoadNop          = QByteArray::fromHex("000000000000"); // 3x NOP
 
 // --- Free Roam crater landing (wm0.ev System fn 9 "crater_landing") ----------
 //   word game_progress ; push_const 1620 ; greater_equal
@@ -290,6 +271,40 @@ int CraterBarrierPatcher::patchDiamondAmbientSpawn(QByteArray& lgp) const
     return patched;
 }
 
+int CraterBarrierPatcher::patchHighwindDiamondScene(QByteArray& lgp) const
+{
+    int dataStart = 0, dataSize = 0;
+    if (!findWm0(lgp, dataStart, dataSize)) {
+        qDebug() << "CraterBarrierPatcher(highwind-diamond): wm0.ev not found";
+        return 0;
+    }
+    const int dataEnd = dataStart + dataSize;
+
+    // The Highwind model's init holds:
+    //   push Special[6] (last_field_id) ; push_const 51 ; eq ; goto_if_false 0x21b4
+    // i.e. "if last_field_id == 51 then <reposition + rise cinematic + call
+    // diamond_weapon fn 28>". Anchor on the full gate (the 0x21b4 goto target makes
+    // it unique — a second last_field_id==51 gate near 0x12f8 is left alone), then
+    // rewrite the compared constant 51 -> 0xFFFF so the test is never true and the
+    // whole Diamond block is always skipped (falls through to the normal path).
+    static const QByteArray kGateVanilla  = QByteArray::fromHex("1b0106001001330070000102b421");
+    static const QByteArray kGateModified = QByteArray::fromHex("1b0106001001ffff70000102b421");
+
+    const int at = lgp.indexOf(kGateVanilla, dataStart);
+    if (at < 0 || at >= dataEnd) {
+        const int mod = lgp.indexOf(kGateModified, dataStart);
+        if (mod >= 0 && mod < dataEnd)
+            qDebug() << "CraterBarrierPatcher(highwind-diamond): already patched; skipping";
+        else
+            qDebug() << "CraterBarrierPatcher(highwind-diamond): Highwind Diamond gate (last_field_id==51) not found";
+        return 0;
+    }
+    lgp.replace(at + 6, 2, QByteArray::fromHex("ffff"));   // push_const 51 -> 0xFFFF
+    qDebug() << "CraterBarrierPatcher(highwind-diamond): neutralized Highwind Diamond scene @0x"
+             + QString::number(at, 16);
+    return 1;
+}
+
 int CraterBarrierPatcher::patchCraterLanding(QByteArray& lgp) const
 {
     int dataStart = 0, dataSize = 0;
@@ -312,37 +327,6 @@ int CraterBarrierPatcher::patchCraterLanding(QByteArray& lgp) const
     qDebug() << "CraterBarrierPatcher(landing): re-gated crater descent on crater_lock @0x"
              + QString::number(at, 16);
     return 1;
-}
-
-int CraterBarrierPatcher::patchTrimWorldModels(QByteArray& lgp) const
-{
-    int dataStart = 0, dataSize = 0;
-    if (!findWm0(lgp, dataStart, dataSize)) {
-        qDebug() << "CraterBarrierPatcher(trim): wm0.ev not found";
-        return 0;
-    }
-    const int dataEnd = dataStart + dataSize;
-
-    const struct { const QByteArray& load; const char* name; } props[] = {
-        { kPropLoadJunonCannon,  "Junon cannon (model 7)" },
-        { kPropLoadMidgarCannon, "Midgar cannon (model 20)" },
-        { kPropLoadRocket,       "Rocket Town rocket (model 15)" },
-    };
-
-    int patched = 0;
-    for (const auto& p : props) {
-        int from = dataStart;
-        while (true) {
-            const int at = lgp.indexOf(p.load, from);
-            if (at < 0 || at >= dataEnd) break;
-            from = at + p.load.size();
-            lgp.replace(at, kPropLoadNop.size(), kPropLoadNop);
-            ++patched;
-            qDebug() << "CraterBarrierPatcher(trim): NOP'd" << p.name << "load @0x"
-                     + QString::number(at, 16);
-        }
-    }
-    return patched;
 }
 
 bool CraterBarrierPatcher::patch()
@@ -369,23 +353,22 @@ bool CraterBarrierPatcher::patch()
     // spawn on entry from field 51. Non-fatal if absent (logged inside).
     m_diamondSitesPatched = patchDiamondWeaponSpawn(lgp);
 
-    // Free Roam: also neutralize the *ambient* Diamond Weapon spawns (model 10
-    // loaded on the overworld once the disc-2 flag 0xEF6.3 is set on leaving the
-    // Forgotten Capital). This is the one the player hits when boarding the
-    // Highwind after the Forgotten Capital. Non-fatal if absent (logged inside).
+    // Diamond Weapon HIDDEN again (2026-06-20): unlike Ruby, his world-map model
+    // does not render in Free Roam even at world_progress 4, so rather than spawn a
+    // collidable-but-invisible boss we neutralize his ambient (0xEF6.3) spawn —
+    // he never rises from the ocean. (field-51 forced-Highwind spawn stays patched
+    // by patchDiamondWeaponSpawn above.)
     m_diamondAmbientPatched = patchDiamondAmbientSpawn(lgp);
+
+    // Free Roam: also kill the Highwind-init Diamond Weapon scene (the "board the
+    // Highwind after the Forgotten City" cinematic that repositions the Highwind and
+    // calls diamond_weapon fn 28). Gated on last_field_id==51; we make it impossible.
+    m_highwindScenePatched = patchHighwindDiamondScene(lgp);
 
     // Free Roam: re-gate the Northern Crater landing/descent on crater_lock (was
     // game_progress, always-true in Free Roam) so the Highwind can only descend once
     // the goal items are in and the barrier is down. Non-fatal if absent (logged).
     m_craterLandingPatched = patchCraterLanding(lgp);
-
-    // (Model-budget trim disabled: Ruby invisibility was NOT a budget issue — it's
-    // gated by world_progress, fixed in the client's _resolve_ultimate_weapon. The
-    // patchTrimWorldModels method is kept available but no longer called, so the
-    // cosmetic Junon/Midgar cannons + Rocket Town rocket remain on the map.)
-    (void)&CraterBarrierPatcher::patchTrimWorldModels;
-    m_modelsTrimmed = 0;
 
     // Ensure data/wm exists, then write the (possibly already-correct) LGP.
     QFileInfo fi(dst);
@@ -407,7 +390,7 @@ bool CraterBarrierPatcher::patch()
              << "(" << m_sitesPatched << "barrier site(s),"
              << m_diamondSitesPatched << "Diamond Weapon (field-51) site(s),"
              << m_diamondAmbientPatched << "Diamond Weapon (ambient) site(s),"
-             << m_craterLandingPatched << "crater-landing site(s),"
-             << m_modelsTrimmed << "decorative model load(s) trimmed)";
+             << m_highwindScenePatched << "Diamond Weapon (Highwind scene) site(s),"
+             << m_craterLandingPatched << "crater-landing site(s) newly patched)";
     return true;
 }

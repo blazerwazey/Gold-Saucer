@@ -315,6 +315,25 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
         hext << QString::number(address, 16).toUpper() << " = " << hexBytes << "\n";
     }
 
+    // AP materia tokens use otherwise-unused materia ids whose price-table entry is
+    // typically 0 (free). A free purchase deducts no gil — but the shophook tells a
+    // materia BUY from a hover by the gil drop, so a 0-price token can never fire its
+    // check. Write a fixed price for each AP materia token so it both sells and costs
+    // gil. (Item tokens are real items with real prices, so they need no help.)
+    // Materia price table VA = SHOP_INVENTORY_VA + MATERIA_PRICE_DELTA (constant across
+    // builds; the file-offset deltas differ but the loaded VA is the same).
+    const quint32 AP_MATERIA_TOKEN_PRICE = 100;   // nonzero + affordable anywhere
+    for (const ApShopSlot& e : m_apShops) {
+        if (!e.isMateria) continue;
+        const qint64 priceAddr = SHOP_INVENTORY_VA + MATERIA_PRICE_DELTA
+                               + static_cast<qint64>(e.token) * 4;
+        QString priceBytes;
+        for (int b = 0; b < 4; ++b)
+            priceBytes += QString("%1 ").arg((AP_MATERIA_TOKEN_PRICE >> (b * 8)) & 0xFF,
+                                             2, 16, QChar('0')).toUpper();
+        hext << QString::number(priceAddr, 16).toUpper() << " = " << priceBytes.trimmed() << "\n";
+    }
+
     hextFile.close();
     qDebug() << "ShopRandomizer: Hext patch written to" << hextPath;
     return true;

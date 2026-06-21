@@ -77,18 +77,19 @@ private:
     // Returns the number of sites newly patched.
     int patchDiamondAmbientSpawn(QByteArray& lgp) const;
 
+    // Neutralize the Highwind-init Diamond Weapon scene in wm0.ev: the Highwind
+    // model's init runs a "if last_field_id == 51" block that repositions the
+    // Highwind, plays the rise cinematic, and calls diamond_weapon fn 28. We make
+    // the comparison impossible (push 51 -> push 0xFFFF) so the block is always
+    // skipped. Length-preserving (2 bytes), unique anchor, idempotent.
+    int patchHighwindDiamondScene(QByteArray& lgp) const;
+
     // Lower the Northern Crater landing gate in wm0.ev System fn 9 ("crater_landing"):
     //   if Savemap.game_progress >= 1620 then <Highwind descent>
     // Free Roam runs at game moment 1603, so the descent never fires. We rewrite
     // the threshold 1620 -> 1580 (length-preserving, unique anchor, validated).
     // Returns 1 if newly patched, 0 if already patched / not found.
     int patchCraterLanding(QByteArray& lgp) const;
-
-    // Free world-map model budget in Free Roam so Ruby (model 29) / Diamond
-    // (model 10) actually render: NOP the decorative Junon cannon (7), Midgar
-    // cannon (20) and Rocket Town rocket (15) load_model calls. Stack-neutral
-    // (push_const + load_model both removed). Returns the number of loads NOP'd.
-    int patchTrimWorldModels(QByteArray& lgp) const;
 
     static quint32 readU32(const QByteArray& d, int off);
 
@@ -97,8 +98,8 @@ private:
     int     m_sitesPatched = 0;
     int     m_diamondSitesPatched = 0;
     int     m_diamondAmbientPatched = 0;
+    int     m_highwindScenePatched = 0;
     int     m_craterLandingPatched = 0;
-    int     m_modelsTrimmed = 0;
 };
 
 #endif // CRATERBARRIERPATCHER_H

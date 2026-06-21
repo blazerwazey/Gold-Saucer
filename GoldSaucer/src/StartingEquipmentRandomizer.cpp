@@ -8,6 +8,12 @@
 #include <QDebug>
 #include <QByteArray>
 #include <QTextStream>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QSet>
+#include <QVector>
 #include <algorithm>
 #include <ff7tk/data/FF7Char.h>
 #include <ff7tk/utils/GZIP.h>
@@ -350,7 +356,38 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
         0x58, 0x59                                       // BahamutZERO,KOTR
     };
     const int VALID_MATERIA_COUNT = sizeof(VALID_MATERIA) / sizeof(VALID_MATERIA[0]);
-    
+
+    // Exclude reserved AP materia shop tokens: those ids are SOLD by AP shops under
+    // a custom name and must never appear as a real materia the player owns — handing
+    // one out as randomized starting materia means the player begins with an AP token.
+    // Read them straight from the AP shops json so this is independent of run order.
+    QSet<quint16> reservedMateria;
+    {
+        const QString apJson = m_parent->m_config.getApJsonPath();
+        QFile af(apJson);
+        if (!apJson.isEmpty() && af.open(QIODevice::ReadOnly)) {
+            const QJsonArray shops = QJsonDocument::fromJson(af.readAll())
+                                         .object().value("shops").toArray();
+            af.close();
+            for (const QJsonValue& v : shops) {
+                const QJsonObject o = v.toObject();
+                if (o.value("token_type").toString("item") == "materia") {
+                    const int t = o.value("token_id").toInt(-1);
+                    if (t >= 0) reservedMateria.insert(static_cast<quint16>(t));
+                }
+            }
+        }
+    }
+    // Build the selectable materia pool = VALID_MATERIA minus reserved AP tokens.
+    QVector<quint8> selectableMateria;
+    for (int i = 0; i < VALID_MATERIA_COUNT; ++i)
+        if (!reservedMateria.contains(VALID_MATERIA[i]))
+            selectableMateria.append(VALID_MATERIA[i]);
+    if (selectableMateria.isEmpty())                       // safety: never empty
+        for (int i = 0; i < VALID_MATERIA_COUNT; ++i) selectableMateria.append(VALID_MATERIA[i]);
+    log(QString("Materia pool: %1 valid, %2 reserved AP token(s) excluded, %3 selectable")
+        .arg(VALID_MATERIA_COUNT).arg(reservedMateria.size()).arg(selectableMateria.size()));
+
     qDebug() << "Starting equipment randomization on section 4, size:" << data.size() << "bytes";
     
     // Randomize equipment for all playable characters (excluding Young Cloud and Sephiroth)
@@ -419,7 +456,7 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
         
         // Randomize materia slots (0-7 weapon, 8-15 armor)
         // Capped to MAX_WEAPON_MATERIA / MAX_ARMOR_MATERIA to stay within slot limits
-        std::uniform_int_distribution<int> materiaDist(0, VALID_MATERIA_COUNT - 1);
+        std::uniform_int_distribution<int> materiaDist(0, selectableMateria.size() - 1);
         QStringList materiaLog;
         int weaponMateriaCount = 0;
         int armorMateriaCount  = 0;
@@ -447,7 +484,7 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
 
             double fillChance = isWeaponSlot ? 0.60 : 0.50;
             if (chanceDist(m_rng) < fillChance) {
-                quint8 matId = VALID_MATERIA[materiaDist(m_rng)];
+                quint8 matId = selectableMateria[materiaDist(m_rng)];
                 if (isWeaponSlot) ++weaponMateriaCount;
                 else ++armorMateriaCount;
                 data[slotOffset]     = static_cast<char>(matId);

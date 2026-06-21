@@ -16,6 +16,9 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <vector>
+#include <cstring>
+#include <QHash>
 
 namespace {
     constexpr int MOMENT_GAME_START    = 0;
@@ -309,6 +312,137 @@ bool FieldPickupRandomizer_ff7tk::randomize()
 }
 
 // ============================================================================
+// ff7LzsCompressWithHeader  –  correct FF7 field LZS encoder
+//
+// ff7tk's bundled LZS::compress is documented as "limited to small data sizes"
+// and produces a CORRUPT stream for some large/complex fields (notably convil_2,
+// the Fort Condor minigame field) — the recompressed data decompresses to garbage
+// and the game crashes when the post-minigame cutscene runs. This is a standard
+// Okumura LZSS encoder matching the FF7 field format: 8-unit groups led by a
+// control byte (LSB-first; bit=1 literal, bit=0 = 2-byte match), match = 12-bit
+// ring position + 4-bit (length-3), ring buffer N=4096 with r starting at N-F
+// (4078) and 0x00 init. We encode plain LZSS over the output and map (distance ->
+// ring position) with pos = (4078 + outPos - distance) & 4095, which never needs
+// the init fill. Output is prefixed with the 4-byte LE compressed-length header.
+// Verified by round-trip against LZS::decompressAllWithHeader before use.
+// ============================================================================
+// Game-compatible FF7 LZS decompressor (Okumura: ring N=4096, r starts at N-F=4078,
+// 0x00 init). Matches the GAME's / vanilla decoder. We need our OWN decoder to VERIFY
+// recompression: ff7tk's LZS::decompressAllWithHeader agrees with ff7tk's compressor
+// (its round-trip always "passes") but ff7tk's compressed output for large fields is
+// NOT what the game decodes — so verifying with ff7tk's decoder is useless. Verifying
+// with this one catches the game-incompatible output. Input includes the 4-byte LE
+// length header.
+static QByteArray ff7LzsDecompress(const QByteArray& blob)
+{
+    if (blob.size() < 4) return QByteArray();
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(blob.constData());
+    quint32 fsize = quint32(p[0]) | (quint32(p[1]) << 8) | (quint32(p[2]) << 16) | (quint32(p[3]) << 24);
+    int n = blob.size() - 4;
+    if (static_cast<int>(fsize) < n) n = static_cast<int>(fsize);
+    const unsigned char* data = p + 4;
+    const int N = 4096;
+    unsigned char tb[4096];
+    memset(tb, 0, sizeof(tb));
+    int r = N - 18;
+    QByteArray out;
+    int i = 0;
+    while (i < n) {
+        unsigned char ctrl = data[i++];
+        for (int b = 0; b < 8 && i < n; ++b) {
+            if (ctrl & 1) {
+                unsigned char c = data[i++];
+                out.append(char(c)); tb[r] = c; r = (r + 1) & (N - 1);
+            } else {
+                if (i + 1 >= n) break;
+                unsigned char b1 = data[i], b2 = data[i + 1]; i += 2;
+                int pos = b1 | ((b2 & 0xF0) << 4);
+                int cnt = (b2 & 0x0F) + 3;
+                for (int k = 0; k < cnt; ++k) {
+                    unsigned char c = tb[(pos + k) & (N - 1)];
+                    out.append(char(c)); tb[r] = c; r = (r + 1) & (N - 1);
+                }
+            }
+            ctrl >>= 1;
+        }
+    }
+    return out;
+}
+
+static QByteArray ff7LzsCompressWithHeader(const QByteArray& in)
+{
+    const int n = in.size();
+    const unsigned char* d = reinterpret_cast<const unsigned char*>(in.constData());
+    const int N = 4096, F = 18, THRESHOLD = 2;
+
+    QHash<quint32, int> head;
+    std::vector<int> prevp(n > 0 ? n : 1, -1);
+    auto h3 = [&](int p) -> qint64 {
+        if (p + 2 >= n) return -1;
+        return (quint32(d[p]) << 16) | (quint32(d[p + 1]) << 8) | quint32(d[p + 2]);
+    };
+
+    QByteArray out;
+    out.reserve(in.size());
+    unsigned char ctrl = 0;
+    int nbits = 0;
+    QByteArray chunk;
+    auto flush = [&]() {
+        if (nbits == 0) return;
+        out.append(char(ctrl));
+        out.append(chunk);
+        ctrl = 0; nbits = 0; chunk.clear();
+    };
+
+    int p = 0;
+    while (p < n) {
+        int bestLen = 0, bestDist = 0;
+        const qint64 hv = h3(p);
+        if (hv >= 0) {
+            const int minPos = p - N > 0 ? p - N : 0;
+            const int maxLen = F < n - p ? F : n - p;
+            int cand = head.value(quint32(hv), -1);
+            int tries = 0;
+            while (cand >= minPos && tries < 128) {
+                int l = 0;
+                while (l < maxLen && d[cand + l] == d[p + l]) ++l;
+                if (l > bestLen) { bestLen = l; bestDist = p - cand; if (l == maxLen) break; }
+                cand = prevp[cand]; ++tries;
+            }
+        }
+        if (bestLen > THRESHOLD) {                       // match (>= 3 bytes)
+            const int r = (4078 + p) & (N - 1);
+            const int pos = (r - bestDist) & (N - 1);
+            chunk.append(char(pos & 0xFF));
+            chunk.append(char(((pos >> 4) & 0xF0) | ((bestLen - 3) & 0x0F)));
+            ++nbits;                                     // control bit stays 0 = match
+            for (int k = 0; k < bestLen; ++k) {
+                const qint64 hp = h3(p + k);
+                if (hp >= 0) { prevp[p + k] = head.value(quint32(hp), -1); head[quint32(hp)] = p + k; }
+            }
+            p += bestLen;
+        } else {                                         // literal
+            chunk.append(char(d[p]));
+            ctrl |= (1 << nbits);                        // bit = 1 = literal
+            ++nbits;
+            if (hv >= 0) { prevp[p] = head.value(quint32(hv), -1); head[quint32(hv)] = p; }
+            ++p;
+        }
+        if (nbits == 8) flush();
+    }
+    flush();
+
+    QByteArray result;
+    const quint32 len = quint32(out.size());
+    result.append(char(len & 0xFF));
+    result.append(char((len >> 8) & 0xFF));
+    result.append(char((len >> 16) & 0xFF));
+    result.append(char((len >> 24) & 0xFF));
+    result.append(out);
+    return result;
+}
+
+// ============================================================================
 // processFieldFile  –  scan, validate, randomise opcodes in one field
 // ============================================================================
 
@@ -448,6 +582,59 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                             << "(JMPFL @" << s << " +" << off << " -> BITOFF @" << t << ")\n";
                 totalMods++;
             }
+        }
+    }
+
+    // (Diamond Weapon is fully hidden in Free Roam — his ambient spawn is
+    // neutralized in wm0.ev, so fr_e is never entered and needs no patch.)
+
+    // --- Free Roam: skip the Fort Condor (convil_2) post-minigame movie --------
+    // After the Condor minigame, the "event" cutscene runs PMVIE(set movie #33) ;
+    // WAIT 1 ; MOVIE(play). On disc 3 (forced in Free Roam) movie #33 is a "No33"
+    // placeholder that doesn't exist, so MOVIE crashes the game. NOP the set-movie
+    // (F8 21 -> 5F 5F) and the play-movie (F9 -> 5F); the surrounding music/dialog
+    // is untouched. (Movie opcodes are 0xF8 PMVIE / 0xF9 MOVIE — verified by
+    // disassembly; the in-tree getOpcodeName labels for 0xD8/0xD9 are inaccurate.)
+    if (freeRoam && fieldName.toLower() == "convil_2") {
+        static const QByteArray kCondorMovie = QByteArray::fromHex("f8212401 00f9");
+        int at = decompressed.indexOf(kCondorMovie);
+        if (at < 0) {
+            // already patched? (set-movie NOP'd)
+            if (decompressed.indexOf(QByteArray::fromHex("5f5f2401005f")) >= 0)
+                debugStream << "  CONDOR_MOVIE: already patched — skipping\n";
+            else
+                debugStream << "  CONDOR_MOVIE: PMVIE/MOVIE anchor not found — skipping\n";
+        } else {
+            decompressed[at]     = static_cast<char>(0x5F); // PMVIE opcode -> NOP
+            decompressed[at + 1] = static_cast<char>(0x5F); // PMVIE operand (movie 33) -> NOP
+            decompressed[at + 5] = static_cast<char>(0x5F); // MOVIE -> NOP
+            debugStream << "  CONDOR_MOVIE: NOP'd Fort Condor post-minigame movie @0x"
+                        << QString::number(at, 16) << "\n";
+            totalMods++;
+        }
+    }
+
+    // --- Free Roam: skip the Icicle Inn (snow) Shinra-blockade cutscene --------
+    // man1's contact script asks "It's dangerous, please don't go!" and, if the
+    // answer (Var[5][16]) == 1, runs the Elena/Shinra confrontation that seals the
+    // town exits -> Free Roam softlock. The gate is an IFUBL "Var[5][16] == 1, else
+    // goto label 3 (skip)". Change the compared value 1 -> 0xFF so the test can never
+    // be true (the answer is only ever 1/2, bank-5 temp default 0), making it always
+    // take the skip branch. Unique anchor; length-preserving 1-byte edit; idempotent.
+    if (freeRoam && fieldName.toLower() == "snow") {
+        static const QByteArray kSnowGate = QByteArray::fromHex("15501001000901"); // IFUBL Var5[16]==1, jmp 0x0109
+        int at = decompressed.indexOf(kSnowGate);
+        if (at < 0) {
+            if (decompressed.indexOf(QByteArray::fromHex("155010ff000901")) >= 0)
+                debugStream << "  SNOW_SHINRA: already patched — skipping\n";
+            else
+                debugStream << "  SNOW_SHINRA: IFUBL Var[5][16]==1 gate not found "
+                               "(version differs?) — skipping\n";
+        } else {
+            decompressed[at + 3] = static_cast<char>(0xFF);   // == 1 -> == 0xFF (never) => always skip
+            debugStream << "  SNOW_SHINRA: neutralized Elena/Shinra blockade gate @0x"
+                        << QString::number(at, 16) << "\n";
+            totalMods++;
         }
     }
 
@@ -648,9 +835,30 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     // --- recompress if anything changed -------------------------------------
     if (totalMods > 0) {
         QByteArray recompressed = LZS::compressWithHeader(decompressed);
+        recompressed.detach();   // own buffer, not LZS's static cache
         if (recompressed.isEmpty()) {
             debugStream << fieldName << ": LZS recompression failed!\n";
             return false;
+        }
+        // ff7tk's LZS compressor corrupts some large/complex fields (e.g. convil_2,
+        // the Fort Condor minigame field): its output round-trips through ITS OWN
+        // decoder but the GAME decodes it to garbage and crashes when the post-minigame
+        // cutscene plays. So verify with a GAME-COMPATIBLE decoder (ff7LzsDecompress),
+        // NOT LZS::decompressAllWithHeader (which always agrees with ff7tk's compressor).
+        // If ff7tk's output fails, recompress with our own verified encoder; as a last
+        // resort leave the field VANILLA rather than ship a corrupt one.
+        if (ff7LzsDecompress(recompressed) != decompressed) {
+            QByteArray alt = ff7LzsCompressWithHeader(decompressed);
+            if (!alt.isEmpty() && ff7LzsDecompress(alt) == decompressed) {
+                recompressed = alt;
+                debugStream << "  " << fieldName
+                            << ": ff7tk LZS game-incompatible — used in-tree encoder ("
+                            << recompressed.size() << " bytes)\n";
+            } else {
+                debugStream << "  " << fieldName
+                            << ": LZS recompress corrupt (both encoders) — left VANILLA\n";
+                return false;   // keep original fieldData (caller writes it unchanged)
+            }
         }
         fieldData = recompressed;
         debugStream << "  >> " << fieldName << ": modified "

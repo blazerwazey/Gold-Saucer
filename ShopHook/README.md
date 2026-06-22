@@ -36,12 +36,22 @@ this build). Confirm live via `shophook_log.txt`; resolution is guarded by
 
 | Hook | VA | Notes |
 |---|---|---|
-| `get_kernel_text` | resolved via FFNx-style rel-call chain | a3=8 name, a3=0 description; gated to Menu module (current_module==5) |
+| `get_kernel_text` | resolved via FFNx-style rel-call chain | a3=8 name, a3=0 description; gated to Menu module (current_module==5); also samples party gil each render frame |
 | `AddItems` | `0x6CBFFA` | arg = `(qty<<9) | item_id`; suppressed for reserved item tokens |
-| add-materia | `0x6CBCF3` | arg = materia id; suppressed for reserved materia tokens |
+| add-materia | `0x6CBCF3` | arg = materia id; suppressed for reserved materia tokens **only when gil just dropped** (see below) |
 
-Gil is deducted by a **separate** `DecreaseGil (0x6CBC7C)` call, so suppressing
-only the grant leaves the player paying for the slot.
+Gil is deducted by a **separate** `DecreaseGil` call, so suppressing only the
+grant leaves the player paying for the slot.
+
+### Materia hover guard (gil-drop gate)
+
+The materia shop shares code with the equip/materia menu, so `0x6CBCF3` is also
+reached while merely **hovering** a materia — which must NOT fire a check. Party
+gil (savemap `+0x0B7C`, the client's `GIL_OFFSET`) is sampled every render frame
+inside `hkGetKernelText`; `hkAddMateria` only signals + suppresses when the
+current gil is **below** that last-frame value (a real purchase spends gil; a
+hover doesn't). Items don't need this — the item shop's grant routine only runs on
+an actual buy.
 
 ## shop_ap.txt (written by the AP client, read by the DLL at load)
 
@@ -83,3 +93,6 @@ The AP client auto-injects `shophook.dll` if it sits beside `FF7_EN.exe`.
 3. The `a3` argument for the description call is assumed to be `0` (per the file
    header). If descriptions don't override, log `a3` values in `hkGetKernelText`
    while browsing a shop and adjust `KTEXT_A3_DESC`.
+4. If a **materia** purchase stops firing (vs. hover false-firing before the fix),
+   gil is being deducted *after* the grant for that path — switch the gate to arm
+   on a hooked `DecreaseGil` instead of the per-frame gil sample.

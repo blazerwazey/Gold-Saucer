@@ -56,6 +56,8 @@ You can then launch the game as normal via the "Play" button in the top left of 
 
 Gold Saucer doubles as the file patcher for the **Final Fantasy VII** Archipelago world (`FF7pelago`).
 
+Please note: Please do not adjust any settings once you have imported your .apff7 file in to Gold Saucer
+
 1. Generate the multiworld; Archipelago writes an `AP_<seed>_P<slot>_<name>.apff7` file (a JSON payload,
    `"format": "apff7"`) for each FF7 slot.
 2. In Gold Saucer, **import the `.apff7`** to enable Archipelago mode. It uses the `placements` and `shops` arrays to

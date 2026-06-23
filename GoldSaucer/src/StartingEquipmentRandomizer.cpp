@@ -412,21 +412,34 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
             continue;
         }
         
-        // Get valid weapon range for this character
-        // Note: FF7Char returns different ranges than kernel.bin storage
-        // Kernel.bin stores: Cloud(0-15), Barret(32-47), Tifa(16-31), Aerith(48-63), Red(64-79), Yuffie(80-95), CaitSith(96-111), Vincent(112-127), Cid(128-143)
+        // Valid weapon range for this character. The FF7CHAR.weapon byte stores the
+        // WEAPON NUMBER (= weapon item id - 0x80). The per-character ranges are NOT
+        // a uniform 16 each — they're variable and contiguous (verified against
+        // ff7tk FF7Item.h ItemId weapon enum). The old table used 16-each, which
+        // (a) handed characters other characters' weapons and (b) ran Cid off the
+        // end of the 128-entry weapon table (128-143) into the ARMOR table, showing
+        // armor as a weapon. Correct ranges:
+        //   Cloud   0x80-0x8F -> 0-15   (16)  swords
+        //   Tifa    0x90-0x9F -> 16-31  (16)  gloves
+        //   Barret  0xA0-0xAF -> 32-47  (16)  gun-arms
+        //   RedXIII 0xB0-0xBD -> 48-61  (14)  clips/combs
+        //   Aerith  0xBE-0xC8 -> 62-72  (11)  rods/staves
+        //   Cid     0xC9-0xD6 -> 73-86  (14)  spears
+        //   Yuffie  0xD7-0xE4 -> 87-100 (14)  shuriken/rings
+        //   CaitSith0xE5-0xF1 -> 101-113(13)  megaphones
+        //   Vincent 0xF2-0xFE -> 114-126(13)  guns
         int weaponStart, numWeapons;
         switch(charId) {
-            case 0: weaponStart = 0; numWeapons = 16; break;   // Cloud: 0-15
-            case 1: weaponStart = 32; numWeapons = 16; break;  // Barret: 32-47
-            case 2: weaponStart = 16; numWeapons = 16; break;  // Tifa: 16-31
-            case 3: weaponStart = 48; numWeapons = 16; break;  // Aerith: 48-63
-            case 4: weaponStart = 64; numWeapons = 16; break;  // Red: 64-79
-            case 5: weaponStart = 80; numWeapons = 16; break;  // Yuffie: 80-95
-            case 6: weaponStart = 96; numWeapons = 16; break;  // CaitSith: 96-111
-            case 7: weaponStart = 112; numWeapons = 16; break; // Vincent: 112-127
-            case 8: weaponStart = 128; numWeapons = 16; break; // Cid: 128-143
-            default: weaponStart = 0; numWeapons = 1; break;   // Default
+            case FF7Char::Cloud:    weaponStart = 0;   numWeapons = 16; break;
+            case FF7Char::Tifa:     weaponStart = 16;  numWeapons = 16; break;
+            case FF7Char::Barret:   weaponStart = 32;  numWeapons = 16; break;
+            case FF7Char::Red:      weaponStart = 48;  numWeapons = 14; break;
+            case FF7Char::Aerith:   weaponStart = 62;  numWeapons = 11; break;
+            case FF7Char::Cid:      weaponStart = 73;  numWeapons = 14; break;
+            case FF7Char::Yuffie:   weaponStart = 87;  numWeapons = 14; break;
+            case FF7Char::CaitSith: weaponStart = 101; numWeapons = 13; break;
+            case FF7Char::Vincent:  weaponStart = 114; numWeapons = 13; break;
+            default: weaponStart = 0; numWeapons = 16; break;  // safe: Cloud's swords
         }
         
         log(QString("Character %1: weaponStart=%2 numWeapons=%3")

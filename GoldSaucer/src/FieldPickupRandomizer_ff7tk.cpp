@@ -585,6 +585,47 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         }
     }
 
+    // --- Free Roam: suppress the Kalm Traveler materia grants ----------------
+    // elmin4_2 also hands out materia on trade-in: Guide Book -> Underwater
+    // (0x11), Earth Harp -> Master Command (0x30) + Master Summon (0x5A) +
+    // Master Magic (0x49). Those trades are AP checks (the trade trigger bits
+    // bank13/0x57 bit0-3 fire the "Show Guide Book / Earth Harp 1-3" locations),
+    // so the in-game materia is a double-dip. The generic SMTRA->BITON AP pass
+    // can't convert these (its lookup is keyed by materia name, not the trade
+    // text), so it leaves the vanilla grant. NOP each of the 4 direct-value
+    // SMTRA grants (7 bytes -> 0x5F); the surrounding trade BITON/BITOFF + dialog
+    // are untouched, so the AP checks still fire. Each grant is uniquely preceded
+    // by the lead-in C5 00 50 00 33 01 4A 01 then the SMTRA 5B 00 00 <mat>.
+    if (freeRoam && fieldName.toLower() == "elmin4_2") {
+        static const unsigned char kLeadIn[] = {0xC5,0x00,0x50,0x00,0x33,0x01,0x4A,0x01};
+        static const QSet<quint8> kKalmMateria = {0x11, 0x30, 0x49, 0x5A};
+        const int L = static_cast<int>(sizeof(kLeadIn));
+        int nopped = 0;
+        for (int i = 0; i + L + 7 <= decompressed.size(); ++i) {
+            bool lead = true;
+            for (int k = 0; k < L; ++k)
+                if (static_cast<quint8>(decompressed[i + k]) != kLeadIn[k]) { lead = false; break; }
+            if (!lead) continue;
+            const int s = i + L;                                   // SMTRA opcode offset
+            if (static_cast<quint8>(decompressed[s])     != 0x5B) continue;  // SMTRA
+            if (static_cast<quint8>(decompressed[s + 1]) != 0x00) continue;  // bank0 (direct)
+            if (static_cast<quint8>(decompressed[s + 2]) != 0x00) continue;  // bank1 (direct)
+            const quint8 mat = static_cast<quint8>(decompressed[s + 3]);
+            if (!kKalmMateria.contains(mat)) continue;
+            for (int k = 0; k < 7; ++k) decompressed[s + k] = static_cast<char>(0x5F); // NOP
+            nopped++;
+            debugStream << "  KALM_MATERIA: NOP SMTRA @" << s << " matId 0x"
+                        << QString::number(mat, 16) << " (trade materia suppressed)\n";
+        }
+        if (nopped) {
+            totalMods++;
+            debugStream << "  KALM_MATERIA: suppressed " << nopped
+                        << " Kalm Traveler materia grant(s) in elmin4_2\n";
+        } else {
+            debugStream << "  KALM_MATERIA: no grants found (already patched / not present)\n";
+        }
+    }
+
     // (Diamond Weapon is fully hidden in Free Roam — his ambient spawn is
     // neutralized in wm0.ev, so fr_e is never entered and needs no patch.)
 

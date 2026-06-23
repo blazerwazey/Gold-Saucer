@@ -121,6 +121,13 @@ bool ShopRandomizer::randomize()
     // --- inject Archipelago shop slots (token items) -------------------------
     applyApShops(shops, log);
 
+    // --- Free Roam: mirror story-variant shops -------------------------------
+    // Fort Condor / Junon / Costa stores swap their shop id by story progress.
+    // Free Roam forces game_moment=1997, so their fields open the late variant
+    // (which carries no tokens). Clone the tokenized early record into the late id.
+    if (m_parent && m_parent->m_config.getFreeRoam())
+        mirrorFreeRoamStoryShops(shops, log);
+
     // --- generate hext patch --------------------------------------------------
     if (!generateHextPatch(outputPath, shops)) {
         if (logOk) log << "ERROR: Failed to generate hext patch\n";
@@ -407,6 +414,47 @@ void ShopRandomizer::applyApShops(QVector<ExeShopRecord>& shops, QTextStream& lo
     }
 }
 
+void ShopRandomizer::mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTextStream& log)
+{
+    // Fort Condor, Junon and Costa del Sol stores select their shop id by story
+    // progress: a field opens an EARLY shop id (16-28) before the relevant event
+    // and a LATE id (51-62) after it. Free Roam forces game_moment to 1997 (disc
+    // 3), so these fields always take the late branch — but the AP tokens were
+    // injected into the early ids (per the .apff7 shops array, built from the exe
+    // shop table). Clone each tokenized early record over its matching late id so
+    // the token slots appear whichever variant the field opens. The token ids are
+    // unchanged, so the client still maps each to exactly one AP location (no
+    // double-checks). The late ids below are opened only by these same stores
+    // (verified by scanning every field's MENU(shop) opcodes), so overwriting
+    // their (otherwise unreachable in Free Roam) stock is safe.
+    //
+    // The full list was found by scanning the SCRIPT section of every flevel
+    // field for MENU(0x49,type=0x08) literal shop opens: these are the only
+    // fields that open a tokenized AP shop id AND a same-type non-AP id via the
+    // early/late branch. (Kalm/Icicle/Sector8 etc. use a single opener; itown1b
+    // is a debug hub field unreachable in Free Roam.)
+    static const struct { int early; int late; } kStoryShopVariants[] = {
+        { 16, 51 }, { 17, 52 },   // Fort Condor   item / materia
+        { 19, 54 },               // Lower Junon   weapon 2
+        { 20, 55 }, { 20, 59 },   // Upper Junon   item (disc-1 + disc-2 fields)
+        { 22, 57 },               // Upper Junon   weapon
+        { 23, 58 },               // Upper Junon   accessory
+        { 26, 60 },               // Costa del Sol weapon
+        { 27, 61 },               // Costa del Sol materia
+        { 28, 62 },               // Costa del Sol item
+        { 41, 63 },               // Rocket Town   weapon (post-launch field)
+        { 42, 64 },               // Rocket Town   item
+    };
+    for (const auto& v : kStoryShopVariants) {
+        if (v.early < 0 || v.early >= shops.size() ||
+            v.late  < 0 || v.late  >= shops.size())
+            continue;
+        shops[v.late] = shops[v.early];
+        log << "Free Roam: mirrored story shop " << v.early << " ("
+            << shopName(v.early) << ") -> late variant " << v.late << "\n";
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-shop randomization (category-aware)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,6 +526,21 @@ void ShopRandomizer::buildTieredPools(QTextStream& log)
         0x16, 0x26, 0x2D, 0x2E, 0x2F, 0x3F, 0x42, 0x43
     };
 
+    // Composite ITEM ids that must never be sold in randomized stock. The Level-4
+    // Limit Break manuals (0x57-0x5E) live in the consumable id range and carry a
+    // real ~500 gil price, so without this they leak into shop item pools. Keep
+    // them obtainable only as AP items / their normal sources, never buyable.
+    static const QSet<quint16> kExcludedShopItems = {
+        0x57, // Omnislash   (Cloud)
+        0x58, // Catastrophe (Barret)
+        0x59, // Final Heaven(Tifa)
+        0x5A, // Great Gospel(Aerith)
+        0x5B, // Cosmo Memory(Red XIII)
+        0x5C, // All Creation(Yuffie)
+        0x5D, // Chaos       (Vincent)
+        0x5E, // Highwind    (Cid)
+    };
+
     auto split = [&](int cat, QVector<QPair<quint32, quint16>>& priced) {
         std::sort(priced.begin(), priced.end(),
                   [](const QPair<quint32, quint16>& a, const QPair<quint32, quint16>& b) {
@@ -510,6 +573,7 @@ void ShopRandomizer::buildTieredPools(QTextStream& log)
             const quint32 price = m_itemPrices[id];
             if (price < SELLABLE_MIN) continue;                       // unsellable sentinel
             if (m_reservedTokens.contains(static_cast<quint16>(id))) continue; // AP token id
+            if (kExcludedShopItems.contains(static_cast<quint16>(id))) continue; // L4 limits etc.
             priced.append(qMakePair(price, static_cast<quint16>(id)));
         }
         split(cr.cat, priced);
@@ -543,11 +607,19 @@ quint16 ShopRandomizer::pickTiered(int category, int tier) const
 {
     if (category < 0 || category >= CatCOUNT)
         return 0;
-    // Prefer the requested tier; fall back to the nearest non-empty tier so a
-    // sparse category (e.g. armor) never leaves a slot unfilled.
+    // Restrict high-level equipment from shop stock: weapons/armor/accessories
+    // are capped at EQUIP_MAX_TIER (default 1 = no most-expensive third). The
+    // fallback below is bounded by maxTier too, so a sparse equipment tier can
+    // never spill up into the restricted high tier. Consumables/materia uncapped.
+    int maxTier = NUM_TIERS - 1;
+    if (category == CatWeapon || category == CatArmor || category == CatAccessory)
+        maxTier = EQUIP_MAX_TIER;
+    if (tier > maxTier) tier = maxTier;
+    // Prefer the requested tier; fall back to the nearest non-empty tier (within
+    // [0, maxTier]) so a sparse category (e.g. armor) never leaves a slot unfilled.
     for (int d = 0; d < NUM_TIERS; ++d) {
         for (int t : { tier + d, tier - d }) {
-            if (t < 0 || t >= NUM_TIERS) continue;
+            if (t < 0 || t > maxTier) continue;
             const QVector<quint16>& pool = m_pool[category][t];
             if (!pool.isEmpty()) {
                 const int idx = std::uniform_int_distribution<int>(0, pool.size() - 1)(

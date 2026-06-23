@@ -206,7 +206,7 @@ static bool ReadGil(uint32_t& out) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 static const uint32_t kGilSentinel = 0xFFFFFFFFu;
-static uint32_t g_prevMateriaGil = kGilSentinel;  // gil at the previous token grant call
+static uint32_t g_lastGil = kGilSentinel;  // party gil sampled every render (immediate-buy baseline)
 static int      g_pendingToken   = -1;            // token id awaiting a deferred gil-drop
 static uint32_t g_pendingGil     = 0;             // gil baseline when the pending check armed
 static DWORD    g_pendingTick    = 0;             // GetTickCount() when armed
@@ -216,22 +216,28 @@ static void SignalPurchase(uint32_t section, uint32_t index);   // fwd decl
 
 static char* __cdecl hkGetKernelText(uint32_t section, uint32_t index, uint32_t a3) {
     if (InMenu()) {
-        // Per-render gil watch: resolve a pending materia check the moment gil drops
-        // below the armed baseline (pay-after-grant); expire it if no drop in time.
         uint32_t g;
-        if (g_pendingToken >= 0 && ReadGil(g)) {
-            if (g < g_pendingGil) {
-                SignalPurchase(KTEXT_MATERIA, static_cast<uint32_t>(g_pendingToken));
-                g_pendingToken = -1;
-            } else if (GetTickCount() - g_pendingTick > kPendingWindowMs) {
-                g_pendingToken = -1;   // no gil drop in window -> it was a hover
+        if (ReadGil(g)) {
+            // Resolve a pending materia check the moment gil drops below the armed
+            // baseline (pay-after-grant); expire it if no drop within the window.
+            if (g_pendingToken >= 0) {
+                if (g < g_pendingGil) {
+                    SignalPurchase(KTEXT_MATERIA, static_cast<uint32_t>(g_pendingToken));
+                    g_pendingToken = -1;
+                } else if (GetTickCount() - g_pendingTick > kPendingWindowMs) {
+                    g_pendingToken = -1;   // no gil drop in window -> it was a hover
+                }
             }
+            // Rolling per-render gil baseline for the immediate (pay-before-grant)
+            // check. Sampling every frame means a HOVER reads gil == baseline and is
+            // never mistaken for a buy — even if an earlier unrelated purchase already
+            // dropped gil this shop visit (the old per-token baseline misfired there).
+            g_lastGil = g;
         }
     } else {
-        // Left the menu: clear materia state so a stale baseline from a previous
-        // shop visit can't be read as an "immediate" drop on the next visit.
-        g_prevMateriaGil = kGilSentinel;
-        g_pendingToken   = -1;
+        // Left the menu: clear materia state so a stale baseline can't misfire next time.
+        g_lastGil      = kGilSentinel;
+        g_pendingToken = -1;
     }
     // Override shop slot names/descriptions ONLY while the shop screen is open
     // (g_inShop, set by the menu_shop_loop bracket). Item-space tokens are real
@@ -307,21 +313,21 @@ static void __cdecl hkAddMateria(uint32_t mid) {
     if (InMenu() && g_materiaTokens.count(id)) {
         uint32_t gil = 0;
         const bool have = ReadGil(gil);
-        // (a) pay-before-grant: gil already below the previous token call's gil.
-        const bool immediate = have && g_prevMateriaGil != kGilSentinel && gil < g_prevMateriaGil;
+        // (a) pay-before-grant: gil dropped since the last render frame. A hover
+        // never changes gil, so gil == g_lastGil and this stays false (the fix for
+        // hover-firing — the old per-token baseline went stale after other buys).
+        const bool immediate = have && g_lastGil != kGilSentinel && gil < g_lastGil;
         if (immediate) {
-            LogLine("addMateria token %u: gil %u < prev %u -> BUY (immediate)\n",
-                    id, gil, g_prevMateriaGil);
-            g_prevMateriaGil = gil;
-            g_pendingToken   = -1;
+            LogLine("addMateria token %u: gil %u < lastGil %u -> BUY (immediate)\n",
+                    id, gil, g_lastGil);
+            g_pendingToken = -1;
             SignalPurchase(KTEXT_MATERIA, id);
         } else if (have) {
             // (b) pay-after-grant / first sight: arm a deferred check; the render
             // sampler fires it if gil drops within the window, else treats it as hover.
-            g_prevMateriaGil = gil;
-            g_pendingToken   = static_cast<int>(id);
-            g_pendingGil     = gil;
-            g_pendingTick    = GetTickCount();
+            g_pendingToken = static_cast<int>(id);
+            g_pendingGil   = gil;
+            g_pendingTick  = GetTickCount();
             LogLine("addMateria token %u: gil %u -> armed pending (await gil drop)\n", id, gil);
         }
         return;   // ALWAYS suppress the reserved token grant (never enters inventory)

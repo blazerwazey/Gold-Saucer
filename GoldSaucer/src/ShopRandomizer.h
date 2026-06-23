@@ -86,6 +86,10 @@ private:
     // normal randomization pass.
     void loadApShops(QTextStream& log);
     void applyApShops(QVector<ExeShopRecord>& shops, QTextStream& log);
+    // Free Roam only: clone story-variant store records (Fort Condor / Junon /
+    // Costa) from their early shop id into the late id their field opens at the
+    // forced game_moment, so the AP token slots survive the story-branch swap.
+    void mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTextStream& log);
 
     struct ApShopSlot { int shopId; quint16 token; bool isMateria; };
     QVector<ApShopSlot> m_apShops;
@@ -119,6 +123,12 @@ private:
 
     enum Category { CatItem = 0, CatWeapon, CatArmor, CatAccessory, CatMateria, CatCOUNT };
     static const int NUM_TIERS = 3;
+    // Cap the price tier that EQUIPMENT (weapons/armor/accessories) can roll in
+    // randomized shop stock, so high-level gear stays an AP item / found drop and
+    // isn't buyable. 1 = never sell the most-expensive third (tier 2); set to 0 to
+    // restrict shops to only the cheapest third of equipment, or 2 to disable the
+    // cap. Consumables (CatItem) and materia (CatMateria) are unaffected.
+    static const int EQUIP_MAX_TIER = 1;
 
     QVector<quint32> m_itemPrices;     // composite id  -> price
     QVector<quint32> m_materiaPrices;  // materia id     -> price

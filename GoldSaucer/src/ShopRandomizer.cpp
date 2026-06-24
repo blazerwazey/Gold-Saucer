@@ -322,23 +322,25 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
         hext << QString::number(address, 16).toUpper() << " = " << hexBytes << "\n";
     }
 
-    // AP materia tokens use otherwise-unused materia ids whose price-table entry is
-    // typically 0 (free). A free purchase deducts no gil — but the shophook tells a
-    // materia BUY from a hover by the gil drop, so a 0-price token can never fire its
-    // check. Write a fixed price for each AP materia token so it both sells and costs
-    // gil. (Item tokens are real items with real prices, so they need no help.)
-    // Materia price table VA = SHOP_INVENTORY_VA + MATERIA_PRICE_DELTA (constant across
-    // builds; the file-offset deltas differ but the loaded VA is the same).
-    const quint32 AP_MATERIA_TOKEN_PRICE = 100;   // nonzero + affordable anywhere
-    for (const ApShopSlot& e : m_apShops) {
-        if (!e.isMateria) continue;
-        const qint64 priceAddr = SHOP_INVENTORY_VA + MATERIA_PRICE_DELTA
-                               + static_cast<qint64>(e.token) * 4;
+    // AP tokens use ids whose price-table entry may be 0 (free) — materia gap-ids and
+    // item placeholder/never-sold ids alike. A free purchase deducts no gil and may
+    // not be sellable at all, so write a fixed price for every AP token. (Item tokens
+    // were reworked 2026-06-23 to ids NOT sold in ANY shop — placeholder ids 0x69-0x7F
+    // + never-sold real items — so the shophook can't mislabel a real shop item; many
+    // of those ids have no/garbage price, hence they now need this write too.)
+    // Price tables: materia @ SHOP_INVENTORY_VA + MATERIA_PRICE_DELTA, items @
+    // SHOP_INVENTORY_VA + ITEM_PRICE_DELTA (constant VAs across builds).
+    const quint32 AP_TOKEN_PRICE = 100;           // nonzero + affordable anywhere
+    auto writePrice = [&](qint64 priceAddr) {
         QString priceBytes;
         for (int b = 0; b < 4; ++b)
-            priceBytes += QString("%1 ").arg((AP_MATERIA_TOKEN_PRICE >> (b * 8)) & 0xFF,
+            priceBytes += QString("%1 ").arg((AP_TOKEN_PRICE >> (b * 8)) & 0xFF,
                                              2, 16, QChar('0')).toUpper();
         hext << QString::number(priceAddr, 16).toUpper() << " = " << priceBytes.trimmed() << "\n";
+    };
+    for (const ApShopSlot& e : m_apShops) {
+        const qint64 delta = e.isMateria ? MATERIA_PRICE_DELTA : ITEM_PRICE_DELTA;
+        writePrice(SHOP_INVENTORY_VA + delta + static_cast<qint64>(e.token) * 4);
     }
 
     hextFile.close();

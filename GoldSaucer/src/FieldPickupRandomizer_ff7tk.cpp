@@ -679,6 +679,120 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         }
     }
 
+    // --- Free Roam: force Kalm to its disc-1 behaviour (music + inn rest) ------
+    // Every Kalm field (elm*) gates music AND inn-rest behaviour on
+    //   IFSW Var[2][0] (game_moment) > 999   [bytes: 16 20 00 00 e7 03 02 <jmp>]
+    // choosing disc-1 (the jump/"else" branch — FF7 IF jumps when the test is
+    // FALSE) vs the post-Meteor path (fall-through, taken when game_moment > 999).
+    // Free Roam forces game_moment=1997, so the whole town runs its disc-2/3 path:
+    // the post-Meteor theme (the "disc-3 music in Kalm" report) AND the disc-2/3
+    // inn-rest branch, which deadlocks (the Kalm inn freeze). Flip the compared
+    // value 999 (0x03E7) -> 65535 (0xFFFF): game_moment is a u16 so it can never
+    // exceed 0xFFFF, the test is always FALSE, and every gate takes the disc-1
+    // branch (Anxious Heart + the normal inn rest). Length-preserving (2 bytes),
+    // idempotent (ff ff no longer matches e7 03). Bounded to the script bytecode
+    // region [sec0+4, +posTexts) so dialog / other-section bytes can't false-match.
+    if (freeRoam && fieldName.toLower().startsWith("elm")
+        && decompressed.size() >= 6 + 9 * 4) {
+        quint32 sec0b = 0;
+        memcpy(&sec0b, decompressed.constData() + 6, 4);
+        int sd = static_cast<int>(sec0b) + 4;
+        if (sd + 6 <= decompressed.size()) {
+            quint16 posTexts = 0;
+            memcpy(&posTexts, decompressed.constData() + sd + 4, 2);
+            int hi = sd + static_cast<int>(posTexts);
+            if (hi > decompressed.size() || hi <= sd) hi = decompressed.size();
+            static const QByteArray kGate = QByteArray::fromHex("16200000e70302"); // IFSW game_moment>999
+            int patched = 0;
+            int at = sd;
+            while ((at = decompressed.indexOf(kGate, at)) >= 0 && at < hi) {
+                decompressed[at + 4] = static_cast<char>(0xFF);  // value 0x03E7 -> 0xFFFF
+                decompressed[at + 5] = static_cast<char>(0xFF);  // (game_moment > 65535 = never)
+                at += kGate.size();
+                patched++;
+            }
+            if (patched) {
+                totalMods++;
+                debugStream << "  KALM_DISC1: " << fieldName << " forced disc-1 ("
+                            << patched << " game_moment>999 gate(s) neutralized)\n";
+            }
+        }
+    }
+
+    // --- Free Roam: re-gate the Midgar Sector-5 entry walkmesh on the
+    // Key-to-Sector-5 POSSESSION bit -----------------------------------------
+    // mds5_5 gates its entry triangle on  IFUB Var[15][38] bitOFF 3
+    //   [bytes: 14 f0 26 03 0a <jmp>]  == savemap 0x0FCA.3.
+    // That flag is ALSO the Bone Village "Key To Sector 5" pickup's detection
+    // bit, so the client setting it on receipt (to open the walkmesh) collided
+    // with the AP check. Repoint the test to the key-item POSSESSION bit
+    // Var[1][0x43].5  [14 10 43 05 0a] (set by AP delivery): the walkmesh opens
+    // from HOLDING the key, freeing 0x0FCA.3 for the check. Length-preserving
+    // (operand bytes only), idempotent (after patch the old needle won't match),
+    // bounded to the script bytecode region. 3 copies in mds5_5.
+    if (freeRoam && fieldName.toLower() == "mds5_5"
+        && decompressed.size() >= 6 + 9 * 4) {
+        quint32 sec0b = 0;
+        memcpy(&sec0b, decompressed.constData() + 6, 4);
+        int sd = static_cast<int>(sec0b) + 4;
+        if (sd + 6 <= decompressed.size()) {
+            quint16 posTexts = 0;
+            memcpy(&posTexts, decompressed.constData() + sd + 4, 2);
+            int hi = sd + static_cast<int>(posTexts);
+            if (hi > decompressed.size() || hi <= sd) hi = decompressed.size();
+            static const QByteArray kGate = QByteArray::fromHex("14f026030a"); // IFUB Var[15][38] bitOFF 3
+            int patched = 0;
+            int at = sd;
+            while ((at = decompressed.indexOf(kGate, at)) >= 0 && at < hi) {
+                decompressed[at + 1] = static_cast<char>(0x10); // bank 15 -> bank 1
+                decompressed[at + 2] = static_cast<char>(0x43); // addr 0x26 -> 0x43 (key-item byte)
+                decompressed[at + 3] = static_cast<char>(0x05); // bit 3 -> 5 (Key to Sector 5)
+                at += kGate.size();
+                patched++;
+            }
+            if (patched) {
+                totalMods++;
+                debugStream << "  SECTOR5_GATE: mds5_5 re-gated on Key-to-Sector-5 possession ("
+                            << patched << " IFUB test(s) repointed)\n";
+            }
+        }
+    }
+
+    // --- Free Roam: re-gate the Shinra Mansion basement on the Basement-Key
+    // POSSESSION bit ---------------------------------------------------------
+    // sininb2 gates basement access on  IFUB Var[1][232] bitOFF 1
+    //   [bytes: 14 10 e8 01 0a <jmp>]  == savemap 0x0C8C.1, which is the
+    // "Key To Basement" (sinin2_1) pickup's detection bit. Repoint to the
+    // key-item POSSESSION bit Var[1][0x43].4 [14 10 43 04 0a] so the basement
+    // opens from holding the key and the AP check (re-introduced) stays
+    // obtainable. Length-preserving, idempotent. 1 copy in sininb2.
+    if (freeRoam && fieldName.toLower() == "sininb2"
+        && decompressed.size() >= 6 + 9 * 4) {
+        quint32 sec0b = 0;
+        memcpy(&sec0b, decompressed.constData() + 6, 4);
+        int sd = static_cast<int>(sec0b) + 4;
+        if (sd + 6 <= decompressed.size()) {
+            quint16 posTexts = 0;
+            memcpy(&posTexts, decompressed.constData() + sd + 4, 2);
+            int hi = sd + static_cast<int>(posTexts);
+            if (hi > decompressed.size() || hi <= sd) hi = decompressed.size();
+            static const QByteArray kGate = QByteArray::fromHex("1410e8010a"); // IFUB Var[1][232] bitOFF 1
+            int patched = 0;
+            int at = sd;
+            while ((at = decompressed.indexOf(kGate, at)) >= 0 && at < hi) {
+                decompressed[at + 2] = static_cast<char>(0x43); // addr 0xE8 -> 0x43 (key-item byte)
+                decompressed[at + 3] = static_cast<char>(0x04); // bit 1 -> 4 (Basement Key)
+                at += kGate.size();
+                patched++;
+            }
+            if (patched) {
+                totalMods++;
+                debugStream << "  BASEMENT_GATE: sininb2 re-gated on Basement-Key possession ("
+                            << patched << " IFUB test(s) repointed)\n";
+            }
+        }
+    }
+
     // --- Free Roam diagnostics (disabled): the Rocket Town soft-lock was traced
     //     to the rckt/rckt2 'cloud' init gating UC(disable control)+MENU2 on
     //     Var[3][130] bit 3 (the first-visit intro flag), now pre-set in the

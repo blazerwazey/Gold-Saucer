@@ -16,6 +16,7 @@
 #include <QVector>
 #include <algorithm>
 #include <ff7tk/data/FF7Char.h>
+#include <ff7tk/data/FF7Item.h>
 #include <ff7tk/utils/GZIP.h>
 #include <zlib.h>
 
@@ -467,8 +468,22 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
         }
         data[charOffset + ACCESSORY_OFFSET] = static_cast<char>(newAccessory);
         
-        // Randomize materia slots (0-7 weapon, 8-15 armor)
-        // Capped to MAX_WEAPON_MATERIA / MAX_ARMOR_MATERIA to stay within slot limits
+        // Randomize materia slots (record slots 0-7 = weapon, 8-15 = armor).
+        // CRITICAL: only fill slots that the equipped item ACTUALLY has, else the
+        // materia lands in a non-existent slot (invisible/inaccessible to the
+        // player — e.g. a 3rd materia on a 2-slot Buster Sword). ff7tk's
+        // FF7Item::materiaSlots(compositeId) is the authoritative slot count:
+        // weapon composite id = 0x80 + weapon#, armor composite id = 0x100 + armor#.
+        // We bound by the physical slot INDEX (not just a count) so materia can
+        // never spill past the item's real slots; MAX_*_MATERIA stays as a soft
+        // power cap on top.
+        int weaponSlots = FF7Item::materiaSlots(0x80 + static_cast<int>(newWeapon));
+        int armorSlots  = FF7Item::materiaSlots(0x100 + static_cast<int>(newArmor));
+        if (weaponSlots < 0) weaponSlots = 0; if (weaponSlots > 8) weaponSlots = 8;
+        if (armorSlots  < 0) armorSlots  = 0; if (armorSlots  > 8) armorSlots  = 8;
+        log(QString("Character %1: weapon slots=%2 armor slots=%3")
+            .arg(charId).arg(weaponSlots).arg(armorSlots));
+
         std::uniform_int_distribution<int> materiaDist(0, selectableMateria.size() - 1);
         QStringList materiaLog;
         int weaponMateriaCount = 0;
@@ -478,25 +493,16 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
             if (slotOffset + MATERIA_SLOT_SIZE > data.size()) break;
 
             bool isWeaponSlot = (slot < 8);
-            // Enforce slot caps
-            if (isWeaponSlot && weaponMateriaCount >= MAX_WEAPON_MATERIA) {
-                // Clear remaining weapon slots
-                data[slotOffset]     = static_cast<char>(0xFF);
-                data[slotOffset + 1] = static_cast<char>(0xFF);
-                data[slotOffset + 2] = static_cast<char>(0xFF);
-                data[slotOffset + 3] = static_cast<char>(0xFF);
-                continue;
-            }
-            if (!isWeaponSlot && armorMateriaCount >= MAX_ARMOR_MATERIA) {
-                data[slotOffset]     = static_cast<char>(0xFF);
-                data[slotOffset + 1] = static_cast<char>(0xFF);
-                data[slotOffset + 2] = static_cast<char>(0xFF);
-                data[slotOffset + 3] = static_cast<char>(0xFF);
-                continue;
-            }
+            int  physIdx   = isWeaponSlot ? slot : (slot - 8);  // slot index on the item
+            int  slotCount = isWeaponSlot ? weaponSlots : armorSlots;
+            int  count     = isWeaponSlot ? weaponMateriaCount : armorMateriaCount;
+            int  cap       = isWeaponSlot ? MAX_WEAPON_MATERIA : MAX_ARMOR_MATERIA;
 
+            // Fill ONLY if this physical slot exists on the equipped item and the
+            // soft power cap isn't reached. All other slots are explicitly cleared.
+            bool canFill = (physIdx < slotCount) && (count < cap);
             double fillChance = isWeaponSlot ? 0.60 : 0.50;
-            if (chanceDist(m_rng) < fillChance) {
+            if (canFill && chanceDist(m_rng) < fillChance) {
                 quint8 matId = selectableMateria[materiaDist(m_rng)];
                 if (isWeaponSlot) ++weaponMateriaCount;
                 else ++armorMateriaCount;
@@ -506,7 +512,7 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
                 data[slotOffset + 3] = 0; // AP byte 2
                 materiaLog.append(QString("%1:%2").arg(slot).arg(matId, 0, 16));
             } else {
-                data[slotOffset]     = static_cast<char>(0xFF); // empty
+                data[slotOffset]     = static_cast<char>(0xFF); // empty / no slot
                 data[slotOffset + 1] = static_cast<char>(0xFF);
                 data[slotOffset + 2] = static_cast<char>(0xFF);
                 data[slotOffset + 3] = static_cast<char>(0xFF);

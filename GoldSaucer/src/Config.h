@@ -87,6 +87,10 @@ public:
     void setFreeRoam(bool enabled);
     bool getFreeRoam() const;
 
+    // Also export the randomized files as a 7th Heaven .iro archive
+    void setExportIro(bool enabled);
+    bool getExportIro() const;
+
     void setDefaults();
     
 private:
@@ -124,4 +128,7 @@ private:
 
     // Free Roam mode: start on world map at game moment 1603
     bool m_freeRoam;
+
+    // Export randomized files as a 7th Heaven .iro archive (in addition to loose)
+    bool m_exportIro;
 };

@@ -148,6 +148,11 @@ bool Config::loadFromFile(const QString& filename)
         m_freeRoam = root["freeRoam"].toBool(false);
     }
 
+    // Load .iro export setting
+    if (root.contains("exportIro")) {
+        m_exportIro = root["exportIro"].toBool(false);
+    }
+
     qDebug() << "Config loaded from:" << filename;
     return true;
 }
@@ -205,7 +210,10 @@ bool Config::saveToFile(const QString& filename) const
 
     // Save Free Roam setting
     root["freeRoam"] = m_freeRoam;
-    
+
+    // Save .iro export setting
+    root["exportIro"] = m_exportIro;
+
     QJsonDocument doc(root);
     
     QFile file(filename);
@@ -405,4 +413,14 @@ void Config::setFreeRoam(bool enabled)
 bool Config::getFreeRoam() const
 {
     return m_freeRoam;
+}
+
+void Config::setExportIro(bool enabled)
+{
+    m_exportIro = enabled;
+}
+
+bool Config::getExportIro() const
+{
+    return m_exportIro;
 }

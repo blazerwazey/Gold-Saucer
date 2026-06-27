@@ -34,6 +34,7 @@
 // #include "../UserFeedback.h"
 #include "../Randomizer.h"
 #include "../Config.h"
+#include "../IroExporter.h"
 
 SimpleMainWindow::SimpleMainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -253,11 +254,17 @@ void SimpleMainWindow::setupUI()
     
     QPushButton* startButton = new QPushButton("Start Randomization", this);
     startButton->setStyleSheet("background-color: #00cc66; color: white; font-weight: bold; padding: 10px;");
-    
+
+    m_iroCheckBox = new QCheckBox("Export as .IRO (7th Heaven)", this);
+    m_iroCheckBox->setToolTip(
+        "Also pack the randomized files into a 7th Heaven .iro mod archive\n"
+        "(in addition to the loose output folder). Import the .iro in 7th Heaven.");
+
     buttonLayout->addWidget(loadButton);
     buttonLayout->addWidget(saveButton);
     buttonLayout->addWidget(resetButton);
     buttonLayout->addStretch();
+    buttonLayout->addWidget(m_iroCheckBox);
     buttonLayout->addWidget(startButton);
     
     mainLayout->addLayout(buttonLayout);
@@ -401,6 +408,28 @@ void SimpleMainWindow::startRandomization()
             }
         }
 
+        // Optional: pack the randomized output into a 7th Heaven .iro archive.
+        if (m_config.getExportIro()) {
+            m_progressBar->setValue(95);
+            m_statusLabel->setText("Exporting .iro...");
+            appendConsoleMessage("Exporting 7th Heaven .iro archive...");
+            QApplication::processEvents();
+
+            QString outDir = randomizer.getOutputPath();
+            QString iroName = QString("FF7_AP_%1.iro").arg(m_config.getSeed());
+            QString iroPath = QDir(outDir).filePath(iroName);
+
+            IroExporter iro(ff7Path, outDir);
+            QStringList iroLog;
+            bool iroOk = iro.exportIro(iroPath, m_config, iroLog);
+            for (const QString& line : iroLog)
+                appendConsoleMessage(line);
+            if (iroOk)
+                appendConsoleMessage("IRO export complete: " + iroPath);
+            else
+                appendConsoleMessage("WARNING: IRO export produced no archive (see notes above)");
+        }
+
         // Complete
         m_progressBar->setValue(100);
         m_statusLabel->setText("Randomization Complete!");
@@ -461,6 +490,7 @@ void SimpleMainWindow::updateConfig()
     // saveTextReplacementSettings();
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
     m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
+    m_config.setExportIro(m_iroCheckBox->isChecked());
 
     // Settings
     m_config.setShopItemPoolSize(m_shopPoolSpin->value());
@@ -509,6 +539,7 @@ void SimpleMainWindow::applyConfigToUI()
     }
 
     m_freeRoamCheckBox->setChecked(m_config.getFreeRoam());
+    m_iroCheckBox->setChecked(m_config.getExportIro());
     
     // Settings
     m_shopPoolSpin->setValue(m_config.getShopItemPoolSize());

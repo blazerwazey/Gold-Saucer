@@ -19,6 +19,20 @@
 #include <vector>
 #include <cstring>
 #include <QHash>
+#include <QSet>
+
+// Forward decl: NOP all real PMVIE/MOVIE opcodes in a field's section-0 scripts.
+// Defined below (after fieldOpcodeLength); used by the md1stin Free Roam handler.
+static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+
+// Forward decl: NOP all SPLIT (0x09) opcodes in a field's scripts (reduced-party
+// softlock fix; used by the losinn Free Roam handler).
+static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: reduce one entity script to just its BITON (losinn inn softlock fix).
+static int neuterInnGoScript(QByteArray& d, const QString& fieldName,
+                             const QByteArray& entityName,
+                             quint8 keepAddr, quint8 keepBit,
+                             QTextStream& dbg);
 
 namespace {
     constexpr int MOMENT_GAME_START    = 0;
@@ -520,8 +534,30 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
 
     // --- Free Roam MAPJUMP injection (must run before STITM scan) -----------
     bool freeRoam = m_parent && m_parent->m_config.getFreeRoam();
+    // Free Roam: NOP SPLIT in the Forgotten Capital inn (losinn). SPLIT positions
+    // the non-leader party members to fixed sleep coords and blocks until they
+    // arrive; a single-character party has empty slots that never arrive ->
+    // softlock. See nopFieldScriptSplits.
+    if (freeRoam && fieldName.toLower() == "losinn") {
+        nopFieldScriptSplits(decompressed, fieldName, debugStream);
+        // Forgotten Capital inn: the line-trigger entity "line4" runs the sleep
+        // cutscene (its "S4 - Go" script), which hangs a solo party on PRQEW/PREQ
+        // to character #2 (@2160/@2163). Reduce that script to just its var write
+        // (BITON Var[3][132].3 = addr 0x84 bit 3 = the inn "cutscene done" flag),
+        // dropping the blocking party-member execs + the SPLIT.
+        neuterInnGoScript(decompressed, fieldName, QByteArray("line4"), 0x84, 3, debugStream);
+    }
     if (freeRoam && fieldName.toLower() == "md1stin") {
         if (injectFreeRoamMapJump(decompressed, fieldName, debugStream))
+            totalMods++;
+        // NOP the opening movie (PMVIE "Set next movie" + MOVIE "Play movie").
+        // On disc 3 (forced in Free Roam) it resolves to the placeholder "No53",
+        // which crashes on play — the same failure mode as the Fort Condor No33
+        // movie, and the cause of the Kalm-inn crash players hit when the intro
+        // cutscene isn't skipped. Walks the scripts with the opcode-length table
+        // so only REAL movie opcodes are touched (a raw byte scan would hit false
+        // 0xF8/0xF9 bytes in the script offset tables). Length-preserving (0x5F).
+        if (nopFieldScriptMovies(decompressed, fieldName, debugStream) > 0)
             totalMods++;
     }
 
@@ -789,6 +825,54 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 totalMods++;
                 debugStream << "  BASEMENT_GATE: sininb2 re-gated on Basement-Key possession ("
                             << patched << " IFUB test(s) repointed)\n";
+            }
+        }
+    }
+
+    // --- Free Roam: re-gate the Icicle slope (snow) snowboard / glacier-map
+    // ACCESS checks on the key-item INVENTORY bits ----------------------------
+    // snowboard/glacier "obtained" is tracked by the story flags Var[1][130]
+    // bit1 (snowboard) / bit6 (glacier). Those flags are set by the in-game
+    // pickup AND are the AP location's detection bit, so the client can't set
+    // them on AP receipt without hiding the location. The menu key-item bits
+    // (Var[1][0x46].2 / Var[1][0x45].4) ARE set on AP receipt (KEY_ITEM_FLAGS),
+    // so we repoint the "do you HAVE it" (bitON, oper 0x09) access checks in the
+    // snow-slope field to read those instead:
+    //   IFUB Var[1][130] bitON 1  [14 10 82 01 09] -> Var[1][0x46] bit2 [14 10 46 02 09]
+    //   IFUB Var[1][130] bitON 6  [14 10 82 06 09] -> Var[1][0x45] bit4 [14 10 45 04 09]
+    // The bitOFF giver/visibility checks (snmin1/snmin2) and the detection BITON
+    // are left ON the story flag, so the in-game location still works and the
+    // in-game pickup no longer grants ride access. Length-preserving, bounded to
+    // the script bytecode region, idempotent.
+    if (freeRoam && fieldName.toLower() == "snow"
+        && decompressed.size() >= 6 + 9 * 4) {
+        quint32 sec0b = 0;
+        memcpy(&sec0b, decompressed.constData() + 6, 4);
+        int sd = static_cast<int>(sec0b) + 4;
+        if (sd + 6 <= decompressed.size()) {
+            quint16 posTexts = 0;
+            memcpy(&posTexts, decompressed.constData() + sd + 4, 2);
+            int hi = sd + static_cast<int>(posTexts);
+            if (hi > decompressed.size() || hi <= sd) hi = decompressed.size();
+            struct SnowRepoint { QByteArray find; char addr; char bit; const char* what; };
+            const SnowRepoint reps[] = {
+                { QByteArray::fromHex("1410820109"), static_cast<char>(0x46), 0x02, "Snowboard" },
+                { QByteArray::fromHex("1410820609"), static_cast<char>(0x45), 0x04, "Glacier Map" },
+            };
+            int patched = 0;
+            for (const SnowRepoint& r : reps) {
+                int at = sd;
+                while ((at = decompressed.indexOf(r.find, at)) >= 0 && at < hi) {
+                    decompressed[at + 2] = r.addr;   // addr 0x82 -> key-item byte
+                    decompressed[at + 3] = r.bit;    // story bit -> key-item bit
+                    at += r.find.size();
+                    patched++;
+                }
+            }
+            if (patched) {
+                totalMods++;
+                debugStream << "  SNOW_ACCESS: snow re-gated " << patched
+                            << " snowboard/glacier check(s) on key-item inventory\n";
             }
         }
     }
@@ -1114,6 +1198,245 @@ static int fieldOpcodeLength(const QByteArray& d, int pos, int fileSize)
         return -1;
     int len = 1 + ops;
     return (pos + len <= fileSize) ? len : -1;
+}
+
+// NOP every real PMVIE (0xF8, set movie) and MOVIE (0xF9, play movie) opcode in
+// a field's section-0 entity scripts. Walks each entity's 32 script entry points
+// with fieldOpcodeLength so operand bytes (and false 0xF8/0xF9 inside the offset
+// tables / data) are never mistaken for opcodes — and does NOT stop at a RET, so
+// it reaches the director's S0-Main (which holds the opening movie) that sits past
+// the S0-Init RET in the same slot. 0x5F is a valid 1-byte opcode
+// (kOperands[0x5F]==0), so PMVIE (2 bytes -> 5F 5F) and MOVIE (1 byte -> 5F) are
+// length-preserving and the walk stays aligned. Idempotent: a re-run sees 0x5F,
+// not 0xF8/0xF9, and does nothing. Returns the number of opcodes NOP'd. Mirrors
+// the structure of dumpFieldScripts().
+static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                quint8 op = static_cast<quint8>(d.at(pos));
+                int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == 0xF8 && pos + 1 < fileSize) {        // PMVIE (set movie)
+                    d[pos]     = static_cast<char>(0x5F);
+                    d[pos + 1] = static_cast<char>(0x5F);
+                    ++nopped;
+                } else if (op == 0xF9) {                        // MOVIE (play)
+                    d[pos] = static_cast<char>(0x5F);
+                    ++nopped;
+                }
+                // NOTE: do NOT break on RET (0x00). The director's S0-Main — which
+                // holds the opening PMVIE/MOVIE — lives AFTER the S0-Init RET inside
+                // the same slot-0 bytecode region (Makou shows "S0-Init"/"S0-Main"
+                // as two halves of one slot split at that RET). Breaking here would
+                // stop in S0-Init and never reach the movie. Walking across RET is
+                // exactly how injectFreeRoamMapJump() reaches PRTYE further down the
+                // same Main script; walkEnd keeps us inside the opcode region.
+                pos += len;
+            }
+        }
+    }
+    if (nopped)
+        dbg << "  MOVIE_NOP: " << fieldName << " NOP'd " << nopped
+            << " PMVIE/MOVIE opcode(s)\n";
+    return nopped;
+}
+
+// NOP every SPLIT (0x09) opcode in a field's section-0 scripts. SPLIT walks the
+// non-leader party members to fixed coordinates and BLOCKS until each arrives;
+// with a reduced party (Free Roam can have a single character) the empty slots
+// 2/3 never arrive -> infinite wait -> softlock (the Forgotten Capital inn sleep
+// cutscene). NOPing the opcode + its 14 operand bytes to 0x5F (a valid 1-byte
+// no-op) lets the cutscene proceed; the only cost is cosmetic (members aren't
+// repositioned). Walks with the opcode-length table so data bytes that happen to
+// be 0x09 are never touched. Length-preserving, idempotent.
+static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+    quint32 sp[9]; memcpy(sp, d.constData() + 6, 36);
+    int sd = static_cast<int>(sp[0]) + 4;
+    if (sd + 32 > fileSize) return 0;
+    quint8 nb = static_cast<quint8>(d.at(sd + 2));
+    quint16 wstr = 0, nak = 0;
+    memcpy(&wstr, d.constData() + sd + 4, 2);
+    memcpy(&nak,  d.constData() + sd + 6, 2);
+    if (nb == 0) return 0;
+    int names = sd + 32, akao = names + 8 * nb, offt = akao + 4 * nak;
+    if (offt + 64 * nb > fileSize) return 0;
+    int walkEnd = sd + static_cast<int>(wstr);
+    if (nak > 0 && akao + 4 <= fileSize) {
+        quint32 fa = 0; memcpy(&fa, d.constData() + akao, 4);
+        int aa = sd + static_cast<int>(fa);
+        if (aa > offt && aa < walkEnd) walkEnd = aa;
+    }
+    if (walkEnd > fileSize || walkEnd <= offt) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nb); ++e) {
+        quint16 slot[32]; memcpy(slot, d.constData() + offt + 64 * e, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sd + static_cast<int>(slot[s]), g = 0;
+            while (pos < walkEnd && g++ < 4000) {
+                quint8 op = static_cast<quint8>(d.at(pos));
+                int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == 0x09) {                       // SPLIT -> NOP all bytes
+                    for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(0x5F);
+                    ++nopped;
+                } else if (op == 0x00) {
+                    break;
+                }
+                pos += len;
+            }
+        }
+    }
+    if (nopped)
+        dbg << "  SPLIT_NOP: " << fieldName << " NOP'd " << nopped << " SPLIT opcode(s)\n";
+    return nopped;
+}
+
+// Neuter one entity's script down to its var write. The Forgotten Capital inn
+// (losinn) sleep cutscene lives in entity "init", script slot 4 ("S4 - Go"): it
+// runs REQEW execs on "character #2 in the current party" with "wait for end of
+// execution". A single-character Free Roam party has no member #2, so the wait
+// never returns -> hard softlock. We NOP the whole script to 0x5F EXCEPT the
+// BITON (the "Var[3][132] bit 3" cutscene-done flag) and the terminating RET, so
+// the flag is still set but nothing blocks. (The cosmetic sleep animation is lost;
+// the inn no longer plays its cutscene, which is the intended trade to unblock a
+// solo party.) Walks with the opcode-length table; length-preserving + idempotent.
+static int neuterInnGoScript(QByteArray& d, const QString& fieldName,
+                             const QByteArray& entityName,
+                             quint8 keepAddr, quint8 keepBit,
+                             QTextStream& dbg)
+{
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+    quint32 sp[9]; memcpy(sp, d.constData() + 6, 36);
+    int sd = static_cast<int>(sp[0]) + 4;
+    if (sd + 32 > fileSize) return 0;
+    quint8 nb = static_cast<quint8>(d.at(sd + 2));
+    quint16 wstr = 0, nak = 0;
+    memcpy(&wstr, d.constData() + sd + 4, 2);
+    memcpy(&nak,  d.constData() + sd + 6, 2);
+    if (nb == 0) return 0;
+    int names = sd + 32, akao = names + 8 * nb, offt = akao + 4 * nak;
+    if (offt + 64 * nb > fileSize) return 0;
+    int walkEnd = sd + static_cast<int>(wstr);
+    if (nak > 0 && akao + 4 <= fileSize) {
+        quint32 fa = 0; memcpy(&fa, d.constData() + akao, 4);
+        int aa = sd + static_cast<int>(fa);
+        if (aa > offt && aa < walkEnd) walkEnd = aa;
+    }
+    if (walkEnd > fileSize || walkEnd <= offt) walkEnd = fileSize;
+
+    // Find the entity by its (NUL-padded, 8-byte) name.
+    int entIdx = -1;
+    for (int e = 0; e < static_cast<int>(nb); ++e) {
+        QByteArray nm(d.constData() + names + 8 * e, 8);
+        int z = nm.indexOf('\0'); if (z >= 0) nm.truncate(z);
+        if (nm == entityName) { entIdx = e; break; }
+    }
+    if (entIdx < 0) {
+        dbg << "  INN_NEUTER: " << fieldName << " entity '"
+            << QString::fromLatin1(entityName) << "' not found\n";
+        return 0;
+    }
+
+    // Locate the script by CONTENT, not slot number: scan every script slot of the
+    // entity for the BITON that sets the target var (the inn "cutscene done" flag),
+    // and neuter that script. Makou's "S<N>" label is NOT slot N (S0-Init + S0-Main
+    // are two halves of slot 0), so a hard-coded slot is unreliable.
+    quint16 slot[32];
+    memcpy(slot, d.constData() + offt + 64 * entIdx, 64);
+    int targetStart = -1;
+    QSet<quint16> seen;
+    for (int s = 0; s < 32 && targetStart < 0; ++s) {
+        if (seen.contains(slot[s])) continue;
+        seen.insert(slot[s]);
+        int pos = sd + static_cast<int>(slot[s]), g = 0;
+        while (pos >= 0 && pos < walkEnd && g++ < 4000) {
+            quint8 op = static_cast<quint8>(d.at(pos));
+            int len = fieldOpcodeLength(d, pos, fileSize);
+            if (len <= 0) break;
+            if (op == 0x00) break;                   // RET: end of this script
+            if (op == 0x82 && pos + 3 < fileSize &&
+                static_cast<quint8>(d.at(pos + 2)) == keepAddr &&
+                static_cast<quint8>(d.at(pos + 3)) == keepBit) {
+                targetStart = sd + static_cast<int>(slot[s]);
+                break;
+            }
+            pos += len;
+        }
+    }
+    if (targetStart < 0) {
+        dbg << "  INN_NEUTER: " << fieldName << " entity '"
+            << QString::fromLatin1(entityName) << "' — BITON addr=0x"
+            << QString::number(keepAddr, 16) << " bit=" << keepBit << " not found\n";
+        return 0;
+    }
+
+    // Neuter that script: NOP every opcode to 0x5F EXCEPT BITONs (var writes) and
+    // the terminating RET, so the cutscene-done flag is still set but nothing blocks.
+    int pos = targetStart, g = 0, nopped = 0, kept = 0;
+    while (pos >= 0 && pos < walkEnd && g++ < 4000) {
+        quint8 op = static_cast<quint8>(d.at(pos));
+        int len = fieldOpcodeLength(d, pos, fileSize);
+        if (len <= 0) break;
+        if (op == 0x00) break;                       // RET: keep, end of script
+        if (op == 0x82) { ++kept; pos += len; continue; }  // BITON: keep the var line
+        for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(0x5F);
+        ++nopped;
+        pos += len;
+    }
+    dbg << "  INN_NEUTER: " << fieldName << " entity '"
+        << QString::fromLatin1(entityName) << "' @" << targetStart
+        << " — NOP'd " << nopped << " opcode(s), kept " << kept << " BITON(s)\n";
+    return nopped;
 }
 
 bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
@@ -1836,21 +2159,40 @@ bool FieldPickupRandomizer_ff7tk::loadApJson(
         int bit     = p["bit"].toInt(-1);
         if (bank < 0 || address < 0 || bit < 0) continue;
 
-        QString field    = p["map"].toString().toLower().trimmed();
         QString itemText = p["item_text"].toString().toLower().trimmed();
-        if (field.isEmpty() || itemText.isEmpty()) continue;
+        if (itemText.isEmpty()) continue;
 
         // Strip "keyitem: " prefix so item_text matches getItemName() output
         if (itemText.startsWith("keyitem: "))
             itemText = itemText.mid(9);
 
-        QString key = field + QChar('|') + itemText;
         ApBitonCoord coord{
             static_cast<quint8>(bank),
             static_cast<quint8>(address),
             static_cast<quint8>(bit),
         };
-        m_apJsonLookup[key].enqueue(coord);
+
+        // Register the detection coord under EVERY field the location can appear
+        // in, not just the single "map". A location is often reachable as several
+        // field variants of the same room (disc-1/disc-2 versions, e.g.
+        // subin_1a + subin_1b). Keying only "map" left the BITON in the OTHER
+        // variants unmatched -> NEUTRALIZED, so grabbing the pickup in whichever
+        // variant the player actually reached set a dead flag and the check never
+        // fired (the Red Sub / Huge Materia Underwater bug). Each map is its own
+        // queue and they all relocate to the SAME coord, so there is still exactly
+        // one detection flag per location (no double-checks).
+        QStringList fields;
+        const QJsonArray mapsArr = p["maps"].toArray();
+        for (const QJsonValue& m : mapsArr) {
+            QString f = m.toString().toLower().trimmed();
+            if (!f.isEmpty()) fields << f;
+        }
+        if (fields.isEmpty()) {
+            QString f = p["map"].toString().toLower().trimmed();
+            if (!f.isEmpty()) fields << f;
+        }
+        for (const QString& field : fields)
+            m_apJsonLookup[field + QChar('|') + itemText].enqueue(coord);
     }
 
     debugStream << "AP JSON: loaded " << placements.size() << " placements ("
@@ -2063,6 +2405,12 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
 
     // Track assigned BITONs per field per wardrobe category (for sharing)
     QMap<QString, ApBitonCoord> categoryBitons;
+    // Track the AP flag assigned to each (field|keyitem) so SIBLING BITONs of the
+    // same key item (the field grants it via several code paths, but there is only
+    // one AP location entry) reuse it. Without this the un-matched copies are left
+    // intact, so the in-game pickup still sets the real key-item bit and grants
+    // that item's access on pickup (the "checking the location grants access" bug).
+    QMap<QString, ApBitonCoord> keyItemBitons;
 
     // Scan script section for BITON opcodes
     for (int i = scriptStart; i < scriptEnd - 4; ++i) {
@@ -2109,6 +2457,14 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
                             // Cache it for sharing within this category
                             categoryBitons[categoryKey] = apBiton;
                         }
+                        keyItemBitons[key] = apBiton;  // cache for sibling BITONs
+                    } else if (keyItemBitons.contains(key)) {
+                        // Sibling BITON of the same key item (another code path):
+                        // reuse its AP flag so EVERY path fires the check and NONE
+                        // sets the real key-item bit -> no access granted on pickup.
+                        apBiton = keyItemBitons[key];
+                        foundBiton = true;
+                        reusedBiton = true;
                     }
 
                     if (foundBiton) {
@@ -2123,7 +2479,9 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
                                     << " addr=0x" << QString::number(apBiton.address, 16)
                                     << " bit=" << apBiton.bit;
                         if (reusedBiton) {
-                            debugStream << " (shared " << wardrobeCategoryName(category) << ")";
+                            debugStream << (isWardrobe
+                                ? QString(" (shared %1)").arg(wardrobeCategoryName(category))
+                                : QString(" (shared sibling)"));
                         }
                         debugStream << "\n";
 
@@ -2140,9 +2498,17 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
 
                         modified++;
                     } else {
+                        // No AP entry and no sibling to share: NEUTRALIZE so the
+                        // in-game pickup can't grant the real key item (in AP /
+                        // Free Roam every key item comes from Archipelago). Redirect
+                        // the BITON to the unused key-item byte 0xFE (a harmless
+                        // flag), exactly as the non-AP keyItemMod path does. The
+                        // location won't be tracked, but the access leak is gone.
+                        decompressed[i + 2] = static_cast<char>(0xFE);
                         debugStream << "  AP_VANILLA_BITON @" << i
-                                    << " WARN: no JSON entry for (" << fieldName << ", " << keyItemName
-                                    << ") – location will not be tracked\n";
+                                    << " NEUTRALIZED (no AP entry for " << keyItemName
+                                    << ") -> addr 0xFE\n";
+                        modified++;
                     }
                 }
             }

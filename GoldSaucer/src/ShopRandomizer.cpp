@@ -438,7 +438,9 @@ void ShopRandomizer::mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTe
     static const struct { int early; int late; } kStoryShopVariants[] = {
         { 16, 51 }, { 17, 52 },   // Fort Condor   item / materia
         { 19, 54 },               // Lower Junon   weapon 2
-        { 20, 55 }, { 20, 59 },   // Upper Junon   item (disc-1 + disc-2 fields)
+        // Upper Junon item (early id 20) is opened by TWO Free Roam-reachable late
+        // fields (55 + 59). Cloning it whole into both makes them identical ("two
+        // shops, one stock"), so it is SPLIT across 55/59 below instead.
         { 22, 57 },               // Upper Junon   weapon
         { 23, 58 },               // Upper Junon   accessory
         { 26, 60 },               // Costa del Sol weapon
@@ -455,6 +457,36 @@ void ShopRandomizer::mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTe
         log << "Free Roam: mirrored story shop " << v.early << " ("
             << shopName(v.early) << ") -> late variant " << v.late << "\n";
     }
+
+    // Upper Junon item shop (early id 20) is reachable as TWO distinct stores in
+    // Free Roam (late ids 55 + 59). Split its slots across the two — even slots to
+    // 55, odd to 59 — so each AP token lives in exactly one shop (no double-checks,
+    // no missing checks since both fields are reachable) and the two stores carry
+    // distinct stock instead of identical clones.
+    auto splitStoryShop = [&](int src, int a, int b) {
+        if (src < 0 || src >= shops.size() ||
+            a   < 0 || a   >= shops.size() ||
+            b   < 0 || b   >= shops.size())
+            return;
+        ExeShopRecord ra = shops[src];   // inherit shopType / metadata
+        ExeShopRecord rb = shops[src];
+        int na = 0, nb = 0;
+        int n = qMin<int>(shops[src].itemCount, ExeShopRecord::SLOT_COUNT);
+        for (int s = 0; s < n; ++s) {
+            if ((s & 1) == 0) ra.entries[na++] = shops[src].entries[s];
+            else              rb.entries[nb++] = shops[src].entries[s];
+        }
+        for (int s = na; s < ExeShopRecord::SLOT_COUNT; ++s) ra.entries[s] = ExeShopSlot{};
+        for (int s = nb; s < ExeShopRecord::SLOT_COUNT; ++s) rb.entries[s] = ExeShopSlot{};
+        ra.itemCount = static_cast<quint8>(na);
+        rb.itemCount = static_cast<quint8>(nb);
+        shops[a] = ra;
+        shops[b] = rb;
+        log << "Free Roam: split story shop " << src << " (" << shopName(src)
+            << ") across late " << a << " (" << na << " items) + " << b
+            << " (" << nb << " items)\n";
+    };
+    splitStoryShop(20, 55, 59);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

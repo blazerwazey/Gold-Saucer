@@ -56,6 +56,7 @@ add_executable(GoldSaucer_GUI WIN32
     src/MakouLgpManager.cpp
     src/StartingEquipmentRandomizer.cpp
     src/CraterBarrierPatcher.cpp
+    src/IroExporter.cpp
     src/Config.cpp
     src/TextEncoder.cpp
     src/TextReplacementConfig.cpp

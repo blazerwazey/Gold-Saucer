@@ -155,7 +155,29 @@ int IroExporter::stageWorldScript(QStringList& log)
     if (!stageBytes("world_us.lgp/wm0.ev", wm0))
         return 0;
     log << "  IRO: staged world-map script override (world_us.lgp/wm0.ev)";
-    return 1;
+    int staged = 1;
+
+    // Town gating overwrites a world message in the 'mes' entry. FFNx/7H load lgp
+    // entries independently, so the wm0.ev override alone leaves message text
+    // vanilla — stage 'mes' too, but only if it actually changed vs the original
+    // lgp (otherwise we'd needlessly override another mod's world text).
+    QByteArray mes = lgp.fileData("mes");
+    if (!mes.isEmpty()) {
+        const QStringList origCandidates = {
+            m_ff7Path + "/ff7/workingdir/data/wm/world_us.lgp",  // 2026 re-release
+            m_ff7Path + "/data/wm/world_us.lgp",                 // classic Steam/1998
+        };
+        QByteArray origMes;
+        for (const QString& c : origCandidates) {
+            MakouLgpManager o;
+            if (QFile::exists(c) && o.open(c)) { origMes = o.fileData("mes"); if (!origMes.isEmpty()) break; }
+        }
+        if (!origMes.isEmpty() && mes != origMes && stageBytes("world_us.lgp/mes", mes)) {
+            log << "  IRO: staged world message override (world_us.lgp/mes)";
+            ++staged;
+        }
+    }
+    return staged;
 }
 
 // Copy a single output data file to its mod-relative override path.

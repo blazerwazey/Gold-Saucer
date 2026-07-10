@@ -1,3 +1,4 @@
+#include "ApSeedFile.h"
 #include "ShopRandomizer.h"
 #include "Randomizer.h"
 #include "Config.h"
@@ -363,13 +364,12 @@ void ShopRandomizer::loadApShops(QTextStream& log)
         log << "AP shops: no apJsonPath configured — skipping AP shop slots\n";
         return;
     }
-    QFile f(apJson);
-    if (!f.open(QIODevice::ReadOnly)) {
+    const QByteArray seedJson = ApSeedFile::readJson(apJson);
+    if (seedJson.isEmpty()) {
         log << "AP shops: cannot open " << apJson << "\n";
         return;
     }
-    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
-    f.close();
+    QJsonDocument doc = QJsonDocument::fromJson(seedJson);
 
     const QJsonArray shops = doc.object().value("shops").toArray();
     for (const QJsonValue& v : shops) {
@@ -698,9 +698,9 @@ QString ShopRandomizer::shopName(int id)
         /*  0 */ "Sector 7 Weapon Shop",
         /*  1 */ "Sector 7 Item Shop",
         /*  2 */ "Sector 7 Drug Store",
-        /*  3 */ "Sector 8 Weapon Shop",
-        /*  4 */ "Sector 8 Item Shop",
-        /*  5 */ "Sector 8 Materia Shop",
+        /*  3 */ "Sector 5 Weapon Shop",
+        /*  4 */ "Sector 5 Item Shop",
+        /*  5 */ "Sector 5 Materia Shop",
         /*  6 */ "Wall Market Weapon Shop",
         /*  7 */ "Wall Market Materia Shop",
         /*  8 */ "Wall Market Item Shop",

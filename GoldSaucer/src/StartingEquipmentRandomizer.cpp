@@ -1,3 +1,4 @@
+#include "ApSeedFile.h"
 #include "StartingEquipmentRandomizer.h"
 #include "TextReplacementConfig.h"
 #include "TextEncoder.h"
@@ -365,11 +366,10 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
     QSet<quint16> reservedMateria;
     {
         const QString apJson = m_parent->m_config.getApJsonPath();
-        QFile af(apJson);
-        if (!apJson.isEmpty() && af.open(QIODevice::ReadOnly)) {
-            const QJsonArray shops = QJsonDocument::fromJson(af.readAll())
+        const QByteArray seedJson = ApSeedFile::readJson(apJson);
+        if (!seedJson.isEmpty()) {
+            const QJsonArray shops = QJsonDocument::fromJson(seedJson)
                                          .object().value("shops").toArray();
-            af.close();
             for (const QJsonValue& v : shops) {
                 const QJsonObject o = v.toObject();
                 if (o.value("token_type").toString("item") == "materia") {

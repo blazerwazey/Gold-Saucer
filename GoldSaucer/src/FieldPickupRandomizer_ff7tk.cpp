@@ -1,6 +1,8 @@
+#include "ApSeedFile.h"
 #include "FieldPickupRandomizer_ff7tk.h"
 #include "Randomizer.h"
 #include "Config.h"
+#include "FieldScriptEditor.h"
 #include <QFile>
 #include <QDir>
 #include <QDebug>
@@ -179,12 +181,37 @@ bool FieldPickupRandomizer_ff7tk::randomize()
     int totalModified = 0;
     int filesWithChanges = 0;
 
+    // FieldScriptEditor round-trip self-test: parse+assemble every field with NO
+    // edits and assert byte-identical output. This validates the re-offsetter's
+    // section/jump model against the player's real flevel before any insert-based
+    // patch trusts it. Results go to the debug log.
+    // Validated 0-fail across all 684 decodable fields on 2026-06-28; now opt-in
+    // via GS_FIELDSCRIPT_SELFTEST to re-check after editor changes.
+    const bool fsSelfTest = !qEnvironmentVariableIsEmpty("GS_FIELDSCRIPT_SELFTEST");
+    int fsPass = 0, fsFail = 0, fsSkip = 0;
+    if (fsSelfTest && debugOk)
+        debugStream << "\n=== FieldScriptEditor round-trip self-test ===\n";
+
     for (const QString& fileName : allFiles) {
         if (fileName.startsWith("blackbg")) continue;
         if (fileName == "onna_5") continue; // Exclude onna_5 from randomization
 
         QByteArray fieldData = lgp.fileData(fileName);
         if (fieldData.isEmpty()) continue;
+
+        if (fsSelfTest) {
+            QByteArray dec = LZS::decompressAllWithHeader(fieldData);
+            if (dec.isEmpty()) { fsSkip++; }
+            else {
+                QString e;
+                if (FieldScriptEditor::selfTestRoundTrip(dec, e)) {
+                    fsPass++;
+                } else {
+                    fsFail++;
+                    if (debugOk) debugStream << "  FS_SELFTEST FAIL " << fileName << ": " << e << "\n";
+                }
+            }
+        }
 
         // Check if this field has key item modifications
         const KeyItemFieldMod* kiMod = keyItemMods.contains(fileName)
@@ -199,6 +226,10 @@ bool FieldPickupRandomizer_ff7tk::randomize()
                                      << fileName << "\n";
         }
     }
+
+    if (fsSelfTest && debugOk)
+        debugStream << "=== FieldScriptEditor self-test: " << fsPass << " pass, "
+                    << fsFail << " fail, " << fsSkip << " skip (undecodable) ===\n\n";
 
     // --- key item verification (before save) ---------------------------------
     if (debugOk && keyItemEnabled) {
@@ -546,6 +577,125 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         // (BITON Var[3][132].3 = addr 0x84 bit 3 = the inn "cutscene done" flag),
         // dropping the blocking party-member execs + the SPLIT.
         neuterInnGoScript(decompressed, fieldName, QByteArray("line4"), 0x84, 3, debugStream);
+        // ROOT CAUSE of the world-map Diamond Weapon cutscene: losinn writes
+        // GameMoment = 664 (SETWORD bank2[0] = 664, 81 20 00 98 02) — a disc-2 story
+        // value. In Free Roam that slams the moment (~1997) down to 664, which ARMS the
+        // Highwind-acquisition / Diamond-rise cutscene, so touching the Highwind after
+        // leaving the Forgotten City plays "Diamond rises from the ocean". NOP the write
+        // (0x5F x5) so the moment stays high and that gate never passes. Same class as
+        // the seto1/gidun_3/cos_btm GameMoment writes.
+        const int gm = decompressed.indexOf(QByteArray::fromHex("8120009802"));
+        if (gm >= 0) {
+            for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  LOSINN: NOP'd GameMoment=664 write @" << gm << "\n";
+        } else {
+            debugStream << "  LOSINN: GameMoment=664 anchor not found\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "ujunon2") {
+        // Junon beach: entering the screen auto-fires Priscilla's "Did you drown?"
+        // dialog from her (invisible-in-Free-Roam) model. Cosmetic — the player can
+        // still leave — but jarring. The MESSAGE opcode (0x40 win 0x00 msg 0x1D) that
+        // shows message #29 appears exactly once; NOP its 3 bytes (0x5F) so no box
+        // opens. Length-preserving; unique 11-byte anchor guards against a false hit.
+        const QByteArray anchor = QByteArray::fromHex("5800a2000140001d680000");
+        const int a = decompressed.indexOf(anchor);
+        if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
+            const int msg = a + 5;   // the 0x40 MESSAGE opcode within the anchor
+            for (int j = 0; j < 3; ++j) decompressed[msg + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  UJUNON2: NOP'd Priscilla drown MESSAGE @" << msg << "\n";
+        } else {
+            debugStream << "  UJUNON2: drown MESSAGE anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "fship_3") {
+        // Highwind operations room: the rest-crew NPC's talk script branches on
+        // Var[3][0x16] bit 6 ("Cloud recovered" story bit, never set in Free
+        // Roam) — bit OFF shows only "Oh...oh...{Cloud}..." (msg 8) and jumps to
+        // script end, skipping the rest/PHS/save service menu. Flip the IFUB
+        // oper bitOFF(0x0a) -> bitON(0x09) so Free Roam takes the normal branch
+        // (msg 7 + ASK service menu) instead — same one-byte flip as the Ester
+        // talk-gate in crcin_1.
+        const int ch = decompressed.indexOf(QByteArray::fromHex("143016060a10"));
+        if (ch >= 0) {
+            decompressed[ch + 4] = char(0x09);
+            ++totalMods;
+            debugStream << "  FSHIP_3: crew talk-gate flipped (bitOFF->bitON) @" << ch << "\n";
+        } else if (decompressed.indexOf(QByteArray::fromHex("143016060910")) >= 0) {
+            debugStream << "  FSHIP_3: crew talk-gate already flipped\n";
+        } else {
+            debugStream << "  FSHIP_3: crew talk-gate anchor not found\n";
+        }
+        // Latent hazard (same class as the losinn GameMoment=664 bug): earlier
+        // story branches in the same script SETWORD GameMoment to 1033 / 1110,
+        // which would slam Free Roam's ~1997 down and re-lock moment gates.
+        // NOP both writes (0x5F x5).
+        for (const char* hex : { "8120000904", "8120005604" }) {
+            const int gm = decompressed.indexOf(QByteArray::fromHex(hex));
+            if (gm >= 0) {
+                for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+                ++totalMods;
+                debugStream << "  FSHIP_3: NOP'd GameMoment write (" << hex << ") @" << gm << "\n";
+            }
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "semkin_7") {
+        // Underwater Reactor dock: the sub-boarding cutscene BITONs three session
+        // flags (V[15][0x86].7 + V[15][0x85].5/.4) whose only purpose is the
+        // post-boarding dock lockdown — on re-entry the doors (jp_lock), guards
+        // and the Carry Armor chest all read them and disable themselves (the
+        // reporter's "chest locked, can't advance"). Vanilla never returns here;
+        // Free Roam does. NOP all three BITONs (0x5F x4) so the lockdown never
+        // arms and the dock stays fully explorable after getting the sub.
+        for (const char* hex : { "82f08607", "82f08505", "82f08504" }) {
+            const QByteArray pat = QByteArray::fromHex(hex);
+            const int a = decompressed.indexOf(pat);
+            if (a >= 0 && decompressed.indexOf(pat, a + 1) < 0) {
+                for (int j = 0; j < 4; ++j) decompressed[a + j] = char(0x5f);
+                ++totalMods;
+                debugStream << "  SEMKIN_7: NOP'd dock-lockdown BITON (" << hex << ") @" << a << "\n";
+            } else {
+                debugStream << "  SEMKIN_7: lockdown BITON " << hex << " not found/ambiguous\n";
+            }
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "semkin_5") {
+        // Red submarine (the steal-if-you-failed backup): its interaction script
+        // grants submarine access outside Archipelago — the AP Submarine item
+        // must be the only source. RET the script's first opcode (0x33 -> 0x00)
+        // so touching the red sub does nothing. Unique 11-byte anchor.
+        const QByteArray anchor = QByteArray::fromHex("33014a01660000e6ffefff");
+        const int a = decompressed.indexOf(anchor);
+        if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
+            decompressed[a] = char(0x00);   // RET — script ends immediately
+            ++totalMods;
+            debugStream << "  SEMKIN_5: neutered red-sub steal script @" << a << "\n";
+        } else {
+            debugStream << "  SEMKIN_5: red-sub anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "del1") {
+        // Costa del Sol harbor: the town exit MAPJUMPs into del12 — a cutscene
+        // variant of the same screen that replays the Rufus/Heidegger post-ship
+        // scene in Free Roam before forwarding to del2. Retarget the exit to
+        // del2 DIRECTLY, using the exact coords/triangle/direction del12's own
+        // forward-jump uses, so the scene field is bypassed entirely. Same
+        // 10-byte MAPJUMP redirect as bugin1b/semkin_7. (del12 is only ever
+        // entered from this one jump, so nothing else is affected.)
+        const QByteArray from = QByteArray::fromHex("60ba0100000000000000"); // MAPJUMP del12 (0,0)
+        const QByteArray to   = QByteArray::fromHex("60bb01bafaa6fd820078"); // MAPJUMP del2 @del12's coords
+        const int a = decompressed.indexOf(from);
+        if (a >= 0 && decompressed.indexOf(from, a + 1) < 0) {
+            decompressed.replace(a, to.size(), to);
+            ++totalMods;
+            debugStream << "  DEL1: harbor exit redirected del12 -> del2 (skip Rufus scene) @" << a << "\n";
+        } else if (decompressed.indexOf(to) >= 0) {
+            debugStream << "  DEL1: harbor exit already redirected\n";
+        } else {
+            debugStream << "  DEL1: del12 MAPJUMP anchor not found/ambiguous\n";
+        }
     }
     if (freeRoam && fieldName.toLower() == "md1stin") {
         if (injectFreeRoamMapJump(decompressed, fieldName, debugStream))
@@ -559,6 +709,475 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         // 0xF8/0xF9 bytes in the script offset tables). Length-preserving (0x5F).
         if (nopFieldScriptMovies(decompressed, fieldName, debugStream) > 0)
             totalMods++;
+    }
+
+    // Cave of the Gi interior (gidun_1..4 + the Seto chamber seto1): now reachable
+    // in Free Roam via the cosin2 door re-open. These rooms play disc-keyed story
+    // movies via "Set next movie" — on disc 3 (forced in Free Roam) they resolve to
+    // placeholder entries (e.g. seto1's "No44") that crash on play, the same failure
+    // mode as md1stin's intro. NOP the PMVIE/MOVIE opcodes (length-preserving 0x5F);
+    // a no-op for any room without a movie.
+    {
+        const QString fl = fieldName.toLower();
+        if (freeRoam && (fl == "seto1" || fl.startsWith("gidun"))) {
+            if (nopFieldScriptMovies(decompressed, fieldName, debugStream) > 0)
+                totalMods++;
+        }
+    }
+
+    // spipe_2 (Underwater Reactor pipe): a "lock" Line entity freezes the player and
+    // shows "Locked" when GameMoment >= 1299 (disc 2/3 gate). In Free Roam (disc 3)
+    // that is always true, so the pipe is permanently locked. Flip the comparison to
+    // '<= 1299' (IFSW GameMoment value 0x0513 oper 0x04 ">=" -> 0x05 "<="): the high
+    // Free Roam moment now fails it, so the lock branch is skipped. Operand-only edit
+    // via the FieldScriptEditor (jump preserved); handles multiple lock lines.
+    if (freeRoam && fieldName.toLower() == "spipe_2") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  SPIPE2: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0, i = 0;
+            const QByteArray anchor = QByteArray::fromHex("16200000130504"); // IFSW GameMoment >= 1299
+            while ((i = ed.findOpcode(anchor, i)) >= 0) {
+                QString e;
+                if (ed.patchOperands(i, 6, QByteArray::fromHex("05"), e)) {
+                    debugStream << "  SPIPE2 LOCK: GameMoment >=1299 -> <=1299 @instr " << i << "\n";
+                    ++n;
+                } else {
+                    debugStream << "  SPIPE2 LOCK: patch failed @instr " << i << " (" << e << ")\n";
+                }
+                ++i;
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  SPIPE2: " << n << " lock(s) unlocked, reassembled\n"; }
+                else debugStream << "  SPIPE2: assemble failed (" << fsErr << ")\n";
+            } else {
+                debugStream << "  SPIPE2 LOCK: GameMoment>=1299 anchor not found\n";
+            }
+        }
+    }
+
+    // semkin_7 (submarine dock): the vs_ssol line forces the "take the submarine"
+    // sequence — soldier battle #769, then a MAPJUMP to subin_2b (#408, sub interior).
+    // In Free Roam we keep the fight but redirect the exit to the WORLD MAP at Junon
+    // instead of boarding the sub. wm field 7 is Junon's world-map surface entry (it's
+    // what Lower Junon, junonl1, MAPJUMPs to); we reuse its zero-coord form (coords are
+    // ignored for wm dummy fields). Same 10-byte length, but routed via the
+    // FieldScriptEditor for consistency. Anchor = the original MAPJUMP to subin_2b.
+    if (freeRoam && fieldName.toLower() == "semkin_7") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  SEMKIN7: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0, i = 0;
+            const QByteArray anchor = QByteArray::fromHex("6098017a0075ff2d00c0"); // MAPJUMP subin_2b (#408)
+            const QByteArray wmJunon = QByteArray::fromHex("60070000000000000000"); // MAPJUMP wm7 (Junon surface)
+            while ((i = ed.findOpcode(anchor, i)) >= 0) {
+                QString e;
+                if (ed.replaceAt(i, wmJunon, e)) {
+                    debugStream << "  SEMKIN7: MAPJUMP subin_2b -> wm7 (Junon surface) @instr " << i << "\n";
+                    ++n;            // same length; keep scanning from i
+                } else {
+                    debugStream << "  SEMKIN7: repoint failed @instr " << i << " (" << e << ")\n";
+                    ++i;
+                }
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  SEMKIN7: " << n << " MAPJUMP(s) repointed to Junon surface, reassembled\n"; }
+                else debugStream << "  SEMKIN7: assemble failed (" << fsErr << ")\n";
+            } else {
+                debugStream << "  SEMKIN7: subin_2b MAPJUMP anchor not found\n";
+            }
+        }
+    }
+    // gidun_1 (Cave of the Gi, first room): directr's Init script forces the party
+    // to "Cloud | Red XIII | (Empty)" (PRTYE = ca 00 04 ff) on every entry. In Free
+    // Roam we don't want the party overwritten. It's the Init script's FIRST
+    // instruction (removeAt refuses a script start), so replace it in place with a
+    // harmless WAIT 0 (24 00 00) — the player keeps their current party.
+    if (freeRoam && fieldName.toLower() == "gidun_1") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  GIDUN1: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            const int i = ed.findOpcode(QByteArray::fromHex("ca0004ff"), 0); // PRTYE Cloud|RedXIII|empty
+            if (i < 0) {
+                debugStream << "  GIDUN1: forced New-party (ca0004ff) not found\n";
+            } else {
+                QString e;
+                if (ed.replaceAt(i, QByteArray::fromHex("240000"), e)) {     // -> WAIT 0
+                    QByteArray out = ed.assemble(fsErr);
+                    if (!out.isEmpty()) { decompressed = out; ++totalMods; debugStream << "  GIDUN1: removed forced New-party (PRTYE -> WAIT 0) @instr " << i << "\n"; }
+                    else debugStream << "  GIDUN1: assemble failed (" << fsErr << ")\n";
+                } else {
+                    debugStream << "  GIDUN1: replaceAt failed (" << e << ")\n";
+                }
+            }
+        }
+    }
+
+    // gidun_3 (Cave of the Gi, Gravity room): also writes GameMoment = 514
+    // (SETWORD bank2[0] = 514, 81 20 00 02 02) — same disc-1 slam as seto1. NOP it
+    // (0x5F x5, real bytecode at that offset, length-preserving).
+    if (freeRoam && fieldName.toLower() == "gidun_3") {
+        const int gm = decompressed.indexOf(QByteArray::fromHex("8120000202"));
+        if (gm >= 0) {
+            for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  GIDUN3: NOP'd GameMoment=514 write @" << gm << "\n";
+        } else {
+            debugStream << "  GIDUN3: GameMoment=514 anchor not found\n";
+        }
+    }
+
+    // gidun_4 (Cave of the Gi, exit room): the LINEE exit-line trigger runs a
+    // Bugenhagen cutscene that (a) SPLITs the party into a formation and (b) REQEWs
+    // Red XIII's animation — both BLOCKING. In Free Roam the party is arbitrary: a
+    // reduced party never fills the SPLIT slots, and Red XIII (an AP recruit) may be
+    // absent, so his REQEW waits on a script that never runs -> softlock at the exit.
+    // Fix: NOP the SPLIT (0x09 -> 0x5F no-ops, as for losinn) and de-block Red XIII's
+    // REQEW (opcode 0x03 -> 0x01 REQ, fire-and-forget). Both length-preserving; the
+    // dialog + Cloud/Bugenhagen animations still play.
+    if (freeRoam && fieldName.toLower() == "gidun_4") {
+        if (nopFieldScriptSplits(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        const int at = decompressed.indexOf(QByteArray::fromHex("0307c3"));  // REQEW BALLET/Barret (entity 7)
+        if (at >= 0) {
+            decompressed[at] = static_cast<char>(0x01);                      // REQEW -> REQ
+            ++totalMods;
+            debugStream << "  GIDUN4: de-blocked Barret REQEW (0307c3 -> 0107c3) @" << at << "\n";
+        } else {
+            debugStream << "  GIDUN4: Barret REQEW anchor not found\n";
+        }
+        // The SAME pre-boss Bugenhagen cutscene ALSO REQEWs entity 13 = CID
+        // (03 0d c4, immediately before the Barret one) — a party without Cid
+        // hangs right after Bugenhagen's "near the end" line (reported softlock;
+        // the earlier session misread entity 13 as Bugenhagen). REQEW -> REQ.
+        const int cid = decompressed.indexOf(QByteArray::fromHex("030dc4"));
+        if (cid >= 0) {
+            decompressed[cid] = static_cast<char>(0x01);
+            ++totalMods;
+            debugStream << "  GIDUN4: de-blocked Cid REQEW (030dc4 -> 010dc4) @" << cid << "\n";
+        } else {
+            debugStream << "  GIDUN4: Cid REQEW anchor not found\n";
+        }
+        // Later scripts in the chain PRQEW entity 8 = TIFA three times (06 08 bc)
+        // — same absent-member hang class. PRQEW -> PREQ (0x06 -> 0x04) keeps the
+        // prioritized request without the blocking wait.
+        int tp = 0, from = 0;
+        while (true) {
+            const int t = decompressed.indexOf(QByteArray::fromHex("0608bc"), from);
+            if (t < 0) break;
+            decompressed[t] = static_cast<char>(0x04);
+            from = t + 1; ++tp;
+        }
+        if (tp) {
+            ++totalMods;
+            debugStream << "  GIDUN4: de-blocked " << tp << " Tifa PRQEW(s) (0608bc -> 0408bc)\n";
+        }
+    }
+
+    // cos_btm2 (Cosmo Canyon, arrival after the Cave of the Gi): the return cutscene
+    // runs "Red XIII not available" (cd 00 04, removes him) then "Show menu Change
+    // party" (49 00 07 00). In Free Roam that softlocks the party jump out of the
+    // cave. NOP both (0x5F fillers, length-preserving); the WAIT between is kept.
+    if (freeRoam && fieldName.toLower() == "cos_btm2") {
+        const int at = decompressed.indexOf(QByteArray::fromHex("cd000424040049000700"));
+        if (at >= 0) {
+            decompressed[at] = decompressed[at + 1] = decompressed[at + 2] = char(0x5f);           // cd0004 -> 5f5f5f
+            decompressed[at + 6] = decompressed[at + 7] = decompressed[at + 8] = decompressed[at + 9] = char(0x5f); // 49000700 -> 5f x4
+            ++totalMods;
+            debugStream << "  COSBTM2: NOP'd Red-XIII-not-available + change-party menu @" << at << "\n";
+        } else {
+            debugStream << "  COSBTM2: Red-XIII/change-party anchor not found\n";
+        }
+    }
+
+    // cos_btm (Cosmo Canyon): the RED entity auto-joins Red XIII — "Red XIII
+    // available" (cd 01 04) + "Unlock Red XIII in PHS menu" (cf 04). In Free Roam
+    // Red XIII is an AP character item, so neuter the auto-join (NOP both, 0x5F).
+    if (freeRoam && fieldName.toLower() == "cos_btm") {
+        const int at = decompressed.indexOf(QByteArray::fromHex("cd0104cf04"));
+        if (at >= 0) {
+            decompressed[at] = decompressed[at + 1] = decompressed[at + 2] = char(0x5f);   // cd0104 -> 5f5f5f
+            decompressed[at + 3] = decompressed[at + 4] = char(0x5f);                       // cf04   -> 5f5f
+            ++totalMods;
+            debugStream << "  COSBTM: NOP'd Red XIII auto-join (available + PHS unlock) @" << at << "\n";
+        } else {
+            debugStream << "  COSBTM: Red XIII auto-join anchor not found\n";
+        }
+        // Also NOP the GameMoment = 523 write (SETWORD bank2[0] = 523, 81 20 00 0b 02):
+        // like seto1's 514, it would slam the Free Roam moment back to a disc-1 value.
+        const int gm = decompressed.indexOf(QByteArray::fromHex("8120000b02"));
+        if (gm >= 0) {
+            for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  COSBTM: NOP'd GameMoment=523 write @" << gm << "\n";
+        } else {
+            debugStream << "  COSBTM: GameMoment=523 anchor not found\n";
+        }
+    }
+
+    // crcin_1 (Chocobo Square): Ester ('esto', the race manager) is hidden outside
+    // the disc-1 racing window — her Init sets model VISIBILITY off (a4 00) by
+    // default and only flips it on (a4 01) inside a `GameMoment == 1008` branch that
+    // Free Roam (moment ~1997) never enters, so she never appears and chocobo racing
+    // is unreachable. Force her visible: flip her default a4 00 -> a4 01,
+    // length-preserving, anchored on the unique `SOLID-on; VISI-off; IFSW GM==1008`
+    // sequence. (Phase 1 of Free Roam chocobo racing — talk-gate + race launch next.)
+    if (freeRoam && fieldName.toLower() == "crcin_1") {
+        // (1) Force Ester (esto) into a clean, TALKABLE state. A placed field model
+        // is only talkable when it's BOTH visible AND solid (cf. the Kalm traveler
+        // 'oman', which is just placed + SOLID with no VISI-off — no special "talk"
+        // opcode exists). Ester's vanilla Init places her then runs a maze of
+        // GameMoment(>=1008)/Var gates whose branches leave her either hidden or
+        // SOLID-off in Free Roam. After her CHAR(8)+XYZI+DIR, overwrite the whole
+        // 26-byte gate/branch block (7e01 c701 a4xx IFSW IFUB 7e00 c7xx a401) with an
+        // unconditional anim + VISI-on + SOLID-on + no-ops, leaving the trailing RET.
+        // Anchored on Ester-unique CHAR(8)+place+dir; length-preserving.
+        const QByteArray esterAnc = QByteArray::fromHex("a108a500000cfe450000005000b30020");
+        const int at = decompressed.indexOf(esterAnc);
+        if (at >= 0) {
+            const int b = at + 16;                                          // start of the state block
+            decompressed[b + 0] = char(0x7e); decompressed[b + 1] = char(0x01);  // anim 1 (idle)
+            decompressed[b + 2] = char(0xa4); decompressed[b + 3] = char(0x01);  // VISI on
+            decompressed[b + 4] = char(0xc7); decompressed[b + 5] = char(0x01);  // SOLID on
+            for (int j = 6; j < 26; ++j) decompressed[b + j] = char(0x5f);        // NOP the gates + branch
+            ++totalMods;
+            debugStream << "  CRCIN1: Ester -> unconditional visible+solid (talkable) @" << b << "\n";
+        } else {
+            debugStream << "  CRCIN1: Ester Init anchor not found\n";
+        }
+        // (2) Fully DISABLE kei1: it's placed at Ester's exact coords (alternate
+        // NPCs for that spot), so it clips her AND blocks talking to her. Merely
+        // hiding it (VISI off) left it solid + talkable. Overwrite its place+dir
+        // (a5<11 bytes> + b3<3> = 14 bytes) with VISI-off + SOLID-off + no-ops
+        // (a4 00 ; c7 00 ; 0x5f x10) so it's invisible, non-solid and un-talkable
+        // (a hidden, un-placed NPC needs no position/facing). Anchored on the
+        // kei1-unique CHAR+place+dir; length-preserving.
+        const QByteArray keiAnc = QByteArray::fromHex("a107a500000cfe450000005000b30020");
+        const int k = decompressed.indexOf(keiAnc);
+        if (k >= 0) {
+            decompressed[k + 2] = char(0xa4); decompressed[k + 3] = char(0x00);   // a4 00 (VISI off)
+            decompressed[k + 4] = char(0xc7); decompressed[k + 5] = char(0x00);   // c7 00 (SOLID off)
+            for (int j = 6; j < 16; ++j) decompressed[k + j] = char(0x5f);         // no-ops (was place+dir)
+            ++totalMods;
+            debugStream << "  CRCIN1: disabled kei1 (hide + unsolid) @" << k << "\n";
+        } else {
+            debugStream << "  CRCIN1: kei1 anchor not found\n";
+        }
+        // (3) Un-gate Ester's talk script: her Main bails at the start on
+        // `IFUB Var[b0][0x8a] bit 0 OFF -> jump to end` (the racing-state flag Free
+        // Roam never sets), so talking does nothing. Flip the comparison bitOFF(0x0a)
+        // -> bitON(0x09): "bit 0 ON -> skip" — since the flag stays OFF in Free Roam,
+        // the branch is never taken and her race dialog runs.
+        const int e = decompressed.indexOf(QByteArray::fromHex("14b08a000a45")); // IFUB Var[b0][0x8a].0 OFF -> jump
+        if (e >= 0) {
+            decompressed[e + 4] = char(0x09);   // oper 0x0a (bitOFF) -> 0x09 (bitON)
+            ++totalMods;
+            debugStream << "  CRCIN1: un-gated Ester talk (bitOFF -> bitON) @" << (e + 4) << "\n";
+        } else {
+            debugStream << "  CRCIN1: Ester talk-gate anchor not found\n";
+        }
+    }
+
+    // seto1 (Cave of the Gi, Seto chamber): the end-scene scripts write
+    // $GameMoment = 514 (SETWORD bank2[0] = 0x0202) — a disc-1 story value — right
+    // before granting the Seraph Comb and MAPJUMPing to Cosmo Canyon. In Free Roam
+    // (moment ~1997) that write slams the moment down to 514 and re-locks everything
+    // gated on a high moment (crater barrier, etc.). Delete every such write via the
+    // re-offsetting FieldScriptEditor (the item grant + exit are untouched). There
+    // are two in seto1; both are real script instructions (the value 514 does not
+    // appear anywhere in the AKAO/data tail).
+    if (freeRoam && fieldName.toLower() == "seto1") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  SETO1: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0, i = 0;
+            const QByteArray anchor = QByteArray::fromHex("8120000202"); // SETWORD $GameMoment = 514
+            while ((i = ed.findOpcode(anchor, i)) >= 0) {
+                QString e;
+                if (ed.removeAt(i, e)) {
+                    debugStream << "  SETO1: removed $GameMoment=514 write @instr " << i << "\n";
+                    ++n;            // instruction deleted; the next one shifts to i
+                } else {
+                    debugStream << "  SETO1: removeAt failed @instr " << i << " (" << e << ") — skipping\n";
+                    ++i;
+                }
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  SETO1: " << n << " GameMoment=514 write(s) removed, reassembled\n"; }
+                else debugStream << "  SETO1: assemble failed (" << fsErr << ")\n";
+            } else {
+                debugStream << "  SETO1: $GameMoment=514 anchor not found\n";
+            }
+        }
+    }
+
+    // sininb1 (Shinra Mansion basement, Vincent's coffin room): the lin0 Line's
+    // recruitment script makes Vincent join. In Free Roam Vincent is an AP item, so
+    // neuter the join — remove "Vincent available" (cd 01 07, char id 7) and the
+    // follow-up "Change party" menu (49 00 07 00). The quest-complete flag (line 15,
+    // BITON Var[13][80].2) is LEFT intact: it is the AP check's detection bit, and
+    // the "join party field" animation (line 16) is kept. Re-offsetting removeAt.
+    if (freeRoam && fieldName.toLower() == "sininb1") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  SININB1: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0;
+            const char* const anchors[2] = { "cd0107", "49000700" };  // Vincent available; Change-party menu
+            for (const char* hx : anchors) {
+                const QByteArray anc = QByteArray::fromHex(hx);
+                const int i = ed.findOpcode(anc, 0);
+                if (i < 0) { debugStream << "  SININB1: anchor " << hx << " not found\n"; continue; }
+                QString e;
+                if (ed.removeAt(i, e)) { debugStream << "  SININB1: removed " << hx << " @instr " << i << "\n"; ++n; }
+                else debugStream << "  SININB1: removeAt failed for " << hx << " (" << e << ")\n";
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  SININB1: " << n << " Vincent-join opcode(s) removed, reassembled\n"; }
+                else debugStream << "  SININB1: assemble failed (" << fsErr << ")\n";
+            }
+        }
+    }
+
+    // bugin1b (Bugenhagen's observatory, upper room): the vanilla 'directr' Main
+    // script fades out and MAPJUMPs to fship_4 (#74, the Highwind) — a story
+    // transition that in Free Roam warps the player onto the airship. Redirect it
+    // to bugin1a (#541, the observatory entrance) so the room stays self-contained.
+    // Same 10-byte MAPJUMP; only the destination field id changes (coords/dir stay
+    // 0, as in vanilla). Anchor = the MAPJUMP to fship_4. NOT Gold-Saucer-authored;
+    // this is a vanilla jump we neutralize for Free Roam.
+    if (freeRoam && fieldName.toLower() == "bugin1b") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  BUGIN1B: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0, i = 0;
+            const QByteArray anchor  = QByteArray::fromHex("604a0000000000000000"); // MAPJUMP fship_4 (#74)
+            const QByteArray toBugin = QByteArray::fromHex("601d0200000000000000"); // MAPJUMP bugin1a (#541)
+            while ((i = ed.findOpcode(anchor, i)) >= 0) {
+                QString e;
+                if (ed.replaceAt(i, toBugin, e)) {
+                    debugStream << "  BUGIN1B: MAPJUMP fship_4 -> bugin1a @instr " << i << "\n";
+                    ++n;            // same length; keep scanning from i
+                } else {
+                    debugStream << "  BUGIN1B: repoint failed @instr " << i << " (" << e << ")\n";
+                    ++i;
+                }
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  BUGIN1B: " << n << " MAPJUMP(s) repointed to bugin1a, reassembled\n"; }
+                else debugStream << "  BUGIN1B: assemble failed (" << fsErr << ")\n";
+            } else {
+                debugStream << "  BUGIN1B: fship_4 MAPJUMP anchor not found\n";
+            }
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "cosin2") {
+        // Free Roam: re-open the Cave of the Gi door. The door is run by the 'directr'
+        // (entity 3) S0-Main director, gated on the disc-1 GameMoment [502,514) window;
+        // Free Roam (moment 1997) is outside it, so the open never fires. We drive this
+        // through the re-offsetting FieldScriptEditor so the walkmesh triangle-activate
+        // can be INSERTED at exactly the spot the hand-verified Makou fix used (after the
+        // door-open REQs, BOTH screen-fades intact) instead of overwriting a fade. All
+        // edits land on one parse and are re-emitted with offsets + jumps recomputed.
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  GI_CAVE: FieldScriptEditor parse failed (" << fsErr << ") — left vanilla\n";
+        } else {
+            int edits = 0;
+            auto hx = [](const char* s){ return QByteArray::fromHex(s); };
+            // overwrite operand bytes of an opcode located by its full-opcode prefix
+            // (works on jump opcodes; the symbolic jump target is preserved)
+            auto patchOp = [&](const char* findHex, int off, const char* bytesHex, const char* tag){
+                int i = ed.findOpcode(hx(findHex));
+                if (i < 0) { debugStream << "  GI_CAVE " << tag << ": anchor not found\n"; return; }
+                QString e;
+                if (ed.patchOperands(i, off, hx(bytesHex), e)) { debugStream << "  GI_CAVE " << tag << ": ok @instr " << i << "\n"; ++edits; }
+                else debugStream << "  GI_CAVE " << tag << ": patch failed (" << e << ")\n";
+            };
+            // replace an opcode reached by navigating `delta` ops from a unique span
+            // anchor; verify the target opcode id before replacing.
+            auto replaceNav = [&](const char* anchorHex, int delta, quint8 expectId, const char* newHex, const char* tag){
+                int a = ed.findBytes(hx(anchorHex));
+                if (a < 0) { debugStream << "  GI_CAVE " << tag << ": anchor not found\n"; return; }
+                int i = a + delta;
+                QByteArray b = ed.instrBytes(i);
+                if (b.isEmpty() || quint8(b.at(0)) != expectId) { debugStream << "  GI_CAVE " << tag << ": nav id mismatch @instr " << i << "\n"; return; }
+                QString e;
+                if (ed.replaceAt(i, hx(newHex), e)) { debugStream << "  GI_CAVE " << tag << ": ok @instr " << i << "\n"; ++edits; }
+                else debugStream << "  GI_CAVE " << tag << ": replace failed (" << e << ")\n";
+            };
+
+            // --- door models open + non-solid -----------------------------------
+            // model-09 controller (placed 9d ff / 3e 01): a5(place), b3(dir), 7e(anim),
+            // c7(SOLID). Force open + non-solid.
+            replaceNav("a500009dff3e01",       2, 0x7e, "7e00", "DOOR ctrl 7e");
+            replaceNav("a500009dff3e01",       3, 0xc7, "c700", "DOOR ctrl c7");
+            // D1 / D2 leaves: OFST then SOLID -> non-solid
+            replaceNav("c300000096fff2005200", 1, 0xc7, "c700", "DOOR D1a");
+            replaceNav("c3000000a6fff200f0ff", 1, 0xc7, "c700", "DOOR D2a");
+            // live collision controller close branch (IFUB &4 ; 7e 01 ; c7 01) -> open
+            replaceNav("1430aa0406097e01",     1, 0x7e, "7e00", "DOORCTRL 7e");
+            replaceNav("1430aa0406097e01",     2, 0xc7, "c700", "DOORCTRL c7");
+
+            // --- BUGEN story cutscene -> RET (no story, no solo-party SPLIT) -----
+            {
+                int i = ed.findBytes(hx("33014a010304c8ab040a02"));
+                if (i < 0) debugStream << "  GI_CAVE STORY: anchor not found\n";
+                else { QString e; if (ed.replaceAt(i, hx("00"), e)) { debugStream << "  GI_CAVE STORY: cutscene -> RET @instr " << i << "\n"; ++edits; } else debugStream << "  GI_CAVE STORY: failed (" << e << ")\n"; }
+            }
+
+            // --- directr window/story-bit gates (operand edits; jumps preserved) -
+            // @1892 IFSW 'GameMoment < 514' -> 'GameMoment > 1' (value 514->1, oper 03->02)
+            patchOp("162000000202032b", 4, "010002", "WINDOW <514->>1");
+            // @1900 IFUB '& 4' -> '| 4' (oper 06->08) so the open ignores the story bit
+            patchOp("1430aa040625",     4, "08",     "WINDOW &->|");
+            // directr REQs D1/D2 script 4 (closed leaves); repoint to script 3 (slide open)
+            patchOp("0111c4",           2, "c3",     "OPENCALL D1");
+            patchOp("0112c4",           2, "c3",     "OPENCALL D2");
+
+            // --- INSERT walkmesh activate (the byte-patch could not do this) -----
+            // IDLCK 6d 29 00 00 = "Activate triangle #41", placed right after directr's
+            // second FADE (immediately before FADEW), exactly where the hand-verified
+            // Makou edit inserted it. The editor recomputes the directr IFSW window jumps
+            // (>=502 / >1) that now span these 4 inserted bytes.
+            {
+                int f = ed.findOpcode(hx("6b00000000000801ff")); // directr second FADE
+                if (f < 0) debugStream << "  GI_CAVE TRIANGLE: FADE anchor not found\n";
+                else { QString e; if (ed.insertBefore(f + 1, hx("6d290000"), e)) { debugStream << "  GI_CAVE TRIANGLE: IDLCK tri#41 inserted @instr " << (f+1) << "\n"; ++edits; } else debugStream << "  GI_CAVE TRIANGLE: insert failed (" << e << ")\n"; }
+            }
+
+            if (edits > 0) {
+                const int wasSize = decompressed.size();
+                QByteArray out = ed.assemble(fsErr);
+                if (out.isEmpty()) {
+                    debugStream << "  GI_CAVE: assemble failed (" << fsErr << ") — left vanilla\n";
+                } else {
+                    decompressed = out;
+                    totalMods += edits;
+                    debugStream << "  GI_CAVE: " << edits << " editor edit(s) applied, reassembled ("
+                                << out.size() << " bytes, was " << wasSize << ")\n";
+                }
+            } else {
+                debugStream << "  GI_CAVE: no edits applied (already patched or anchors missing)\n";
+            }
+        }
     }
 
     // --- Free Roam: suppress the Kalm Traveler gold-chocobo grant ------------
@@ -2136,12 +2755,12 @@ bool FieldPickupRandomizer_ff7tk::loadApJson(
     const QString& path,
     QTextStream& debugStream)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
+    const QByteArray seedJson = ApSeedFile::readJson(path);
+    if (seedJson.isEmpty()) {
         debugStream << "AP JSON: cannot open " << path << "\n";
         return false;
     }
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    QJsonDocument doc = QJsonDocument::fromJson(seedJson);
     if (doc.isNull() || !doc.isObject()) {
         debugStream << "AP JSON: invalid JSON in " << path << "\n";
         return false;

@@ -167,6 +167,7 @@ bool Randomizer::applyCraterBarrier()
         qDebug() << "Error: Crater barrier patcher not initialized";
         return false;
     }
+    m_craterBarrierPatcher->setApJsonPath(m_config.getApJsonPath());
     return m_craterBarrierPatcher->patch();
 }
 

@@ -660,20 +660,56 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 debugStream << "  SEMKIN_7: lockdown BITON " << hex << " not found/ambiguous\n";
             }
         }
-    }
-    if (freeRoam && fieldName.toLower() == "semkin_5") {
-        // Red submarine (the steal-if-you-failed backup): its interaction script
-        // grants submarine access outside Archipelago — the AP Submarine item
-        // must be the only source. RET the script's first opcode (0x33 -> 0x00)
-        // so touching the red sub does nothing. Unique 11-byte anchor.
-        const QByteArray anchor = QByteArray::fromHex("33014a01660000e6ffefff");
-        const int a = decompressed.indexOf(anchor);
-        if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
-            decompressed[a] = char(0x00);   // RET — script ends immediately
-            ++totalMods;
-            debugStream << "  SEMKIN_5: neutered red-sub steal script @" << a << "\n";
-        } else {
-            debugStream << "  SEMKIN_5: red-sub anchor not found/ambiguous\n";
+        // Leviathan Scales chest (2026-07-15, final): the firing BITON is
+        // 82 f0 8d 00. ENGINE BANK TRUTH (disassembled from ff7_en.exe's script
+        // var-resolve jump table @0x60fa49/0x60fa6d): script nibble 1/2->0xBA4,
+        // 3/4->0xCA4, 5/6->TEMP(0xCC14D0, not savemap!), B/C->0xDA4, D/E->0xEA4,
+        // 7/F->0xFA4, 8/9/A invalid, and NOTHING maps to 0x10A4. So nibble F =
+        // savemap 0xFA4+0x8D = 0x1031 (== the client's bank-13 base), and the
+        // earlier attempt's 82 b0 8d 02 actually wrote 0xDA4+0x8D = 0xE31 — a
+        // byte nobody watches (nibble B != client bank 11; GS's (bank&0xF)<<4
+        // translation is wrong for banks 5+). Correct minimal patch: KEEP the
+        // vanilla nibble, change only the bit -> 82 f0 8d 02 = 0x1031 bit 2 =
+        // location 200336's biton (bank 13 / addr 0x8D / bit 2 in
+        // locations.json). Possession (0x1031.0) is no longer set by the chest —
+        // it comes from Archipelago (the client sets it on item receipt).
+        {
+            const QByteArray from = QByteArray::fromHex("82f08d00");
+            const QByteArray to   = QByteArray::fromHex("82f08d02");
+            const int a = decompressed.indexOf(from);
+            if (a >= 0 && decompressed.indexOf(from, a + 1) < 0) {
+                decompressed.replace(a, 4, to);
+                ++totalMods;
+                debugStream << "  SEMKIN_7: repointed Leviathan chest firing BITON "
+                               "(82f08d00 -> 82f08d02 = 0x1031.2) @" << a << "\n";
+            } else {
+                debugStream << "  SEMKIN_7: Leviathan chest firing BITON not found/ambiguous\n";
+            }
+        }
+        // ALSO repoint the chest's two open-state gates (live flag map of the
+        // loaded field): the IFUBs at the chest handler test the SAME possession
+        // bit V[F][0x8D].0 (`14 f0 8d 00 ..`). Since the repointed chest no
+        // longer sets that bit — but the CLIENT sets it when it delivers
+        // Leviathan Scales — receiving the AP item before opening the chest would
+        // make the chest read "already opened" and the check permanently
+        // missable. Repoint both gates to the detection bit (0x1031.2) so the
+        // chest's opened state tracks the AP check itself: unopened until the
+        // check fires, opened afterwards, indifferent to item receipt. Only the
+        // bit operand byte changes; comparison + jump bytes are kept.
+        {
+            const QByteArray gfrom = QByteArray::fromHex("14f08d00");
+            const QByteArray gto   = QByteArray::fromHex("14f08d02");
+            int n = 0;
+            for (int a = decompressed.indexOf(gfrom); a >= 0;
+                 a = decompressed.indexOf(gfrom, a + 1)) {
+                decompressed.replace(a, 4, gto);
+                ++n; ++totalMods;
+                debugStream << "  SEMKIN_7: repointed Leviathan chest open-gate IFUB "
+                               "(14f08d00 -> 14f08d02) @" << a << "\n";
+            }
+            if (n != 2)
+                debugStream << "  SEMKIN_7: WARNING expected 2 chest open-gate IFUBs, patched "
+                            << n << "\n";
         }
     }
     if (freeRoam && fieldName.toLower() == "del1") {
@@ -695,6 +731,88 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             debugStream << "  DEL1: harbor exit already redirected\n";
         } else {
             debugStream << "  DEL1: del12 MAPJUMP anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "junin4") {
+        // Junon underwater path: two watchmen (mihari/mihari2) + a dog guard the
+        // backup RED SUBMARINE. All three show ONLY while Savemap[0xEF4].bit3
+        // ("submarine owned") is OFF (IFUB V[d0][0x50].3 bitOFF -> show) and hide
+        // once you own it. Free Roam never sets that bit (the Submarine is AP-
+        // only), so they show forever and the dog's battle lets you steal the sub.
+        //
+        // Desired Free Roam behaviour: HIDE the two watchmen, but KEEP the dog
+        // visible + solid so it walls off the (non-check) red sub. So:
+        //  (a) flip only the watchmen's show-gates bitOFF(0x0a)->bitON(0x09) — they
+        //      now show only when the sub is owned = never, so they stay hidden
+        //      (Init leaves them invisible/non-solid). Each gate is uniquely keyed
+        //      by its jump byte (mihari 0x51, mihari2 0x1d; the dog's is 0x1a, left
+        //      untouched so the dog keeps showing).
+        //  (b) NOP the dog's on-contact BATTLE + "dog defeated" flag write
+        //      (70 00 fb 02 = BATTLE 763 ; 82 30 ec 07 = BITON V[3][0xEC].7) so the
+        //      dog can't be fought through — it stays a permanent solid barrier.
+        int done = 0;
+        for (const char* hx : { "14d050030a51", "14d050030a1d" }) {   // mihari, mihari2
+            const int g = decompressed.indexOf(QByteArray::fromHex(hx));
+            if (g >= 0) { decompressed[g + 4] = char(0x09); ++done; }
+        }
+        if (done) {
+            ++totalMods;
+            debugStream << "  JUNIN4: hid " << done << " watchmen (show-gate bitOFF->bitON)\n";
+        } else {
+            debugStream << "  JUNIN4: watchmen show-gate anchors not found\n";
+        }
+        const int b = decompressed.indexOf(QByteArray::fromHex("7000fb028230ec07"));
+        if (b >= 0 && decompressed.indexOf(QByteArray::fromHex("7000fb028230ec07"), b + 1) < 0) {
+            for (int j = 0; j < 8; ++j) decompressed[b + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  JUNIN4: NOP'd dog BATTLE + defeat flag (impassable) @" << b << "\n";
+        } else {
+            debugStream << "  JUNIN4: dog battle anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "subin_1b") {
+        // Submarine dock: the vanilla "you got the sub" grant — even on the
+        // failure path (steal the red sub) — is two adjacent BITONs on a border
+        // (line-trigger) entity that set Savemap[0xEF4] bit4 + bit3 ("gray
+        // submarine owned", the flag the client keys off to load the sub model).
+        // In Free Roam the Submarine must be AP-only, so NOP both writes (8 bytes
+        // -> 0x5F). The AP Submarine item still grants it (client writes 0xEF4.3
+        // + 0xEF6.2 on delivery). Unique 8-byte anchor. (semkin_5, the Reno /
+        // Carry Armor room, is unrelated — an earlier patch wrongly hit it.)
+        const int at = decompressed.indexOf(QByteArray::fromHex("82d0500482d05003"));
+        if (at >= 0 && decompressed.indexOf(QByteArray::fromHex("82d0500482d05003"), at + 1) < 0) {
+            for (int j = 0; j < 8; ++j) decompressed[at + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  SUBIN_1B: NOP'd vanilla submarine-owned grant (0xEF4.4+.3) @" << at << "\n";
+        } else {
+            debugStream << "  SUBIN_1B: submarine-grant anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "losin2") {
+        // Forgotten City altar approach writes GameMoment=677 (mid Aerith death
+        // sequence) — entering from the rock-climb descent slams Free Roam's
+        // ~1997 down and ARMS the death sequence (reported). Same class as the
+        // losinn 664 write. NOP (0x5F x5).
+        const int gm = decompressed.indexOf(QByteArray::fromHex("812000a502"));
+        if (gm >= 0) {
+            for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  LOSIN2: NOP'd GameMoment=677 write @" << gm << "\n";
+        } else {
+            debugStream << "  LOSIN2: GameMoment=677 anchor not found\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "loslake1") {
+        // The lake writes GameMoment 1392/1398/1399 (disc-3 Bugenhagen return
+        // sequence) — visiting drops Free Roam's ~1997 and arms mid-sequence
+        // scenes. NOP all three writes (0x5F x5 each).
+        for (const char* hex : { "8120007005", "8120007605", "8120007705" }) {
+            const int gm = decompressed.indexOf(QByteArray::fromHex(hex));
+            if (gm >= 0) {
+                for (int j = 0; j < 5; ++j) decompressed[gm + j] = char(0x5f);
+                ++totalMods;
+                debugStream << "  LOSLAKE1: NOP'd GameMoment write (" << hex << ") @" << gm << "\n";
+            }
         }
     }
     if (freeRoam && fieldName.toLower() == "md1stin") {
@@ -880,6 +998,32 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             ++totalMods;
             debugStream << "  GIDUN4: de-blocked " << tp << " Tifa PRQEW(s) (0608bc -> 0408bc)\n";
         }
+        // STILL softlocking (2026-07-15): the same cutscene has THREE more blocking
+        // ops the earlier passes missed — a JOIN (08 2d, the counterpart to the
+        // NOP'd SPLIT: with a reduced Free Roam party it waits forever for members
+        // to rejoin) and REQEWs on entity 3 = yougan (03 03 c3 / 03 03 c4). Full
+        // decode of the cutscene @0x79b confirmed these are the only remaining
+        // blockers. Patch via unique multi-op anchors (length-preserving):
+        //   (a) 82 30 ad 02 | 08 2d | 03 03 c4  -> BITON ; JOIN->NOP ; REQEW->REQ
+        //   (b) 71 01 | 03 03 c3 | 01 0d c3      -> REQEW yougan c3 -> REQ
+        //   (c) 03 03 c4 | 01 0d c5              -> REQEW yougan c4 (mid) -> REQ
+        struct GPatch { const char* from; const char* to; const char* what; };
+        static const GPatch gp[] = {
+            { "8230ad02082d0303c4", "8230ad025f5f0103c4", "JOIN NOP + yougan REQEW->REQ" },
+            { "71010303c3010dc3",   "71010103c3010dc3",   "yougan REQEW c3 -> REQ" },
+            { "0303c4010dc5",       "0103c4010dc5",       "yougan REQEW c4 -> REQ" },
+        };
+        for (const GPatch& g : gp) {
+            const QByteArray a = QByteArray::fromHex(g.from), b = QByteArray::fromHex(g.to);
+            const int at = decompressed.indexOf(a);
+            if (at >= 0 && decompressed.indexOf(a, at + 1) < 0) {
+                decompressed.replace(at, a.size(), b);
+                ++totalMods;
+                debugStream << "  GIDUN4: " << g.what << " @" << at << "\n";
+            } else {
+                debugStream << "  GIDUN4: anchor for '" << g.what << "' not found/ambiguous\n";
+            }
+        }
     }
 
     // cos_btm2 (Cosmo Canyon, arrival after the Cave of the Gi): the return cutscene
@@ -896,6 +1040,14 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         } else {
             debugStream << "  COSBTM2: Red-XIII/change-party anchor not found\n";
         }
+        // The same field ALSO has "Red XIII available" (cd 01 04) further on —
+        // it re-grants him after the cave return scene. Red is an AP item; NOP.
+        const int av = decompressed.indexOf(QByteArray::fromHex("cd0104"));
+        if (av >= 0) {
+            decompressed[av] = decompressed[av + 1] = decompressed[av + 2] = char(0x5f);
+            ++totalMods;
+            debugStream << "  COSBTM2: NOP'd Red XIII available (cd0104) @" << av << "\n";
+        }
     }
 
     // cos_btm (Cosmo Canyon): the RED entity auto-joins Red XIII — "Red XIII
@@ -910,6 +1062,14 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             debugStream << "  COSBTM: NOP'd Red XIII auto-join (available + PHS unlock) @" << at << "\n";
         } else {
             debugStream << "  COSBTM: Red XIII auto-join anchor not found\n";
+        }
+        // Forced New-party Cloud+RedXIII (ca 00 04 ff) in the same scene chain —
+        // overwrites the player's party in Free Roam. NOP (0x5F x4, mid-script safe).
+        const int pe = decompressed.indexOf(QByteArray::fromHex("ca0004ff"));
+        if (pe >= 0) {
+            for (int j = 0; j < 4; ++j) decompressed[pe + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  COSBTM: NOP'd forced New-party Cloud+Red (ca0004ff) @" << pe << "\n";
         }
         // Also NOP the GameMoment = 523 write (SETWORD bank2[0] = 523, 81 20 00 0b 02):
         // like seto1's 514, it would slam the Free Roam moment back to a disc-1 value.
@@ -995,6 +1155,17 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     // are two in seto1; both are real script instructions (the value 514 does not
     // appear anywhere in the AKAO/data tail).
     if (freeRoam && fieldName.toLower() == "seto1") {
+        // Seto's chamber forces the party to Cloud+RedXIII (ca 00 04 ff) — the
+        // beat that re-adds Red even with gidun_1's PRTYE patched. Red is an AP
+        // character item; NOP the 4 bytes (unique, in-script @0x4e9).
+        const int pe = decompressed.indexOf(QByteArray::fromHex("ca0004ff"));
+        if (pe >= 0) {
+            for (int j = 0; j < 4; ++j) decompressed[pe + j] = char(0x5f);
+            ++totalMods;
+            debugStream << "  SETO1: NOP'd forced New-party Cloud+Red (ca0004ff) @" << pe << "\n";
+        } else {
+            debugStream << "  SETO1: forced New-party anchor not found\n";
+        }
         QString fsErr;
         FieldScriptEditor ed;
         if (!ed.parse(decompressed, fsErr)) {
@@ -1048,6 +1219,76 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 QByteArray out = ed.assemble(fsErr);
                 if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  SININB1: " << n << " Vincent-join opcode(s) removed, reassembled\n"; }
                 else debugStream << "  SININB1: assemble failed (" << fsErr << ")\n";
+            }
+        }
+    }
+
+    // yufy1 (Wutai, Yuffie's house): the YUFI entity's join script makes Yuffie
+    // available — this is the recruit path reachable in Free Roam (the forest
+    // encounter can't trigger at the Free Roam game moment). Yuffie is an AP
+    // item, so
+    // neuter the join — remove "Yuffie available" (cd 01 05, char id 5). Both
+    // BITONs are LEFT intact: Var[3][189].4 (82 30 bd 04, set right before the
+    // join = the AP check's detection bit, savemap 0xCA4+189 bit 4) and
+    // Var[3][207].6. Unlike Vincent's sininb1 there is no change-party MENU to
+    // remove (verified against the vanilla script bytes). Re-offsetting removeAt.
+    if (freeRoam && fieldName.toLower() == "yufy1") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  YUFY1: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            const QByteArray anc = QByteArray::fromHex("cd0105");  // Yuffie available
+            const int i = ed.findOpcode(anc, 0);
+            if (i < 0) {
+                debugStream << "  YUFY1: anchor cd0105 not found\n";
+            } else {
+                QString e;
+                if (ed.removeAt(i, e)) {
+                    QByteArray out = ed.assemble(fsErr);
+                    if (!out.isEmpty()) {
+                        decompressed = out; ++totalMods;
+                        debugStream << "  YUFY1: Yuffie-join CHRAVAIL removed, reassembled\n";
+                    } else {
+                        debugStream << "  YUFY1: assemble failed (" << fsErr << ")\n";
+                    }
+                } else {
+                    debugStream << "  YUFY1: removeAt failed (" << e << ")\n";
+                }
+            }
+        }
+    }
+
+    // yougan2 (forest encounter, post-fight Yuffie recruitment dialogue): winning
+    // the world-map "Mystery Ninja" battle drops the player here, where the
+    // dialogue ends in "Yuffie available" + a "name Yuffie" menu. Yuffie is an AP
+    // item in Free Roam, so neuter the recruit — remove CHRAVAIL "Yuffie
+    // available" (cd 01 05, char id 5) and the name-entry MENU (49 00 06 05 =
+    // MENU type 6 name-entry, char 5). The encounter-state BITONs (Var[3][207].0
+    // ON / Var[3][133].0 OFF) right after CHRAVAIL are KEPT — they track the
+    // forest encounter as done so it self-limits. (The fight itself is a
+    // world-map encounter, not in this field, so it can't be removed here.)
+    if (freeRoam && fieldName.toLower() == "yougan2") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  YOUGAN2: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            int n = 0;
+            const char* const anchors[2] = { "cd0105", "49000605" };  // Yuffie available; name-entry menu
+            for (const char* hx : anchors) {
+                const QByteArray anc = QByteArray::fromHex(hx);
+                const int i = ed.findOpcode(anc, 0);
+                if (i < 0) { debugStream << "  YOUGAN2: anchor " << hx << " not found\n"; continue; }
+                if (ed.findOpcode(anc, i + 1) >= 0) { debugStream << "  YOUGAN2: anchor " << hx << " ambiguous, skipped\n"; continue; }
+                QString e;
+                if (ed.removeAt(i, e)) { debugStream << "  YOUGAN2: removed " << hx << " @instr " << i << "\n"; ++n; }
+                else debugStream << "  YOUGAN2: removeAt failed for " << hx << " (" << e << ")\n";
+            }
+            if (n > 0) {
+                QByteArray out = ed.assemble(fsErr);
+                if (!out.isEmpty()) { decompressed = out; totalMods += n; debugStream << "  YOUGAN2: " << n << " Yuffie-recruit opcode(s) removed, reassembled\n"; }
+                else debugStream << "  YOUGAN2: assemble failed (" << fsErr << ")\n";
             }
         }
     }
@@ -2237,6 +2478,19 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     static constexpr quint8  kRocketFlagAddr = 0x82; // Var[3][130]
     static constexpr quint8  kRocketFlagBit  = 0x03; // "bitON 3" = bit index 3
 
+    // BITON Var[d][0x50] bit 5 (savemap 0xEA4+0x50 = 0xEF4.5) — arms the Da-chao
+    // Turks scene. datiao_1's director gates the Reno/Rude appearance on
+    //   IFUB 0xEF4 bitON 5  (scene skipped unless SET)  AND  0x102C bitOFF 0
+    // and Free Roam (moment 1997) never sets 0xEF4.5, so the Turks never spawn.
+    // The scene is the lead-in to the Yuffie's-house (yufy1) sequence, so seed
+    // the bit at new-game. One-time: the scene BITONs 0x102C.0 when it plays, so
+    // it self-consumes on first datiao_1 visit. (Same bank byte 0xd0 as Vincent's
+    // 0xEF4.2 recruit flag — different bit, no conflict; live-verified 2026-07-16
+    // that this single bit is the sole trigger.)
+    static constexpr quint8  kDachaoTurksBanks = 0xD0; // addr bank nibble d (0xEA4), literal bit
+    static constexpr quint8  kDachaoTurksAddr  = 0x50; // Var[.][0x50] = savemap 0xEF4
+    static constexpr quint8  kDachaoTurksBit   = 0x05;
+
     // MAPJUMP to wm1 (field ID 2 = outside Kalm).
     // X/Y/triangle/direction are ignored by the WM engine for wm* dummy fields.
     static constexpr quint16 kFieldId  = 2;   // wm1 = Outside Kalm
@@ -2280,6 +2534,10 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     // BITON Var[3][130] bit 3 — skip Rocket Town (rckt/rckt2) entry soft-lock
     seq.append(static_cast<char>(0x82)); seq.append(static_cast<char>(kBitOnBanks));
     seq.append(static_cast<char>(kRocketFlagAddr)); seq.append(static_cast<char>(kRocketFlagBit));
+    // BITON Var[d][0x50] bit 5 — arm the Da-chao Turks scene (datiao_1 lead-in
+    // to the Yuffie's-house sequence)
+    seq.append(static_cast<char>(0x82)); seq.append(static_cast<char>(kDachaoTurksBanks));
+    seq.append(static_cast<char>(kDachaoTurksAddr)); seq.append(static_cast<char>(kDachaoTurksBit));
     // MAPJUMP wm1
     seq.append(static_cast<char>(0x60));
     put16(seq, kFieldId);
@@ -2821,6 +3079,44 @@ bool FieldPickupRandomizer_ff7tk::loadApJson(
 }
 
 // ============================================================================
+// jsonBankToNibble  –  translate an Archipelago locations.json bank number
+//                      into the field-script bank NIBBLE the engine resolves.
+//
+// Engine truth (ff7_en.exe var-resolve jump table @VA 0x60fa49 / index table
+// 0x60fa6d): script nibble -> target:
+//   1/2 -> savemap+0xBA4   3/4 -> +0xCA4   5/6 -> TEMP 0xCC14D0 (NOT savemap!)
+//   B/C -> +0xDA4          D/E -> +0xEA4   7/F -> +0xFA4
+//   8/9/A invalid; NO nibble reaches savemap+0x10A4.
+//
+// The JSON/client numbering (FF7Client.py _BANK_BASE) is linear:
+//   1/2 -> 0xBA4, 3/4 -> 0xCA4, 5/6 -> 0xDA4, 11/12 -> 0xEA4,
+//   13/14 -> 0xFA4, 15 -> 0x10A4.
+//
+// The old translation ((bank & 0x0F) << 4) only agrees for banks 1-4; every
+// json bank >= 5 landed its BITON in the wrong savemap page (e.g. bank 13
+// wrote to 0xEA4+addr instead of 0xFA4+addr), corrupting unrelated variable
+// space while the client watched a byte that never changed. Returns -1 for
+// banks no field-script nibble can reach (json bank 15 = savemap+0x10A4).
+// ============================================================================
+
+static int jsonBankToNibble(quint8 jsonBank)
+{
+    switch (jsonBank) {
+        case 1:  return 0x1;  // savemap +0xBA4 (8-bit)
+        case 2:  return 0x2;  // savemap +0xBA4 (16-bit)
+        case 3:  return 0x3;  // savemap +0xCA4
+        case 4:  return 0x4;
+        case 5:  return 0xB;  // savemap +0xDA4 (nibbles 5/6 are TEMP, not savemap)
+        case 6:  return 0xC;
+        case 11: return 0xD;  // savemap +0xEA4
+        case 12: return 0xE;
+        case 13: return 0xF;  // savemap +0xFA4
+        case 14: return 0x7;
+        default: return -1;   // bank 15 (+0x10A4) unreachable from field script
+    }
+}
+
+// ============================================================================
 // applySTITMAsArchipelago  –  replace STITM(5B) with BITON(4B) + NOP(1B)
 //                              using the pre-assigned address/bit from the
 //                              Archipelago JSON.  Falls back with a warning
@@ -2858,9 +3154,19 @@ bool FieldPickupRandomizer_ff7tk::applySTITMAsArchipelago(
     quint8 destBank     = biton.bank;
     quint8 addr         = biton.address;
     quint8 bit          = biton.bit;
-    // BITON encodes dest bank in the high nibble of byte 1, src bank in low.
-    // src = 0 always (we write a literal bit, not from another var).
-    quint8 bankByte     = static_cast<quint8>((destBank & 0x0F) << 4);
+    // BITON encodes the dest bank NIBBLE in the high nibble of byte 1, src
+    // bank in low. src = 0 always (we write a literal bit, not from another
+    // var). The nibble is NOT the json bank number for banks >= 5.
+    int nibble = jsonBankToNibble(destBank);
+    if (nibble < 0) {
+        debugStream << "  AP_STITM @" << info.offset
+                    << " WARN: json bank " << destBank
+                    << " has no field-script nibble – "
+                    << getItemName(info.originalItemID)
+                    << " location cannot be tracked, STITM left intact\n";
+        return false;
+    }
+    quint8 bankByte     = static_cast<quint8>(nibble << 4);
 
     fieldData[info.offset]     = static_cast<char>(BITON_OPCODE);
     fieldData[info.offset + 1] = static_cast<char>(bankByte);
@@ -2874,6 +3180,7 @@ bool FieldPickupRandomizer_ff7tk::applySTITMAsArchipelago(
     entry.isMateria      = false;
     entry.originalItemId = info.originalItemID;
     entry.originalName   = getItemName(info.originalItemID);
+    entry.jsonBank       = destBank;
     entry.bankByte       = bankByte;
     entry.address        = addr;
     entry.bit            = bit;
@@ -2925,7 +3232,16 @@ bool FieldPickupRandomizer_ff7tk::applySMTRAAsArchipelago(
     quint8 destBank     = biton.bank;
     quint8 addr         = biton.address;
     quint8 bit          = biton.bit;
-    quint8 bankByte     = static_cast<quint8>((destBank & 0x0F) << 4);
+    int nibble = jsonBankToNibble(destBank);
+    if (nibble < 0) {
+        debugStream << "  AP_SMTRA @" << info.offset
+                    << " WARN: json bank " << destBank
+                    << " has no field-script nibble – "
+                    << getMateriaName(info.originalMateriaID)
+                    << " location cannot be tracked, SMTRA left intact\n";
+        return false;
+    }
+    quint8 bankByte     = static_cast<quint8>(nibble << 4);
 
     fieldData[info.offset]     = static_cast<char>(BITON_OPCODE);
     fieldData[info.offset + 1] = static_cast<char>(bankByte);
@@ -2941,6 +3257,7 @@ bool FieldPickupRandomizer_ff7tk::applySMTRAAsArchipelago(
     entry.isMateria        = true;
     entry.originalMateriaId = info.originalMateriaID;
     entry.originalName     = getMateriaName(info.originalMateriaID);
+    entry.jsonBank         = destBank;
     entry.bankByte         = bankByte;
     entry.address          = addr;
     entry.bit              = bit;
@@ -3086,8 +3403,19 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
                         reusedBiton = true;
                     }
 
+                    // A coord whose json bank no field-script nibble can reach
+                    // (bank 15) is unwritable: fall through to NEUTRALIZE.
+                    int nibble = foundBiton ? jsonBankToNibble(apBiton.bank) : -1;
+                    if (foundBiton && nibble < 0) {
+                        debugStream << "  AP_VANILLA_BITON @" << i
+                                    << " WARN: json bank " << apBiton.bank
+                                    << " has no field-script nibble ("
+                                    << keyItemName << ")\n";
+                        foundBiton = false;
+                    }
+
                     if (foundBiton) {
-                        quint8 newBankByte = static_cast<quint8>((apBiton.bank & 0x0F) << 4);
+                        quint8 newBankByte = static_cast<quint8>(nibble << 4);
                         decompressed[i + 1] = static_cast<char>(newBankByte);
                         decompressed[i + 2] = static_cast<char>(apBiton.address);
                         decompressed[i + 3] = static_cast<char>(apBiton.bit);
@@ -3110,6 +3438,7 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
                         entry.isMateria = false;
                         entry.originalItemId = 0;
                         entry.originalName = keyItemName;
+                        entry.jsonBank = apBiton.bank;
                         entry.bankByte = newBankByte;
                         entry.address = apBiton.address;
                         entry.bit = apBiton.bit;
@@ -3177,7 +3506,9 @@ void FieldPickupRandomizer_ff7tk::writeArchipelagoSidecar(
                                     ? static_cast<int>(e.originalMateriaId)
                                     : static_cast<int>(e.originalItemId);
         obj["original_name"]  = e.originalName;
-        obj["bank"]           = static_cast<int>((e.bankByte >> 4) & 0x0F);
+        // Report the JSON bank number, NOT the script nibble in bankByte —
+        // they differ for banks >= 5 and the AP side speaks json numbering.
+        obj["bank"]           = static_cast<int>(e.jsonBank);
         obj["address"]        = static_cast<int>(e.address);
         obj["bit"]            = static_cast<int>(e.bit);
         arr.append(obj);
@@ -3583,7 +3914,7 @@ int FieldPickupRandomizer_ff7tk::getFieldSphere(const QString& fieldName)
         "ujunon1","ujunon2","ujunon3","junmin1","junmin2",
         "junonr1","junonr2","junonr3","junonr4",
         "jetin1","jetin2","jetin3",
-        "condor1","condor2","convil_1","convil_2","convil_3","convil_4", "delmin12"
+        "condor1","condor2","convil_1","convil_2","convil_3","convil_4", "delmin12",
         "corel1","corel2","corel3","corelin",
         "ncorel1","ncorel2","ncorel3","ncorel4","ncoin1","ncoin2","ncoin3",
         "mtcrl_1","mtcrl_2","mtcrl_3","mtcrl_4","mtcrl_5","mtcrl_6","mtcrl_7","mtcrl_8","mtcrl_9",

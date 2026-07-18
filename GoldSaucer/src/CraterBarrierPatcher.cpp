@@ -349,45 +349,22 @@ int CraterBarrierPatcher::patchDiamondBoardingScene(QByteArray& lgp) const
         qDebug() << "CraterBarrierPatcher(diamond-boarding): diamond fn 28 entry anchor not found";
     }
 
-    // (c) Neuter the SEPARATE camera-follow rise cutscene (world-script fn at entry
-    // slots 31/50) — this is the one the player actually sees: it runs
-    // set_vertical_speed_with_follow(-30) (the Diamond "rises from the ocean" with the
-    // camera following) then enter_field(59). System 28 (b) was a different sequence.
-    // Write RETURN at its entry. Unique anchor = its first instrs: RESET ; PUSH 0 ;
-    // op307 ; RESET ; PUSH 30 ; negate ; set_vertical_speed_with_follow (3a 03).
-    const QByteArray riseVanilla = QByteArray::fromHex("0001100100000703000110011e0015003a03");
-    const int r = lgp.indexOf(riseVanilla, dataStart);
-    if (r >= 0 && r < dataEnd) {
-        lgp[r] = char(0x03); lgp[r + 1] = char(0x02);   // RESET -> RETURN
-        ++patched;
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): RETURN'd Diamond camera-follow rise fn @0x"
-                 + QString::number(r, 16);
-    } else if (lgp.indexOf(QByteArray::fromHex("0302100100000703000110011e0015003a03"), dataStart) >= 0) {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): camera-follow rise already neutered";
-    } else {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): camera-follow rise anchor not found";
-    }
-
-    // (d) THE DECISIVE ONE (found by live bisect, 2026-07-07): the map jump the player
-    // actually gets is the ENTER_FIELD(59) inside System fn 30's BODY. The ENGINE (its
-    // C-side Diamond state machine, armed by savemap 0xEF6.3 "Diamond marching") resumes
-    // execution INSIDE that body — past the RETURN written at the fn head by (c) — so no
-    // head patch can stop it. Kill the jump opcode itself: RESET; PUSH 59; PUSH 0;
-    // ENTER_FIELD -> replace ENTER_FIELD (18 03) with RESET (00 01). Length-preserving,
-    // proven in-game. (FF7Client also keeps 0xEF6.3 clear — this is the backstop for the
-    // race window before the client's next poll.)
-    const QByteArray jumpVanilla = QByteArray::fromHex("000110013b00100100001803");
-    const int j = lgp.indexOf(jumpVanilla, dataStart);
-    if (j >= 0 && j < dataEnd) {
-        lgp[j + 10] = char(0x00); lgp[j + 11] = char(0x01);   // ENTER_FIELD -> RESET
-        ++patched;
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): killed System-30 body ENTER_FIELD(59) @0x"
-                 + QString::number(j + 10, 16);
-    } else if (lgp.indexOf(QByteArray::fromHex("000110013b00100100000001"), dataStart) >= 0) {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): System-30 ENTER_FIELD already killed";
-    } else {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): System-30 ENTER_FIELD(59) anchor not found";
-    }
+    // (c)+(d) REMOVED (2026-07-18): both patches killed the NORTHERN CRATER DESCENT.
+    // The "camera-follow rise fn" body they targeted is the SAME code as the
+    // Highwind crater-descent fn 30 (one body, multiple call-table entries: the
+    // rise animation + ENTER_FIELD(59) is shared by the Diamond boarding path AND
+    // System fn 9 "crater_landing"). Vanilla wm0.ev contains exactly ONE instance
+    // of each anchor — there was never a separate Diamond copy — so (c)'s
+    // entry-RETURN and (d)'s ENTER_FIELD->RESET made the crater descent a no-op:
+    // on Go Mode the barrier dropped (crater_lock=1) but landing did nothing
+    // (live-diagnosed 2026-07-18: fn 30's entry pointed at RETURN and its
+    // ENTER_FIELD was RESET).
+    // Diamond boarding stays suppressed WITHOUT these patches by the existing
+    // layers: (a)/(b)/(e) neuter the scripted Diamond paths, patchDiamond-
+    // AmbientSpawn kills the 0xEF6.3 ambient arm, FF7Client keeps 0xEF6.3 clear,
+    // and even a rogue engine warp into field 59 is bounced back out by the
+    // crater-entrance FIELD gate (Var[3][131], FieldPickupRandomizer). The
+    // descent itself is gated on crater_lock in System fn 9 (patchCraterLanding).
 
     // (e) Neuter the Diamond emerge cinematic fn (entry slots 28/73): play_sfx 266,
     // set_vertical_speed(+10) emerge, sets Savemap bit 7220 "Diamond emerged". Also
@@ -617,30 +594,36 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
     // tblIdx = the 1-based world field.tbl index the mesh ENTER_FIELD pushes
     // (verified against the shipped field.tbl + flevel maplist, 2026-07-09).
     static const Town towns[] = {
-        {  6, 0x184, 0, "Fort Condor"  },  // condor1
-        {  7, 0x184, 1, "Junon"        },  // ujunon1
-        { 15, 0x184, 2, "North Corel"  },  // ncorel
-        { 14, 0x184, 2, "Mt. Corel"    },  // mtcrl_0 (mountain path = Corel back door, same key)
-        { 18, 0x184, 3, "Cosmo Canyon" },  // cos_btm
-        { 19, 0x184, 4, "Nibelheim"    },  // nivl_3 (entrance 1)
-        { 43, 0x184, 4, "Nibelheim"    },  // nivl_3 (entrance 2, same key)
-        { 44, 0x184, 4, "Mt. Nibel"    },  // mtnvl2 (behind Nibelheim, same key)
-        { 46, 0x184, 4, "Mt. Nibel"    },  // mtnvl4 (behind Nibelheim, same key)
-        { 20, 0x184, 5, "Rocket Town"  },  // rckt
-        { 23, 0x184, 6, "Wutai"        },  // uutai1
-        // tbl#27/#47 are the Great Glacier 'snow' entries, NOT Icicle: they were
-        // wrongly gated as "Icicle Inn" (logic gates the Glacier on Snowboard +
-        // Glacier Map, not a town key) -> ungated. Icicle town is tbl#11.
-        { 11, 0x184, 7, "Icicle Inn"   },  // itown1a
-        { 13, 0x185, 0, "Mideel"       },  // del2 (was mispointed at tbl#11 = Icicle!)
-        { 17, 0x185, 1, "Gongaga"      },  // gonjun2
-        { 25, 0x185, 2, "Bone Village" },  // bonevil
+        {  6, 0x403, 0, "Fort Condor"  },  // condor1
+        {  7, 0x403, 1, "Junon"        },  // ujunon1
+        { 15, 0x403, 2, "North Corel"  },  // ncorel
+        { 14, 0x403, 2, "Mt. Corel"    },  // mtcrl_0 (mountain path = Corel back door, same key)
+        { 18, 0x403, 3, "Cosmo Canyon" },  // cos_btm
+        { 19, 0x403, 4, "Nibelheim"    },  // nivl_3 (entrance 1)
+        { 43, 0x403, 4, "Nibelheim"    },  // nivl_3 (entrance 2, same key)
+        { 44, 0x403, 4, "Mt. Nibel"    },  // mtnvl2 (behind Nibelheim, same key)
+        { 46, 0x403, 4, "Mt. Nibel"    },  // mtnvl4 (behind Nibelheim, same key)
+        { 20, 0x403, 5, "Rocket Town"  },  // rckt
+        { 23, 0x403, 6, "Wutai"        },  // uutai1
+        // CORRECTED 2026-07-15 (verified via field connections):
+        //   snow    (tbl#27/#47) -> snmayor/Gast's House  = ICICLE INN exterior
+        //   itown1a (tbl#11)     -> ithos/itown2          = MIDEEL entrance
+        //   del2    (tbl#13)     = COSTA DEL SOL town      = NOT gated (no key)
+        // A prior edit crossed these — sealing Costa del Sol on the Mideel bit
+        // and Mideel on the Icicle bit. (Great Glacier is the 'hyou' fields, gated
+        // in logic by Snowboard+Glacier Map, not here.)
+        { 27, 0x403, 7, "Icicle Inn"   },  // snow (Icicle exterior, south entrance)
+        { 47, 0x403, 7, "Icicle Inn"   },  // snow (north entrance, same key)
+        { 11, 0x404, 0, "Mideel"       },  // itown1a (Mideel entrance)
+        { 13, 0x404, 3, "Costa del Sol"},  // del2 — sealed on its own key (0x185.3)
+        { 17, 0x404, 1, "Gongaga"      },  // gonjun2
+        { 25, 0x404, 2, "Bone Village" },  // bonevil
         // The Corral Valley strip is the back door into the Sleeping Forest /
         // Bone Village / Forgotten Capital chain — seal all three world entries
         // on the Bone Village key so the area only opens through Bone Village.
-        { 26, 0x185, 2, "Corral Valley Cave" },  // sandun_2 (same key)
-        { 57, 0x185, 2, "Corral Valley"      },  // sango2   (same key)
-        { 58, 0x185, 2, "Corral Valley"      },  // lost1    (same key)
+        { 26, 0x404, 2, "Corral Valley Cave" },  // sandun_2 (same key)
+        { 57, 0x404, 2, "Corral Valley"      },  // sango2   (same key)
+        { 58, 0x404, 2, "Corral Valley"      },  // lost1    (same key)
     };
     const int nTowns = int(sizeof(towns) / sizeof(towns[0]));
 

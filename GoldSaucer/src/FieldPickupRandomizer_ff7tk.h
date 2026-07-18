@@ -119,7 +119,9 @@ private:
         quint16  originalItemId;    // STITM: item index 0-319
         quint8   originalMateriaId; // SMTRA: materia index 0-90
         QString  originalName;
-        quint8   bankByte;          // 0x10 (key items, bank 1) or 0x30 (bank 3)
+        quint8   jsonBank;          // locations.json bank number (client numbering)
+        quint8   bankByte;          // script bank NIBBLE << 4 (jsonBankToNibble;
+                                    // != jsonBank<<4 for json banks >= 5)
         quint8   address;           // savemap address within the dest bank
         quint8   bit;               // bit 0..7
     };

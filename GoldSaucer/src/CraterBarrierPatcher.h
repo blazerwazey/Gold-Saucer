@@ -95,6 +95,13 @@ private:
     // the comparison impossible (push 51 -> push 0xFFFF) so the block is always
     // skipped. Length-preserving (2 bytes), unique anchor, idempotent.
     int patchHighwindDiamondScene(QByteArray& lgp) const;
+    // Make Ultimate Weapon's crater-crash cinematic reachable in Free Roam.
+    // highwind_init runs it (call_function(ultima_weapon, 27)) but only inside
+    // `if Special.unknown_5 == 1`, and the preceding `if unknown_5 == 0` block
+    // ends in a goto that jumps PAST it. Free Roam always enters with
+    // unknown_5 == 0, so the crash was unreachable. Two length-preserving
+    // constant rewrites via the re-offsetting editor. Idempotent.
+    int patchUltimateCrashGate(QByteArray& lgp) const;
 
     // Lower the Northern Crater landing gate in wm0.ev System fn 9 ("crater_landing"):
     //   if Savemap.game_progress >= 1620 then <Highwind descent>

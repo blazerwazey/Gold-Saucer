@@ -24,7 +24,10 @@ public:
     Config();
     
     bool loadFromFile(const QString& filename);
-    bool saveToFile(const QString& filename) const;
+    // includeApJsonPath: the .apff7 path is per-SEED, not a durable preference —
+    // pass false (as the auto-save on Start does) to leave it out so a later launch
+    // doesn't silently reload a stale seed path.
+    bool saveToFile(const QString& filename, bool includeApJsonPath = true) const;
     
     void setFeatureEnabled(Feature feature, bool enabled);
     bool isFeatureEnabled(Feature feature) const;

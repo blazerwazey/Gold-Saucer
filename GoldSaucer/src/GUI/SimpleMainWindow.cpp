@@ -219,9 +219,9 @@ void SimpleMainWindow::setupUI()
     m_seedSpin->setToolTip("Seed value for randomization.\nSame seed = same results, different seed = different randomization.");
     settingsLayout->addWidget(m_seedSpin, 4, 1);
     
-    QPushButton* randomSeedButton = new QPushButton("Random Seed", this);
-    randomSeedButton->setToolTip("Generate a random seed value.");
-    settingsLayout->addWidget(randomSeedButton, 4, 2);
+    m_randomSeedButton = new QPushButton("Random Seed", this);
+    m_randomSeedButton->setToolTip("Generate a random seed value.");
+    settingsLayout->addWidget(m_randomSeedButton, 4, 2);
     
     mainLayout->addLayout(settingsLayout);
     
@@ -249,7 +249,7 @@ void SimpleMainWindow::setupUI()
     // Buttons
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     
-    QPushButton* loadButton = new QPushButton("Load Config", this);
+    m_loadConfigButton = new QPushButton("Load Config", this);
     QPushButton* saveButton = new QPushButton("Save Config", this);
     QPushButton* resetButton = new QPushButton("Reset", this);
     
@@ -261,7 +261,7 @@ void SimpleMainWindow::setupUI()
         "Also pack the randomized files into a 7th Heaven .iro mod archive\n"
         "(in addition to the loose output folder). Import the .iro in 7th Heaven.");
 
-    buttonLayout->addWidget(loadButton);
+    buttonLayout->addWidget(m_loadConfigButton);
     buttonLayout->addWidget(saveButton);
     buttonLayout->addWidget(resetButton);
     buttonLayout->addStretch();
@@ -274,10 +274,10 @@ void SimpleMainWindow::setupUI()
     connect(browseButton, &QPushButton::clicked, this, &SimpleMainWindow::browseFF7Path);
     connect(browseOutputButton, &QPushButton::clicked, this, &SimpleMainWindow::browseOutputFolder);
     connect(startButton, &QPushButton::clicked, this, &SimpleMainWindow::startRandomization);
-    connect(loadButton, &QPushButton::clicked, this, &SimpleMainWindow::loadConfig);
+    connect(m_loadConfigButton, &QPushButton::clicked, this, &SimpleMainWindow::loadConfig);
     connect(saveButton, &QPushButton::clicked, this, &SimpleMainWindow::saveConfig);
     connect(resetButton, &QPushButton::clicked, this, &SimpleMainWindow::resetToDefaults);
-    connect(randomSeedButton, &QPushButton::clicked, this, &SimpleMainWindow::randomSeed);
+    connect(m_randomSeedButton, &QPushButton::clicked, this, &SimpleMainWindow::randomSeed);
     
     // Archipelago connections
     connect(m_importArchipelagoButton, &QPushButton::clicked, this, &SimpleMainWindow::importArchipelagoJSON);
@@ -335,6 +335,23 @@ void SimpleMainWindow::startRandomization()
     
     // Update config
     updateConfig();
+
+    // First run: no config file exists yet, so persist the settings the player just
+    // entered rather than making them find the Save button. Only ever writes when
+    // the file is ABSENT — once it exists, saving stays an explicit action so a
+    // one-off tweak for a single run is never silently made permanent.
+    // The .apff7 path is deliberately excluded (saveToFile's includeApJsonPath):
+    // it belongs to one seed, and a stale path reloaded on the next launch would
+    // silently randomize against the wrong world.
+    {
+        const QString configPath = configFilePath();
+        if (!QFileInfo::exists(configPath)) {
+            if (m_config.saveToFile(configPath, /*includeApJsonPath=*/false))
+                appendConsoleMessage("No config found - saved your settings to: " + configPath);
+            else
+                appendConsoleMessage("WARNING: could not write config to: " + configPath);
+        }
+    }
 
     // Create randomizer and run
     try {
@@ -451,7 +468,7 @@ void SimpleMainWindow::startRandomization()
 
 void SimpleMainWindow::loadConfig()
 {
-    QString configPath = QCoreApplication::applicationDirPath() + "/randomizer_config.json";
+    QString configPath = configFilePath();
     if (m_config.loadFromFile(configPath)) {
         applyConfigToUI();
         appendConsoleMessage(QString("Config loaded from: %1").arg(configPath));
@@ -460,17 +477,43 @@ void SimpleMainWindow::loadConfig()
     }
 }
 
+QString SimpleMainWindow::configFilePath() const
+{
+    return QCoreApplication::applicationDirPath() + "/randomizer_config.json";
+}
+
 void SimpleMainWindow::saveConfig()
 {
     updateConfig();
-    QString configPath = QCoreApplication::applicationDirPath() + "/randomizer_config.json";
+    QString configPath = configFilePath();
     bool saveResult = m_config.saveToFile(configPath);
     appendConsoleMessage(QString("Config saved to: %1 (Success: %2)").arg(configPath).arg(saveResult));
 }
 
 void SimpleMainWindow::resetToDefaults()
 {
+    // Reset restores randomization OPTION defaults. The install path, the output
+    // folder and the .IRO toggle are machine-local output choices, not options —
+    // the same three the seed lock leaves editable — so they survive a Reset rather
+    // than making the player re-browse for their game install.
+    //
+    // Both paths have to be carried across explicitly: Config::setDefaults()
+    // replaces the output folder with the bare "Randomized" placeholder, and it
+    // never touches m_ff7Path, so that one would come back as whatever happened to
+    // be synced last (empty, if the player typed a path and hit Reset before any
+    // import/save/start). Reading the widgets is what makes this correct in every
+    // case — they are the live truth, the config may lag them.
+    const QString ff7Path      = m_ff7PathEdit->text();
+    const QString outputFolder = m_outputFolderEdit->text();
+    const bool    exportIro    = m_iroCheckBox->isChecked();
+
     m_config.setDefaults();
+    clearArchipelagoSeed();   // also releases the option lock via applyConfigToUI
+
+    m_config.setFF7Path(ff7Path);
+    m_config.setOutputFolder(outputFolder);
+    m_config.setExportIro(exportIro);
+
     applyConfigToUI();
 }
 
@@ -511,6 +554,73 @@ void SimpleMainWindow::updateConfig()
     }
 }
 
+// Every control whose value is dictated by the loaded .apff7. A seed pins these
+// on the generation side, so letting the player change them here would silently
+// produce a build that doesn't match the multiworld (wrong seed, a feature the
+// server expects switched off, Free Roam disagreeing with the rules the logic was
+// generated under). Deliberately NOT locked: the two paths + their Browse buttons
+// and the .IRO toggle (all purely local output choices), plus Import (load a
+// different seed), Save Config, Reset and Start.
+QList<QWidget*> SimpleMainWindow::lockableOptionWidgets() const
+{
+    return {
+        m_shopCheckBox, m_fieldCheckBox, m_keyItemCheckBox, m_equipmentCheckBox,
+        m_archipelagoCheckBox, m_freeRoamCheckBox,
+        m_shopPoolSpin, m_shopPriceSpin, m_pickupCombo, m_equipmentCombo,
+        m_seedSpin, m_randomSeedButton,
+        // Loading a config would overwrite the seed-derived settings wholesale,
+        // which is exactly what the lock exists to prevent.
+        m_loadConfigButton,
+    };
+}
+
+void SimpleMainWindow::setOptionsLocked(bool locked)
+{
+    if (locked == m_optionsLocked)
+        return;
+    m_optionsLocked = locked;
+
+    const QString why = QStringLiteral(
+        "Locked by the imported Archipelago seed.\n"
+        "This setting comes from the .apff7 and must match the multiworld.\n"
+        "Use Reset to clear the seed if you want to randomize manually.");
+
+    for (QWidget* w : lockableOptionWidgets()) {
+        if (!w)
+            continue;
+        if (locked) {
+            if (!m_unlockedTooltips.contains(w))
+                m_unlockedTooltips.insert(w, w->toolTip());
+            w->setToolTip(why);
+        } else if (m_unlockedTooltips.contains(w)) {
+            w->setToolTip(m_unlockedTooltips.value(w));
+        }
+        w->setEnabled(!locked);
+    }
+
+    // The Archipelago toggle is an indicator, not a control: meaningless without a
+    // seed and mandatory with one, so it stays disabled either way. Without this
+    // the unlock pass above would re-enable it with no seed loaded.
+    if (m_archipelagoCheckBox)
+        m_archipelagoCheckBox->setEnabled(false);
+
+    appendConsoleMessage(locked
+        ? "Settings locked to the imported Archipelago seed (paths and .IRO export stay editable)"
+        : "Settings unlocked - no Archipelago seed loaded");
+}
+
+// Drop the held seed and release the lock, so the player can go back to a plain
+// manual randomization without restarting.
+void SimpleMainWindow::clearArchipelagoSeed()
+{
+    m_archipelagoJsonPath.clear();
+    m_archipelagoModeEnabled = false;
+    m_config.setApJsonPath(QString());
+    m_config.setFeatureEnabled(Config::ArchipelagoIntegration, false);
+    if (m_archipelagoJsonEdit)
+        m_archipelagoJsonEdit->clear();
+}
+
 void SimpleMainWindow::applyConfigToUI()
 {
     // Features
@@ -525,9 +635,15 @@ void SimpleMainWindow::applyConfigToUI()
     // Archipelago mode (only enable if JSON was imported)
     bool archipelagoConfigEnabled = m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
     QString savedApJson = m_config.getApJsonPath();
-    if (!savedApJson.isEmpty()) {
+    // Only adopt a saved seed path if the file is still there — otherwise we would
+    // come up locked to a .apff7 the player has finished or deleted, with no
+    // obvious way to tell why everything is greyed out.
+    if (!savedApJson.isEmpty() && QFileInfo::exists(savedApJson)) {
         m_archipelagoJsonPath = savedApJson;
         m_archipelagoJsonEdit->setText(QFileInfo(savedApJson).fileName());
+    } else if (!savedApJson.isEmpty()) {
+        appendConsoleMessage("Saved Archipelago seed no longer exists, ignoring: " + savedApJson);
+        m_config.setApJsonPath(QString());
     }
     if (archipelagoConfigEnabled && !m_archipelagoJsonPath.isEmpty()) {
         m_archipelagoCheckBox->setChecked(true);
@@ -552,6 +668,9 @@ void SimpleMainWindow::applyConfigToUI()
     // Paths
     m_outputFolderEdit->setText(m_config.getOutputFolder());
     m_ff7PathEdit->setText(m_config.getFF7Path());
+
+    // Must be last: this disables widgets the branches above just enabled.
+    setOptionsLocked(m_archipelagoModeEnabled && !m_archipelagoJsonPath.isEmpty());
 }
 
 void SimpleMainWindow::appendConsoleMessage(const QString& message)
@@ -583,6 +702,17 @@ void SimpleMainWindow::importArchipelagoJSON()
         return;
     }
     
+    // Capture whatever the user has already entered into the UI BEFORE touching
+    // m_config. The import finishes with applyConfigToUI(), which copies config ->
+    // widgets; on a first launch (no saved config) every unsynced field would be
+    // overwritten with an empty/default value. The line edits are only ever read
+    // into m_config here and in updateConfig() — even the Browse buttons just set
+    // the text — so without this the install path and output folder are CLEARED the
+    // moment a .apff7 is imported (reported by a first-time user). The IRO and key
+    // item checkboxes and the shop pool/price spins were lost the same way, since
+    // the import below never syncs them from the JSON.
+    updateConfig();
+
     // Sync seed and randomizer settings from AP JSON
     {
         const QByteArray seedJson = ApSeedFile::readJson(filePath);
@@ -661,11 +791,18 @@ void SimpleMainWindow::importArchipelagoJSON()
     // Enable Archipelago mode
     m_archipelagoJsonPath = filePath;
     m_config.setApJsonPath(filePath);
+    // Importing a seed IS the enable signal — don't leave this to the JSON's
+    // optional "features" array (updateConfig() above latches it from the
+    // checkbox, which is still unchecked on a first import).
+    m_config.setFeatureEnabled(Config::ArchipelagoIntegration, true);
     m_archipelagoJsonEdit->setText(QFileInfo(filePath).fileName());
     m_archipelagoCheckBox->setEnabled(true);
     m_archipelagoCheckBox->setChecked(true);
     m_archipelagoModeEnabled = true;
     
+    // After the AP widgets above are in their final state, not before.
+    setOptionsLocked(true);
+
     appendConsoleMessage("Archipelago JSON imported: " + QFileInfo(filePath).fileName());
     appendConsoleMessage("Archipelago mode enabled - foreign items will appear in shops and field pickups");
     

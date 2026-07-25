@@ -11,6 +11,7 @@
 #include <QPushButton>
 #include <QGroupBox>
 #include <QSlider>
+#include <QHash>
 #include "../Config.h"
 
 class SimpleMainWindow : public QMainWindow
@@ -33,8 +34,15 @@ private slots:
 private:
     void setupUI();
     void updateConfig();
+    QString configFilePath() const;
     void applyConfigToUI();
     bool validateArchipelagoJSON(const QString& filePath);
+    // Everything a loaded .apff7 dictates gets disabled while a seed is held, so
+    // the player can't desync the build from the multiworld. Paths, the .IRO
+    // toggle and Import/Save/Reset/Start stay live.
+    void setOptionsLocked(bool locked);
+    QList<QWidget*> lockableOptionWidgets() const;
+    void clearArchipelagoSeed();
     
     // UI Elements
     QLineEdit* m_ff7PathEdit;
@@ -53,6 +61,8 @@ private:
     QCheckBox* m_useIntelligentNamingCheckBox;
     QGroupBox* m_previewGroup;
     QPushButton* m_importArchipelagoButton;
+    QPushButton* m_randomSeedButton;
+    QPushButton* m_loadConfigButton;
     QSpinBox* m_shopPoolSpin;
     QSpinBox* m_shopPriceSpin;
     QSpinBox* m_seedSpin;
@@ -65,6 +75,10 @@ private:
     // Archipelago state
     bool m_archipelagoModeEnabled;
     QString m_archipelagoJsonPath;
+
+    // Option-lock state (see setOptionsLocked)
+    bool m_optionsLocked = false;
+    QHash<QWidget*, QString> m_unlockedTooltips;
     
     // Archipelago methods
     void importArchipelagoJson();

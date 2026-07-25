@@ -30,6 +30,8 @@ static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextSt
 // Forward decl: NOP all SPLIT (0x09) opcodes in a field's scripts (reduced-party
 // softlock fix; used by the losinn Free Roam handler).
 static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: NOP the Northern Crater party-split's "party = Cloud only" PRTYE.
+static int nopCraterPartyWipe(QByteArray& d, const QString& fieldName, QTextStream& dbg);
 // Forward decl: reduce one entity script to just its BITON (losinn inn softlock fix).
 static int neuterInnGoScript(QByteArray& d, const QString& fieldName,
                              const QByteArray& entityName,
@@ -569,6 +571,15 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     // the non-leader party members to fixed sleep coords and blocks until they
     // arrive; a single-character party has empty slots that never arrive ->
     // softlock. See nopFieldScriptSplits.
+    // Free Roam: the Northern Crater party splits leave a partial roster with a
+    // solo-Cloud party forever (the "make a new team" screen is gated on MORE than
+    // three characters going Cloud's way). NOP the party-wiping PRTYE — see
+    // nopCraterPartyWipe.
+    if (freeRoam && (fieldName.toLower() == "las0_8" || fieldName.toLower() == "las2_1")) {
+        if (nopCraterPartyWipe(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+    }
+
     if (freeRoam && fieldName.toLower() == "losinn") {
         nopFieldScriptSplits(decompressed, fieldName, debugStream);
         // Forgotten Capital inn: the line-trigger entity "line4" runs the sleep
@@ -1254,6 +1265,47 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                     }
                 } else {
                     debugStream << "  YUFY1: removeAt failed (" << e << ")\n";
+                }
+            }
+        }
+    }
+
+    // sininb2 (Shinra Mansion basement, Vincent's coffin ROOM — the field BEFORE
+    // sininb1's coffin): the `vin` entity's script 16 ends the "I was with...the
+    // Turks" dialogue with a NAME-ENTRY menu for Vincent (49 00 06 07 = MENU type 6
+    // name-entry, char 7). Vincent is an AP item in Free Roam, so that naming screen
+    // should never run — and it is destructive: a player reported that doing this
+    // event after receiving Vincent via AP WIPED the materia slotted to him
+    // (2026-07-23). Opening the name menu makes the engine (re)initialise the
+    // character's record, which clears his equipped materia. Exactly the same
+    // opcode + reason as the Yuffie name-entry removed in yougan2 below, and the
+    // reason sininb1's join removal alone was not enough: the naming lives in a
+    // DIFFERENT field. The dialogue windows either side are kept, so the scene
+    // still plays; only the naming prompt goes.
+    if (freeRoam && fieldName.toLower() == "sininb2") {
+        QString fsErr;
+        FieldScriptEditor ed;
+        if (!ed.parse(decompressed, fsErr)) {
+            debugStream << "  SININB2_NAME: FieldScriptEditor parse failed (" << fsErr << ")\n";
+        } else {
+            const QByteArray anc = QByteArray::fromHex("49000607");  // name-entry menu, Vincent
+            const int i = ed.findOpcode(anc, 0);
+            if (i < 0) {
+                debugStream << "  SININB2_NAME: anchor 49000607 not found\n";
+            } else if (ed.findOpcode(anc, i + 1) >= 0) {
+                debugStream << "  SININB2_NAME: anchor 49000607 ambiguous, skipped\n";
+            } else {
+                QString e;
+                if (ed.removeAt(i, e)) {
+                    QByteArray out = ed.assemble(fsErr);
+                    if (!out.isEmpty()) {
+                        decompressed = out; ++totalMods;
+                        debugStream << "  SININB2_NAME: removed Vincent name-entry menu @instr " << i << ", reassembled\n";
+                    } else {
+                        debugStream << "  SININB2_NAME: assemble failed (" << fsErr << ")\n";
+                    }
+                } else {
+                    debugStream << "  SININB2_NAME: removeAt failed (" << e << ")\n";
                 }
             }
         }
@@ -2149,6 +2201,88 @@ static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextSt
 // no-op) lets the cutscene proceed; the only cost is cosmetic (members aren't
 // repositioned). Walks with the opcode-length table so data bytes that happen to
 // be 0x09 are never touched. Length-preserving, idempotent.
+// Northern Crater party split (las0_8 = first split, las2_1 = second): the scene
+// asks each recruited character to go left or right, then unconditionally runs
+// `PRTYE 0, FE, FE` (party = Cloud, empty, empty) and only re-opens the party
+// select screen when MORE THAN THREE characters chose Cloud's direction:
+//
+//     PRTYE  00 FE FE           ; party = Cloud only
+//     ...    INC temp[12]       ; count Cloud + each same-direction character,
+//                               ; guarded by IFMEMBQ so an un-recruited
+//                               ; character is skipped and never counted
+//     IFUB   temp[12] > 3 -> else skip 16
+//     MENU   00 07 00           ; party select ("make a new team")
+//
+// That assumes vanilla's full 8-9 character roster. In Free Roam the player can
+// hold far fewer, the count cannot exceed 3, the gate is false, the select screen
+// never opens — and the party is left exactly as the PRTYE set it: SOLO CLOUD,
+// permanently (playtester report: "no prompt is given to make a new team, so you
+// only get Cloud... The second party split didn't prompt so you only get Cloud
+// until the final rush").
+//
+// Fix: NOP the party-wiping PRTYE (4 bytes -> 4x 0x5F, length-preserving and
+// idempotent). When the roster IS large enough the select screen still opens and
+// still sets the party, so this only takes effect in the broken case, where it
+// simply leaves the player's existing party alone. The left/right questions and
+// all dialogue are untouched.
+//
+// NOTE: the walk must NOT stop at RET — the target PRTYE lives in the `cloud`
+// entity's S0-MAIN, past the S0-Init RET in the same slot (las0_8: slot offset
+// 1958, Init RET @1962, PRTYE @2344). Breaking on RET finds nothing.
+// las0_1 (`crew`) and las4_0 (`dic`) also wipe the party but re-open the select
+// screen on a different, non-roster-dependent condition, so they are left alone.
+static int nopCraterPartyWipe(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+    quint32 sp[9]; memcpy(sp, d.constData() + 6, 36);
+    int sd = static_cast<int>(sp[0]) + 4;
+    if (sd + 32 > fileSize) return 0;
+    quint8 nb = static_cast<quint8>(d.at(sd + 2));
+    quint16 wstr = 0, nak = 0;
+    memcpy(&wstr, d.constData() + sd + 4, 2);
+    memcpy(&nak,  d.constData() + sd + 6, 2);
+    if (nb == 0) return 0;
+    int names = sd + 32, akao = names + 8 * nb, offt = akao + 4 * nak;
+    if (offt + 64 * nb > fileSize) return 0;
+    int walkEnd = sd + static_cast<int>(wstr);
+    if (nak > 0 && akao + 4 <= fileSize) {
+        quint32 fa = 0; memcpy(&fa, d.constData() + akao, 4);
+        int aa = sd + static_cast<int>(fa);
+        if (aa > offt && aa < walkEnd) walkEnd = aa;
+    }
+    if (walkEnd > fileSize || walkEnd <= offt) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nb); ++e) {
+        quint16 slot[32]; memcpy(slot, d.constData() + offt + 64 * e, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sd + static_cast<int>(slot[s]), g = 0;
+            while (pos < walkEnd && g++ < 8000) {      // deliberately crosses RET
+                int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (static_cast<quint8>(d.at(pos)) == 0xCA && len == 4          // PRTYE
+                    && static_cast<quint8>(d.at(pos + 1)) == 0x00               // Cloud
+                    && static_cast<quint8>(d.at(pos + 2)) == 0xFE               // empty
+                    && static_cast<quint8>(d.at(pos + 3)) == 0xFE) {            // empty
+                    for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(0x5F);
+                    ++nopped;
+                    dbg << "  CRATER_SPLIT: " << fieldName
+                        << " NOP'd party-wipe PRTYE 0,FE,FE @" << (pos - sd) << "\n";
+                }
+                pos += len;
+            }
+        }
+    }
+    if (!nopped)
+        dbg << "  CRATER_SPLIT: " << fieldName << " no party-wipe PRTYE found\n";
+    return nopped;
+}
+
 static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextStream& dbg)
 {
     const int fileSize = d.size();

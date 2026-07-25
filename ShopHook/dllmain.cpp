@@ -89,32 +89,154 @@ static std::string EncodeFF7(const std::string& s) {
     return out;
 }
 
-// Overrides keyed by (kernel text section << 16 | index). The shop grid draws a
-// slot's name via get_kernel_text(section, index, a3=8). Confirmed from logging:
-// section 4 = ALL carried items (consumable/weapon/armor/accessory) by composite
-// id; section 13 = materia by materia id. The client (FF7Client._token_section_index)
-// writes shop_ap.txt with matching <section>:<index> keys.
-static std::map<uint32_t, std::string> g_names;
-
-// Kernel text section ids the shop grid uses (mirrors the client's
-// _token_section_index): section 4 = carried items (composite id), 13 = materia.
+// Overrides keyed by (shop_id, section, index). SHOP-ID-AWARE (2026-07-19): the
+// same real FF7 item/materia id can be AP stock in one shop and vanilla stock in
+// another (or an equippable the player owns) — keying on the open shop id makes
+// every override + purchase signal unambiguous. The shop grid draws a slot's name
+// via get_kernel_text(section, index, a3=8): section 4 = carried items (composite
+// id), 13 = materia. The client writes shop_ap.txt lines <shop>:<section>:<index>=
+// <name>[|<desc>].
 static const uint32_t KTEXT_ITEM    = 4;
 static const uint32_t KTEXT_MATERIA = 13;
 
-static inline uint32_t NameKey(uint32_t section, uint32_t index) {
-    return (section << 16) | (index & 0xFFFF);
+// Current open shop id: FF7 stores it here when a shop opens (found by tracing the
+// shop-setup fn 0x719D7A -> mov [0xDD4724], eax; shop-active flag at 0xDC3D14).
+static const uint32_t CURRENT_SHOP_ID_ADDR = 0xDD4724;
+
+static inline uint32_t CurrentShopId() {
+    __try { return *reinterpret_cast<volatile uint32_t*>(CURRENT_SHOP_ID_ADDR); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0xFFFFFFFFu; }
 }
 
-// Per-slot description overrides (a3==0), keyed identically to g_names. Populated
-// from the optional "|<description>" suffix on each shop_ap.txt line.
-static std::map<uint32_t, std::string> g_descs;
+// 64-bit key: shop_id<<32 | section<<16 | index.
+static inline uint64_t SlotKey(uint32_t shop, uint32_t section, uint32_t index) {
+    return (static_cast<uint64_t>(shop) << 32) | (section << 16) | (index & 0xFFFF);
+}
 
-// Reserved AP-token ids by inventory space, derived from shop_ap.txt sections:
-//   section 4  -> item-space  (composite id, detected in AddItems)
-//   section 13 -> materia-space (materia id, detected in add-materia)
-// Buying one of these is an AP shop purchase: we suppress the grant + signal it.
-static std::set<uint32_t> g_itemTokens;
-static std::set<uint32_t> g_materiaTokens;
+static std::map<uint64_t, std::string> g_names;   // (shop,section,index) -> AP name
+static std::map<uint64_t, std::string> g_descs;   // (shop,section,index) -> AP description
+static std::set<uint64_t> g_apSlots;              // the reserved AP cells (buy suppress+signal)
+
+// Sold AP cells (already-checked locations). The client writes shop_sold.txt as
+// "<shop>:<section>:<index>" lines and rewrites it as checks fire; the DLL reloads
+// it on each shop open and COMPACTS those cells out of the shop's stock so an
+// obtained AP item can't be re-bought (no gil waste). Reserved from a fresh static
+// shop table each game launch, so removal is re-applied every session.
+static std::set<uint64_t> g_soldSlots;
+static std::string        g_soldPath;
+
+// Deferred mid-visit removal: a grant hook fires from DEEP inside FF7's buy code,
+// so we don't edit the shop table there (the buy flow may re-read the entry it
+// just sold). Instead we flag the shop and compact it on the next render frame
+// (get_kernel_text), between transactions — the slot vanishes from the grid the
+// moment the player returns to it, same visit.
+static volatile bool g_removePending = false;
+static uint32_t      g_removeShop    = 0;
+
+// FF7 shop inventory table (Hext-applied AP tokens live here): base 0x923418,
+// 80 records x 0x54. Record: [u16 type][u8 itemCount][u8 pad][10 x {i32 type
+// (0=item/1=materia), u16 index, u16 pad}].
+static const uint32_t SHOP_TABLE = 0x923418;
+
+// Shop buy-list selection state (confirmed live 2026-07-21 by stepping the cursor
+// in shop 11): the selected entry index is CURSOR + SCROLL, the window shows 5
+// rows (cursor maxes at 4). After compacting a sold cell out we MUST clamp both,
+// or the selection can sit past the new end — a "ghost" row backed by stale entry
+// data that would otherwise still be confirmable.
+static const uint32_t SHOP_CURSOR_ADDR  = 0xDD6B84;   // cursor row within the window
+static const uint32_t SHOP_SCROLL_ADDR  = 0xDD6B94;   // index of the top visible row
+static const int      SHOP_VISIBLE_ROWS = 5;
+
+static void LoadSold() {
+    g_soldSlots.clear();
+    if (g_soldPath.empty()) return;
+    std::ifstream f(g_soldPath);
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t c1 = line.find(':'); if (c1 == std::string::npos) continue;
+        size_t c2 = line.find(':', c1 + 1); if (c2 == std::string::npos) continue;
+        uint32_t shop    = strtoul(line.substr(0, c1).c_str(), nullptr, 0);
+        uint32_t section = strtoul(line.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 0);
+        uint32_t index   = strtoul(line.substr(c2 + 1).c_str(), nullptr, 0);
+        g_soldSlots.insert(SlotKey(shop, section, index));
+    }
+}
+
+// Keep the shop selection inside the CURRENT stock. FF7 computes its scroll limit
+// from the list length when the screen is built and does NOT re-clamp when the
+// list shrinks under it, so after an in-visit removal the player could scroll back
+// past the end onto a stale row (never redrawn, so it shows old pixels). Called
+// every render frame while the shop is open: a no-op in range, so it never fights
+// normal scrolling — it only blocks going past the real end.
+static void ClampShopSelection(uint32_t shop) {
+    if (shop >= 80) return;
+    __try {
+        volatile uint8_t* base = reinterpret_cast<volatile uint8_t*>(SHOP_TABLE + shop * 0x54);
+        const int count = base[2];
+        if (count <= 0 || count > 10) return;
+        volatile uint32_t* pCursor = reinterpret_cast<volatile uint32_t*>(SHOP_CURSOR_ADDR);
+        volatile uint32_t* pScroll = reinterpret_cast<volatile uint32_t*>(SHOP_SCROLL_ADDR);
+        int cursor = static_cast<int>(*pCursor);
+        int scroll = static_cast<int>(*pScroll);
+        int maxScroll = count - SHOP_VISIBLE_ROWS; if (maxScroll < 0) maxScroll = 0;
+        if (scroll > maxScroll) scroll = maxScroll;
+        if (scroll < 0) scroll = 0;
+        int maxCursor = count - scroll - 1;
+        if (maxCursor > SHOP_VISIBLE_ROWS - 1) maxCursor = SHOP_VISIBLE_ROWS - 1;
+        if (maxCursor < 0) maxCursor = 0;
+        if (cursor > maxCursor) cursor = maxCursor;
+        if (cursor < 0) cursor = 0;
+        if (static_cast<int>(*pCursor) != cursor) *pCursor = static_cast<uint32_t>(cursor);
+        if (static_cast<int>(*pScroll) != scroll) *pScroll = static_cast<uint32_t>(scroll);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Compact every already-sold AP cell out of the given shop's stock. Idempotent:
+// re-scans after each removal (indices shift), and a cell already gone is skipped.
+static void RemoveSoldFromShop(uint32_t shop) {
+    if (shop >= 80) return;
+    __try {
+        volatile uint8_t* base = reinterpret_cast<volatile uint8_t*>(SHOP_TABLE + shop * 0x54);
+        bool removedAny = false;
+        bool again = true;
+        while (again) {
+            again = false;
+            int count = base[2];
+            if (count <= 0 || count > 10) return;
+            for (int n = 0; n < count; ++n) {
+                volatile uint8_t* e = base + 4 + n * 8;
+                uint32_t etype = *reinterpret_cast<volatile uint32_t*>(const_cast<uint8_t*>(e));
+                uint16_t idx   = *reinterpret_cast<volatile uint16_t*>(const_cast<uint8_t*>(e + 4));
+                uint32_t section = (etype == 1) ? KTEXT_MATERIA : KTEXT_ITEM;
+                uint64_t key = SlotKey(shop, section, idx);
+                if (g_apSlots.count(key) && g_soldSlots.count(key)) {
+                    for (int k = n; k < count - 1; ++k) {
+                        volatile uint8_t* dst = base + 4 + k * 8;
+                        volatile uint8_t* src = base + 4 + (k + 1) * 8;
+                        for (int b = 0; b < 8; ++b) dst[b] = src[b];
+                    }
+                    base[2] = static_cast<uint8_t>(count - 1);
+                    base[3] = 0;   // FF7 reads itemCount as a word; keep the pad byte 0
+                    LogLine("removed sold AP slot shop %u %u:%u (stock %d->%d)\n",
+                            shop, section, idx, count, count - 1);
+                    removedAny = true;
+                    again = true;
+                    break;
+                }
+            }
+        }
+        // Blank the vacated tail entry so a stale row can never be a real item.
+        if (removedAny) {
+            const int count = base[2];
+            if (count >= 0 && count < 10) {
+                volatile uint8_t* tail = base + 4 + count * 8;
+                for (int b = 0; b < 8; ++b) tail[b] = 0xFF;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 
 static void LoadConfig(const std::string& dir) {
     std::ifstream f(dir + "shop_ap.txt");
@@ -134,24 +256,21 @@ static void LoadConfig(const std::string& dir) {
             name = value.substr(0, bar);
             desc = value.substr(bar + 1);
         }
-        uint32_t section, index;
-        size_t colon = key.find(':');
-        if (colon != std::string::npos) {            // new "<section>:<index>"
-            section = strtoul(key.substr(0, colon).c_str(), nullptr, 0);
-            index   = strtoul(key.substr(colon + 1).c_str(), nullptr, 0);
-        } else {                                     // legacy "<itemId>" => item section
-            section = 4;
-            index   = strtoul(key.c_str(), nullptr, 0);
-        }
-        const uint32_t k = NameKey(section, index);
+        // Key = "<shop>:<section>:<index>".
+        size_t c1 = key.find(':');
+        if (c1 == std::string::npos) continue;
+        size_t c2 = key.find(':', c1 + 1);
+        if (c2 == std::string::npos) continue;
+        uint32_t shop    = strtoul(key.substr(0, c1).c_str(), nullptr, 0);
+        uint32_t section = strtoul(key.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 0);
+        uint32_t index   = strtoul(key.substr(c2 + 1).c_str(), nullptr, 0);
+        const uint64_t k = SlotKey(shop, section, index);
         g_names[k] = EncodeFF7(name);
         if (!desc.empty()) g_descs[k] = EncodeFF7(desc);
-        // Track the reserved token id in its inventory space for purchase suppression.
-        if (section == KTEXT_MATERIA) g_materiaTokens.insert(index & 0xFFFF);
-        else                         g_itemTokens.insert(index & 0xFFFF);
+        g_apSlots.insert(k);
     }
-    LogLine("loaded %zu name + %zu description override(s); %zu item + %zu materia token(s)\n",
-            g_names.size(), g_descs.size(), g_itemTokens.size(), g_materiaTokens.size());
+    LogLine("loaded %zu name + %zu description override(s); %zu AP shop slot(s)\n",
+            g_names.size(), g_descs.size(), g_apSlots.size());
 }
 
 // ── get_kernel_text hook: override item names in the shop grid ────────────────
@@ -186,6 +305,19 @@ static int __cdecl hkShopLoop(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     return rv;
 }
 
+// Shop-open setup (FF7 0x719D7A): runs exactly once when a shop is entered, with
+// the shop id as its stack arg, and writes it to 0xDD4724. We run the original,
+// then reload the sold list and compact already-obtained AP cells out of THIS
+// shop's stock — before the grid draws — so they can't be re-bought.
+using ShopOpen_t = void(__cdecl*)(uint32_t);
+static const uint32_t ADDR_SHOP_OPEN = 0x719D7A;
+static ShopOpen_t oShopOpen = nullptr;
+static void __cdecl hkShopOpen(uint32_t shopId) {
+    if (oShopOpen) oShopOpen(shopId);
+    LoadSold();
+    RemoveSoldFromShop(shopId);
+}
+
 // get_kernel_text a3 argument: 8 = name, 0 = description (per this file's header).
 static const uint32_t KTEXT_A3_NAME = 8;
 static const uint32_t KTEXT_A3_DESC = 0;
@@ -208,21 +340,35 @@ static bool ReadGil(uint32_t& out) {
 static const uint32_t kGilSentinel = 0xFFFFFFFFu;
 static uint32_t g_lastGil = kGilSentinel;  // party gil sampled every render (immediate-buy baseline)
 static int      g_pendingToken   = -1;            // token id awaiting a deferred gil-drop
+static uint32_t g_pendingShop    = 0;             // shop id captured when the pending check armed
 static uint32_t g_pendingGil     = 0;             // gil baseline when the pending check armed
 static DWORD    g_pendingTick    = 0;             // GetTickCount() when armed
 static const DWORD kPendingWindowMs = 2500;       // hover→buy must drop gil within this
 
-static void SignalPurchase(uint32_t section, uint32_t index);   // fwd decl
+static void SignalPurchase(uint32_t shop, uint32_t section, uint32_t index);   // fwd decl
 
 static char* __cdecl hkGetKernelText(uint32_t section, uint32_t index, uint32_t a3) {
     if (InMenu()) {
+        // Drain a pending mid-visit removal between transactions (a slot bought
+        // this frame vanishes from the grid on the next redraw).
+        if (g_removePending) {
+            g_removePending = false;
+            RemoveSoldFromShop(g_removeShop);
+        }
+        // Keep the selection inside the live stock every frame — FF7 won't
+        // re-clamp its own scroll after we shorten the list, so without this the
+        // player can scroll back onto a stale (never-redrawn) row.
+        if (g_inShop) ClampShopSelection(CurrentShopId());
         uint32_t g;
         if (ReadGil(g)) {
             // Resolve a pending materia check the moment gil drops below the armed
             // baseline (pay-after-grant); expire it if no drop within the window.
             if (g_pendingToken >= 0) {
                 if (g < g_pendingGil) {
-                    SignalPurchase(KTEXT_MATERIA, static_cast<uint32_t>(g_pendingToken));
+                    SignalPurchase(g_pendingShop, KTEXT_MATERIA, static_cast<uint32_t>(g_pendingToken));
+                    g_soldSlots.insert(SlotKey(g_pendingShop, KTEXT_MATERIA,
+                                               static_cast<uint32_t>(g_pendingToken)));
+                    g_removeShop = g_pendingShop; g_removePending = true;
                     g_pendingToken = -1;
                 } else if (GetTickCount() - g_pendingTick > kPendingWindowMs) {
                     g_pendingToken = -1;   // no gil drop in window -> it was a hover
@@ -246,7 +392,7 @@ static char* __cdecl hkGetKernelText(uint32_t section, uint32_t index, uint32_t 
     // to the shop screen shows AP names where they belong and real names everywhere
     // else. (If g_inShop never trips, the shop harmlessly shows real item names.)
     if (g_inShop) {
-        const uint32_t k = NameKey(section, index);
+        const uint64_t k = SlotKey(CurrentShopId(), section, index);
         if (a3 == KTEXT_A3_NAME) {
             auto it = g_names.find(k);
             if (it != g_names.end())
@@ -268,23 +414,23 @@ static char* __cdecl hkGetKernelText(uint32_t section, uint32_t index, uint32_t 
 // separate DecreaseGil call, so the player still pays.
 static std::string g_buysPath;   // <exe dir>/shop_buys.txt
 
-static void SignalPurchase(uint32_t section, uint32_t index) {
+static void SignalPurchase(uint32_t shop, uint32_t section, uint32_t index) {
     if (g_buysPath.empty()) return;
     // De-dup: one materia buy can be detected twice in the same instant — once by
     // the deferred render-sampler (gil-drop observed) and once by the immediate
     // grant-call path. Both map to the same location, so collapse repeats of the
-    // same (section,index) within a short window into a single signal.
-    static uint32_t s_lastKey  = 0xFFFFFFFFu;
+    // same (shop,section,index) within a short window into a single signal.
+    static uint64_t s_lastKey  = 0xFFFFFFFFFFFFFFFFull;
     static DWORD    s_lastTick  = 0;
-    const uint32_t key = (section << 16) | (index & 0xFFFF);
+    const uint64_t key = SlotKey(shop, section, index);
     const DWORD now = GetTickCount();
     if (key == s_lastKey && now - s_lastTick < 1500) return;
     s_lastKey = key; s_lastTick = now;
     FILE* fp = fopen(g_buysPath.c_str(), "a");
     if (!fp) { LogLine("shop_buys.txt append failed\n"); return; }
-    fprintf(fp, "%u:%u\n", section, index);
+    fprintf(fp, "%u:%u:%u\n", shop, section, index);
     fclose(fp);
-    LogLine("AP shop purchase signalled: %u:%u\n", section, index);
+    LogLine("AP shop purchase signalled: %u:%u:%u\n", shop, section, index);
 }
 
 // AddItems(DWORD word) where word = (qty<<9) | item_id. __cdecl per the FF7 ABI
@@ -294,9 +440,21 @@ static AddItem_t oAddItem = nullptr;
 
 static void __cdecl hkAddItem(uint32_t word) {
     const uint32_t id = word & 0x1FF;
-    if (InMenu() && g_itemTokens.count(id)) {
-        SignalPurchase(KTEXT_ITEM, id);   // suppress the grant entirely
-        return;
+    // Gate on g_inShop (the shop screen), NOT InMenu(): an item-space token id is a
+    // real weapon/armor/item id the player can own and equip. Unequipping a weapon
+    // whose id happens to be a token calls AddItems in the EQUIP menu (g_inShop
+    // false) -> we pass it through so the item returns to inventory and no false
+    // check fires. Only a real buy of the reserved AP cell (this shop + this id)
+    // suppresses + signals.
+    if (g_inShop) {
+        const uint32_t shop = CurrentShopId();
+        const uint64_t key = SlotKey(shop, KTEXT_ITEM, id);
+        if (g_apSlots.count(key)) {
+            SignalPurchase(shop, KTEXT_ITEM, id);   // suppress the grant entirely
+            g_soldSlots.insert(key);                // remove from stock next frame
+            g_removeShop = shop; g_removePending = true;
+            return;
+        }
     }
     if (oAddItem) oAddItem(word);
 }
@@ -307,30 +465,34 @@ static AddMateria_t oAddMateria = nullptr;
 
 static void __cdecl hkAddMateria(uint32_t mid) {
     const uint32_t id = mid & 0xFF;
-    // The grant routine is reached on HOVER as well as on buy, so suppressing+
-    // signalling on every call fires the check on hover. Distinguish by gil drop
-    // (see the discriminator notes above): a buy decreases gil, a hover does not.
-    if (InMenu() && g_materiaTokens.count(id)) {
-        uint32_t gil = 0;
-        const bool have = ReadGil(gil);
-        // (a) pay-before-grant: gil dropped since the last render frame. A hover
-        // never changes gil, so gil == g_lastGil and this stays false (the fix for
-        // hover-firing — the old per-token baseline went stale after other buys).
-        const bool immediate = have && g_lastGil != kGilSentinel && gil < g_lastGil;
-        if (immediate) {
-            LogLine("addMateria token %u: gil %u < lastGil %u -> BUY (immediate)\n",
-                    id, gil, g_lastGil);
-            g_pendingToken = -1;
-            SignalPurchase(KTEXT_MATERIA, id);
-        } else if (have) {
-            // (b) pay-after-grant / first sight: arm a deferred check; the render
-            // sampler fires it if gil drops within the window, else treats it as hover.
-            g_pendingToken = static_cast<int>(id);
-            g_pendingGil   = gil;
-            g_pendingTick  = GetTickCount();
-            LogLine("addMateria token %u: gil %u -> armed pending (await gil drop)\n", id, gil);
+    // Gate on g_inShop + the reserved AP cell for THIS shop (a materia token id can
+    // be a real materia the player owns, or vanilla stock in another shop — only
+    // the exact reserved cell is an AP slot). The grant routine is also reached on
+    // HOVER, so distinguish a buy by gil drop (a buy decreases gil, a hover doesn't).
+    if (g_inShop) {
+        const uint32_t shop = CurrentShopId();
+        if (g_apSlots.count(SlotKey(shop, KTEXT_MATERIA, id))) {
+            uint32_t gil = 0;
+            const bool have = ReadGil(gil);
+            const bool immediate = have && g_lastGil != kGilSentinel && gil < g_lastGil;
+            if (immediate) {
+                LogLine("addMateria shop %u token %u: gil %u < lastGil %u -> BUY\n",
+                        shop, id, gil, g_lastGil);
+                g_pendingToken = -1;
+                SignalPurchase(shop, KTEXT_MATERIA, id);
+                g_soldSlots.insert(SlotKey(shop, KTEXT_MATERIA, id));
+                g_removeShop = shop; g_removePending = true;
+            } else if (have) {
+                // pay-after-grant / first sight: arm a deferred check; the render
+                // sampler fires it if gil drops in the window, else treats it as hover.
+                g_pendingToken = static_cast<int>(id);
+                g_pendingShop  = shop;
+                g_pendingGil   = gil;
+                g_pendingTick  = GetTickCount();
+                LogLine("addMateria shop %u token %u: gil %u -> armed pending\n", shop, id, gil);
+            }
+            return;   // ALWAYS suppress the reserved token grant (never enters inventory)
         }
-        return;   // ALWAYS suppress the reserved token grant (never enters inventory)
     }
     if (oAddMateria) oAddMateria(mid);
 }
@@ -359,6 +521,7 @@ static DWORD WINAPI Init(LPVOID) {
     LoadConfig(dir);
 
     g_buysPath = dir + "shop_buys.txt";
+    g_soldPath = dir + "shop_sold.txt";
 
     if (MH_Initialize() != MH_OK) { LogLine("MH_Initialize failed\n"); return 1; }
     if (g_get_kernel_text &&
@@ -379,20 +542,32 @@ static DWORD WINAPI Init(LPVOID) {
         LogLine("WARN: could not hook menu_shop_loop(0x%X) — shop will show real item names\n", g_menu_shop_loop);
     }
 
-    // Suppress AP-token grants so purchased tokens never enter inventory. Only
-    // hook if there are tokens to watch and the target looks like code.
-    if (!g_itemTokens.empty() && LooksLikeCode(ADDR_ADD_ITEM) &&
+    // Shop-open setup: remove already-obtained AP cells from stock on entry so
+    // they can't be re-bought. Only if there are AP slots to manage.
+    if (!g_apSlots.empty() && LooksLikeCode(ADDR_SHOP_OPEN) &&
+        MH_CreateHook(reinterpret_cast<void*>(ADDR_SHOP_OPEN), &hkShopOpen,
+                      reinterpret_cast<void**>(&oShopOpen)) == MH_OK) {
+        LogLine("shop-open(0x%X) hooked — sold AP slots removed from stock\n", ADDR_SHOP_OPEN);
+    } else if (!g_apSlots.empty()) {
+        LogLine("WARN: could not hook shop-open(0x%X) — sold slots stay buyable\n", ADDR_SHOP_OPEN);
+    }
+
+    // Suppress AP-token grants so purchased tokens never enter inventory. Both
+    // grant routines are hooked whenever any AP slot exists; the hooks themselves
+    // are scoped to (g_inShop && the reserved cell), so a non-AP add passes through.
+    const bool haveSlots = !g_apSlots.empty();
+    if (haveSlots && LooksLikeCode(ADDR_ADD_ITEM) &&
         MH_CreateHook(reinterpret_cast<void*>(ADDR_ADD_ITEM), &hkAddItem,
                       reinterpret_cast<void**>(&oAddItem)) == MH_OK) {
         LogLine("AddItems(0x%X) hooked — item-token grants suppressed\n", ADDR_ADD_ITEM);
-    } else if (!g_itemTokens.empty()) {
+    } else if (haveSlots) {
         LogLine("WARN: could not hook AddItems(0x%X) — item tokens NOT suppressed\n", ADDR_ADD_ITEM);
     }
-    if (!g_materiaTokens.empty() && LooksLikeCode(ADDR_ADD_MATERIA) &&
+    if (haveSlots && LooksLikeCode(ADDR_ADD_MATERIA) &&
         MH_CreateHook(reinterpret_cast<void*>(ADDR_ADD_MATERIA), &hkAddMateria,
                       reinterpret_cast<void**>(&oAddMateria)) == MH_OK) {
         LogLine("AddMateria(0x%X) hooked — materia-token grants suppressed\n", ADDR_ADD_MATERIA);
-    } else if (!g_materiaTokens.empty()) {
+    } else if (haveSlots) {
         LogLine("WARN: could not hook AddMateria(0x%X) — materia tokens NOT suppressed\n", ADDR_ADD_MATERIA);
     }
 

@@ -157,7 +157,7 @@ bool Config::loadFromFile(const QString& filename)
     return true;
 }
 
-bool Config::saveToFile(const QString& filename) const
+bool Config::saveToFile(const QString& filename, bool includeApJsonPath) const
 {
     QJsonObject root;
     
@@ -205,8 +205,11 @@ bool Config::saveToFile(const QString& filename) const
     // Save FF7 path settings
     root["ff7Path"] = m_ff7Path;
 
-    // Save Archipelago JSON path
-    root["apJsonPath"] = m_apJsonPath;
+    // Save Archipelago JSON path (omitted by the auto-save on Start: it belongs to
+    // one specific seed, so persisting it would make the next launch come up
+    // pointing at a .apff7 the player may have already finished or deleted).
+    if (includeApJsonPath)
+        root["apJsonPath"] = m_apJsonPath;
 
     // Save Free Roam setting
     root["freeRoam"] = m_freeRoam;

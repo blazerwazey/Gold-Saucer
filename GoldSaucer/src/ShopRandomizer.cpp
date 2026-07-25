@@ -437,11 +437,15 @@ void ShopRandomizer::mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTe
     // is a debug hub field unreachable in Free Roam.)
     static const struct { int early; int late; } kStoryShopVariants[] = {
         { 16, 51 }, { 17, 52 },   // Fort Condor   item / materia
-        { 19, 54 },               // Lower Junon   weapon 2
-        // Upper Junon item (early id 20) is opened by TWO Free Roam-reachable late
-        // fields (55 + 59). Cloning it whole into both makes them identical ("two
-        // shops, one stock"), so it is SPLIT across 55/59 below instead.
-        { 22, 57 },               // Upper Junon   weapon
+        { 19, 54 },               // Upper Junon   weapon #1
+        { 20, 55 },               // Upper Junon   item
+        // 59 is the D2 variant of shop 24 (Upper Junon Materia #2), NOT a second
+        // late id for the item shop 20 — see shopName(). Treating it as the latter
+        // split shop 20's stock across 55/59 AND overwrote shop 24, so every AP
+        // token in 24 ("Upper Junon Materia 2 - AP Slot") existed in no reachable
+        // shop at all. Mirror each to its own D2 id instead.
+        { 24, 59 },               // Upper Junon   materia #2
+        { 22, 57 },               // Upper Junon   weapon #2
         { 23, 58 },               // Upper Junon   accessory
         { 26, 60 },               // Costa del Sol weapon
         { 27, 61 },               // Costa del Sol materia
@@ -486,7 +490,10 @@ void ShopRandomizer::mirrorFreeRoamStoryShops(QVector<ExeShopRecord>& shops, QTe
             << ") across late " << a << " (" << na << " items) + " << b
             << " (" << nb << " items)\n";
     };
-    splitStoryShop(20, 55, 59);
+    // (No split needed: 20->55 and 24->59 are plain 1:1 mirrors above.
+    //  splitStoryShop is kept for any future shop that genuinely has two
+    //  Free Roam-reachable late ids.)
+    Q_UNUSED(splitStoryShop);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -386,6 +386,123 @@ int CraterBarrierPatcher::patchDiamondBoardingScene(QByteArray& lgp) const
     return patched;
 }
 
+int CraterBarrierPatcher::patchUltimateCrashGate(QByteArray& lgp) const
+{
+    int dataStart = 0, dataSize = 0;
+    if (!findWm0(lgp, dataStart, dataSize)) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): wm0.ev not found";
+        return 0;
+    }
+
+    // Ultimate Weapon's crater crash is NOT in his own scripts — the HIGHWIND's
+    // init calls it:
+    //     if Special.unknown_5 == 0 then ... goto label_1 end       <- line 1/24
+    //     if Special.unknown_5 == 1 then
+    //       if weapons_killed.bit[0] and !submarine_flags.bit[4]
+    //          and 0xF2B.bit[0] then
+    //            ... position at the crater, camera, music off ...
+    //            System.call_function(Entities.ultima_weapon, 27)
+    //
+    // Free Roam always enters the overworld with unknown_5 == 0, so the FIRST
+    // block's `goto label_1` jumps straight past the crash block and it can never
+    // run (playtester 2026-07-23: he dies and the crater appears, but the crash
+    // cinematic never plays). Its own savemap conditions are already satisfied by
+    // the client, so the only thing in the way is which unknown_5 branch is taken.
+    //
+    // Two length-preserving PUSH_CONSTANT rewrites:
+    //   line 1  `unknown_5 == 0` -> `== 0xFFFF`  (never true; no goto skip)
+    //   line 26 `unknown_5 == 1` -> `== 0`       (matches the normal overworld)
+    // The block we bypass is already inert — patchHighwindDiamondScene deletes its
+    // inner Diamond if, leaving only that goto. Anchored on the fn-27 CALL and
+    // walked backwards, so it survives the instruction shifts that patch causes.
+    QByteArray ev = lgp.mid(dataStart, dataSize);
+    WorldScriptEditor w;
+    QString err;
+    if (!w.parse(ev, err)) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): wm0 parse failed —" << err;
+        return 0;
+    }
+
+    // call_function(ultima_weapon, 27): CALL_FN_27 = 0x204 + 27, preceded by
+    // PUSH_CONSTANT 11 (the ultima_weapon entity id).
+    const quint16 kCallFn27 = 0x204 + 27;
+    int callIdx = -1;
+    for (int i = w.findOpcode(kCallFn27); i >= 0; i = w.findOpcode(kCallFn27, i + 1)) {
+        if (i >= 1 && w.opAt(i - 1) == 0x110 && w.paramAt(i - 1, 0) == 11) {
+            callIdx = i;
+            break;
+        }
+    }
+    if (callIdx < 0) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): fn-27 call not found";
+        return 0;
+    }
+
+    // Walk back for the enclosing `unknown_5 == 1` gate, then the earlier
+    // `unknown_5 == 0` gate. Shape: RESET; PUSH_SPECIAL 5; PUSH_CONSTANT n; EQ;
+    // GOTO_IF_FALSE. We return the index of the PUSH_CONSTANT.
+    auto findGate = [&w](int from, quint16 want) -> int {
+        for (int i = from; i >= 4; --i) {
+            if (w.opAt(i) == 0x201                                     // GOTO_IF_FALSE
+                && w.opAt(i - 1) == 0x070                              // EQ
+                && w.opAt(i - 2) == 0x110 && w.paramAt(i - 2, 0) == want
+                && w.opAt(i - 3) == 0x11b && w.paramAt(i - 3, 0) == 5)  // Special[5]
+                return i - 2;
+        }
+        return -1;
+    };
+    const int gateOne  = findGate(callIdx, 1);
+    if (gateOne < 0) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): unknown_5==1 gate not found "
+                    "(already patched?)";
+        return 0;
+    }
+    const int gateZero = findGate(gateOne, 0);
+    if (gateZero < 0) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): unknown_5==0 gate not found";
+        return 0;
+    }
+
+    auto pushConst = [](quint16 v) {
+        QByteArray b(4, '\0');
+        b[0] = char(0x10); b[1] = char(0x01);
+        b[2] = char(v & 0xFF); b[3] = char((v >> 8) & 0xFF);
+        return b;
+    };
+    // Make the outcome INDEPENDENT of unknown_5 rather than guessing its value.
+    // An earlier attempt assumed Free Roam entered with unknown_5 == 0 and simply
+    // swapped the two constants; the patch verified as applied in the deployed IRO
+    // yet the crash still never fired, so unknown_5 is neither 0 nor 1 here. Each
+    // gate is `RESET; PUSH_SPECIAL[5]; PUSH_CONSTANT n; EQ; GOTO_IF_FALSE`, so
+    // replacing the PUSH_SPECIAL with a PUSH_CONSTANT turns the test into a
+    // comparison of two literals with a fixed result:
+    //     outer (line 1)  -> `1 == 0`  = false : never taken, so its goto can no
+    //                                            longer skip the crash block
+    //     inner (line 26) -> `0 == 0`  = true  : always entered
+    // The crash then depends only on its real savemap conditions (bit0 set, bit4
+    // clear, 0xF2B.0 set), which the client already satisfies. Both instructions
+    // are 4 bytes, so this stays length-preserving.
+    const int outerSpecial = gateZero - 1;   // PUSH_SPECIAL[5] of the outer gate
+    const int innerSpecial = gateOne  - 1;   // PUSH_SPECIAL[5] of the inner gate
+    // All four or none — never leave the script half-rewritten.
+    if (!w.replaceAt(innerSpecial, pushConst(0), err)
+        || !w.replaceAt(gateOne, pushConst(0), err)
+        || !w.replaceAt(outerSpecial, pushConst(1), err)
+        || !w.replaceAt(gateZero, pushConst(0), err)) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): replaceAt failed —" << err;
+        return 0;
+    }
+    const QByteArray out = w.assemble(err);
+    if (out.isEmpty()) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): assemble failed —" << err;
+        return 0;
+    }
+    lgp.replace(dataStart, dataSize, out);
+    qDebug() << "CraterBarrierPatcher(ultimate-crash): crater-crash cinematic re-gated "
+                "(unknown_5 checks made constant: outer false, inner true)";
+    return 1;
+}
+
 int CraterBarrierPatcher::patchHighwindDiamondScene(QByteArray& lgp) const
 {
     int dataStart = 0, dataSize = 0;
@@ -769,6 +886,18 @@ bool CraterBarrierPatcher::patch()
     // wm0.ev, so it must run AFTER all the byte-anchor patches above (barrier,
     // Diamond spawns, crater landing) — their anchors would otherwise shift.
     m_highwindScenePatched = patchHighwindDiamondScene(lgp);
+    // DISABLED 2026-07-25. patchUltimateCrashGate makes Ultimate's crater-crash
+    // cinematic reachable by neutralising highwind_init's `Special.unknown_5`
+    // gates. Verified applied in both the randomized lgp and the exported IRO —
+    // but the crash STILL did not play, and enabling it brought back the second
+    // Ultimate fight the client had just fixed. Two attempts (constant swap, then
+    // making both gates literal-constant) behaved the same. The cinematic is
+    // cosmetic; the run completes without it (he dies, no loop, crater appears on
+    // the next world-map load), so this is left OFF rather than trading a working
+    // endgame for an animation. The method is kept for a future attempt — the
+    // unexplained part is what else highwind_init's crash block disturbs when it
+    // runs at a point Free Roam never intended.
+    // patchUltimateCrashGate(lgp);
 
     // Free Roam welcome banner: overwrite the world save-tutorial message (id 53,
     // shown on first world-map entry) with the FF7 Archipelago welcome text.

@@ -398,18 +398,29 @@ void SimpleMainWindow::startRandomization()
             appendConsoleMessage("Field pickup randomization completed successfully");
         }
         
-        if (m_config.isFeatureEnabled(Config::StartingEquipmentRandomization)) {
+        // ALWAYS run the kernel init-data pass: it also sets Cloud's starting
+        // level, which must apply whether or not starting-equipment
+        // randomization is enabled. The flag gates only the equipment shuffle.
+        {
+            const bool shuffleEquipment =
+                m_config.isFeatureEnabled(Config::StartingEquipmentRandomization);
             m_progressBar->setValue(75);
-            m_statusLabel->setText("Randomizing Starting Equipment...");
-            appendConsoleMessage("Randomizing Starting Equipment...");
+            m_statusLabel->setText(shuffleEquipment
+                                       ? "Randomizing Starting Equipment..."
+                                       : "Applying Starting Levels...");
+            appendConsoleMessage(shuffleEquipment
+                                     ? "Randomizing Starting Equipment..."
+                                     : "Applying starting levels (equipment shuffle off)...");
             QApplication::processEvents();
-            
-            if (!randomizer.randomizeStartingEquipment()) {
-                appendConsoleMessage("ERROR: Starting equipment randomization failed");
-                QMessageBox::critical(this, "Error", "Starting equipment randomization failed");
+
+            if (!randomizer.randomizeStartingEquipment(shuffleEquipment)) {
+                appendConsoleMessage("ERROR: Starting equipment/level pass failed");
+                QMessageBox::critical(this, "Error", "Starting equipment/level pass failed");
                 return;
             }
-            appendConsoleMessage("Starting equipment randomization completed successfully");
+            appendConsoleMessage(shuffleEquipment
+                                     ? "Starting equipment randomization completed successfully"
+                                     : "Starting levels applied successfully");
         }
 
         if (m_config.getFreeRoam()) {

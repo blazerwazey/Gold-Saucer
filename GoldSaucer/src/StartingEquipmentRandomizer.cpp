@@ -112,7 +112,7 @@ StartingEquipmentRandomizer::StartingEquipmentRandomizer(Randomizer* parent)
 
 // Use FF7tk's GZIP class for proper decompression/compression
 
-bool StartingEquipmentRandomizer::randomize()
+bool StartingEquipmentRandomizer::randomize(bool shuffleEquipment)
 {
     QString outputPath = m_parent->getOutputPath();
     QDir().mkpath(outputPath);
@@ -206,8 +206,24 @@ bool StartingEquipmentRandomizer::randomize()
     }
     log("Section 3 decompressed: " + QString::number(initData.size()) + " bytes");
 
+    // --- starting levels (ALWAYS, even with equipment randomization off) -----
+    // Needs section 2 (Battle and growth data) for the growth curves.
+    QByteArray growthData;
+    if (sections.size() > 2) {
+        const KSection& sec2 = sections[2];
+        growthData = GZIP::decompress(raw.mid(sec2.offset + SECTION_HEADER_SIZE,
+                                              sec2.compSize), sec2.decSize);
+        if (growthData.isEmpty())
+            log("WARNING: could not decompress section 2 — starting levels skipped");
+    }
+    applyStartingLevels(initData, growthData);
+
     // --- randomize character equipment ---------------------------------------
-    randomizeStartingEquipment(initData);
+    if (shuffleEquipment) {
+        randomizeStartingEquipment(initData);
+    } else {
+        log("Starting-equipment shuffle DISABLED by config — levels only.");
+    }
 
     // --- recompress section 3 ------------------------------------------------
     QByteArray sec3Recompressed = GZIP::compress(initData);
@@ -781,4 +797,133 @@ QString StartingEquipmentRandomizer::generateReplacementName(quint16 itemId, Ite
         default:
             return prefix + " Item " + QString::number(itemId % 10 + 1);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Starting levels
+// ---------------------------------------------------------------------------
+// Cloud begins a vanilla game at LEVEL 6 (kernel section 3: stats 20/16/19/17/6/14,
+// HP 314, MP 54, exp 610). This raises him, and rebuilds the derived fields so he
+// is a genuine level-N character rather than a level-6 one wearing a bigger number.
+//
+// Patching the kernel INIT RECORD (not the live savemap) is deliberate: it is the
+// data a new game is built from, so it needs no runtime guard, cannot re-level a
+// character who has already progressed, and survives a Free Roam game over —
+// all of which a client-side write would have to handle.
+namespace {
+constexpr int kCloudStartLevel = 15;      // change this to change the level
+
+// FF7CHAR (kernel section 3 init records, 132 bytes each)
+constexpr int kCharRecordSize = 132;
+constexpr int kChrLevel = 0x01, kChrStats = 0x02;
+constexpr int kChrCurHP = 0x2C, kChrBaseHP = 0x2E;
+constexpr int kChrCurMP = 0x30, kChrBaseMP = 0x32;
+constexpr int kChrExp = 0x3C, kChrExpToNext = 0x80;
+
+// Growth curves in kernel section 2 — layout validated against the shipped kernel
+// (see the FF7pelago client, which computes Vincent/Cait Sith the same way).
+constexpr int kGrowRecordSize = 56;       // 9 curve indices per character
+constexpr int kGrowCurveBase = 540;
+constexpr int kGrowCurveStride = 16;
+const int kGrowBandMax[8] = { 11, 21, 31, 41, 51, 61, 81, 99 };
+
+// Total EXP required to BE a given level. FF7's level table is fixed data, not
+// derivable from the section-2 exp curve (checked: the curve/threshold ratio
+// drifts 2.77 -> 3.02 across levels). These two were read out of real save files:
+// `exp + exp_to_next` at a known level IS that level's threshold, exactly.
+constexpr quint32 kExpAtLevel15 = 7200;
+constexpr quint32 kExpAtLevel16 = 8797;
+
+void put16(QByteArray& d, int off, quint16 v) {
+    d[off]     = char(v & 0xFF);
+    d[off + 1] = char((v >> 8) & 0xFF);
+}
+void put32(QByteArray& d, int off, quint32 v) {
+    for (int i = 0; i < 4; ++i) d[off + i] = char((v >> (8 * i)) & 0xFF);
+}
+}  // namespace
+
+bool StartingEquipmentRandomizer::growthStatsAt(const QByteArray& g, int characterId,
+                                                int level, quint8 stats[6],
+                                                quint16& hp, quint16& mp) const
+{
+    if (g.isEmpty()) return false;
+    level = qBound(1, level, 99);
+    const int rec = characterId * kGrowRecordSize;
+    if (rec + 9 > g.size()) return false;
+    if (kGrowCurveBase + 64 * kGrowCurveStride > g.size()) return false;
+
+    int band = 7;
+    for (int i = 0; i < 8; ++i) { if (level <= kGrowBandMax[i]) { band = i; break; } }
+
+    // (gradient, base) for curve `idx`; base is SIGNED.
+    auto curve = [&](int idx, int& grad, int& base) -> bool {
+        const int off = kGrowCurveBase + idx * kGrowCurveStride + band * 2;
+        if (off + 1 >= g.size()) return false;
+        grad = quint8(g[off]);
+        const int b = quint8(g[off + 1]);
+        base = (b > 127) ? b - 256 : b;
+        return true;
+    };
+
+    for (int i = 0; i < 8; ++i)
+        if (quint8(g[rec + i]) >= 64) return false;     // record looks unusable
+
+    int grad = 0, base = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (!curve(quint8(g[rec + i]), grad, base)) return false;
+        stats[i] = quint8(qBound(1, base + grad * level / 100, 255));
+    }
+    if (!curve(quint8(g[rec + 6]), grad, base)) return false;
+    hp = quint16(qBound(1, base * 40 + level * grad, 9999));
+    if (!curve(quint8(g[rec + 7]), grad, base)) return false;
+    mp = quint16(qBound(1, base * 2 + grad * level / 10, 999));
+    return true;
+}
+
+void StartingEquipmentRandomizer::applyStartingLevels(QByteArray& initData,
+                                                      const QByteArray& growthData)
+{
+    if (growthData.isEmpty()) {
+        log("Starting levels: no growth data — SKIPPED (Cloud stays at his "
+            "vanilla starting level).");
+        return;
+    }
+    const int cid = Cloud;
+    const int rec = cid * kCharRecordSize;
+    if (rec + kCharRecordSize > initData.size()) {
+        log("Starting levels: init record out of range — SKIPPED");
+        return;
+    }
+
+    quint8 stats[6] = {0};
+    quint16 hp = 0, mp = 0;
+    if (!growthStatsAt(growthData, cid, kCloudStartLevel, stats, hp, mp)) {
+        log("Starting levels: growth curve unreadable — SKIPPED");
+        return;
+    }
+
+    const int was = quint8(initData[rec + kChrLevel]);
+    initData[rec + kChrLevel] = char(kCloudStartLevel);
+    for (int i = 0; i < 6; ++i) initData[rec + kChrStats + i] = char(stats[i]);
+    // cur == base for a fresh character; maxHP/maxMP are left as the kernel's
+    // sentinel (0xFFFF) exactly as vanilla ships them - the engine recomputes
+    // those from base + equipment/materia when the game starts.
+    put16(initData, rec + kChrBaseHP, hp);
+    put16(initData, rec + kChrCurHP,  hp);
+    put16(initData, rec + kChrBaseMP, mp);
+    put16(initData, rec + kChrCurMP,  mp);
+    // Without this he would carry level-6 EXP and be promoted to 16 after a
+    // single fight; exp_to_next is the gap to the NEXT level, not a total.
+    put32(initData, rec + kChrExp,       kExpAtLevel15);
+    put32(initData, rec + kChrExpToNext, kExpAtLevel16 - kExpAtLevel15);
+
+    log(QString("Starting level: Cloud %1 -> %2  stats %3/%4/%5/%6/%7/%8  "
+                "HP %9  MP %10  exp %11 (+%12 to next)")
+            .arg(was).arg(kCloudStartLevel)
+            .arg(stats[0]).arg(stats[1]).arg(stats[2])
+            .arg(stats[3]).arg(stats[4]).arg(stats[5])
+            .arg(hp).arg(mp)
+            .arg(kExpAtLevel15).arg(kExpAtLevel16 - kExpAtLevel15));
 }

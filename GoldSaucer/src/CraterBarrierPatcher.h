@@ -103,6 +103,20 @@ private:
     // constant rewrites via the re-offsetting editor. Idempotent.
     int patchUltimateCrashGate(QByteArray& lgp) const;
 
+    // Keep Ultimate Weapon's MODEL loaded until the crater crash has actually
+    // played. The overworld model-loader has two arms, selected by
+    // `Special[5] == 0` at wm0 0x058E: block 1 (what Free Roam always runs) loads
+    // model 11 only while `!weapons_killed.bit[0]`, so a dead Ultimate is not
+    // loaded at all; the crash-scene loader that DOES load him once he is dead
+    // lives in block 2 (0x14AA), which Free Roam never reaches. Result:
+    // `call_function(ultima_weapon, 27)` fires at an entity that does not exist and
+    // silently no-ops — the cinematic's real failure. Fix: in block 1 (and the
+    // matching block 3), swap the load gate from `!bit 984` (Ultimate killed) to
+    // `!bit 7220` (submarine_flags.bit[4] = crash done), so he stays loaded through
+    // the crash and unloads immediately after. 4-byte length-preserving rewrite at
+    // exactly 2 sites; idempotent.
+    int patchUltimateModelLoad(QByteArray& lgp) const;
+
     // Lower the Northern Crater landing gate in wm0.ev System fn 9 ("crater_landing"):
     //   if Savemap.game_progress >= 1620 then <Highwind descent>
     // Free Roam runs at game moment 1603, so the descent never fires. We rewrite

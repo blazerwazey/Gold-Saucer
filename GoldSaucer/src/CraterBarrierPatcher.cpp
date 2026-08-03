@@ -315,18 +315,33 @@ int CraterBarrierPatcher::patchDiamondBoardingScene(QByteArray& lgp) const
     // preserving; the enclosing weapon-battle branches are untouched.
     int patched = 0;
 
-    // (a) Neuter the model-29 proximity caller: PUSH 29 ; CALL_FN_28 -> PUSH 29 ; RESET.
-    const QByteArray callVanilla = QByteArray::fromHex("10011d002002");   // PUSH 29 ; CALL_FN_28
-    const QByteArray callPatched = QByteArray::fromHex("10011d000001");   // PUSH 29 ; RESET
-    const int at = lgp.indexOf(callVanilla, dataStart);
-    if (at >= 0 && at < dataEnd) {
-        lgp.replace(at, callVanilla.size(), callPatched);
-        ++patched;
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): neutered Diamond proximity call @0x"
-                 + QString::number(at, 16);
-    } else if (lgp.indexOf(callPatched, dataStart) < 0) {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): PUSH 29 ; CALL_FN_28 not found";
-    }
+    // (a) REMOVED 2026-07-27 — IT WAS RUBY'S FIGHT TRIGGER, NOT DIAMOND'S.
+    //
+    // It neutered `PUSH 29 ; CALL_FN_28` (10 01 1d 00 20 02) at wm0 0x6514,
+    // believing it to be "the Diamond Weapon's world-map proximity handler".
+    // **Model 29 is RUBY** (model 10 is Diamond), and 0x6514 sits inside
+    // `ruby_weapon fn 2` — Ruby's own update loop:
+    //
+    //     push 982 ; trigger_battle           <- Ruby's battle formation
+    //     ...
+    //     Special[8] ; distance_to_entity ; push 130 ; <=
+    //     push 29 ; CALL_FN_28                <- call_function(ruby_weapon, 28)
+    //
+    // fn 28 (model 29, slot 93 @0x62C4) is Ruby's approach cinematic — control
+    // lock, camera, set_dimensions — the thing that starts his fight. Turning that
+    // call into RESET is exactly why the player could SEE Ruby but never engage
+    // him (reported 2026-07-27).
+    //
+    // Diamond's real fn 28 is a DIFFERENT body at 0x3AA8 (model 10, slots 29/68):
+    // sets bit 7205, set_vertical_speed(-10), show_layer — the rise from the ocean.
+    // That one is handled by (b) below and is correct. Diamond stays suppressed by
+    // (b) + patchDiamondAmbientSpawn + patchHighwindDiamondScene +
+    // patchDiamondWeaponSpawn; (a) never contributed to that at all.
+    //
+    // Sibling of the same mistake in (e) below, which RETURN'd ultima_weapon_27.
+    // BOTH came from reading a `PUSH <n> ; CALL_FN_x` as a model-10 reference.
+    // ALWAYS resolve the pushed constant against Landscaper's model table, and
+    // check which call-table slots point at the target body, before neutering it.
 
     // (b) DEFINITIVE: neuter diamond_weapon fn 28 (Landscaper "System 28") ITSELF — the
     // rise-from-ocean cinematic + enter_field(highwind_bridge_4) map jump that fires on
@@ -366,22 +381,34 @@ int CraterBarrierPatcher::patchDiamondBoardingScene(QByteArray& lgp) const
     // crater-entrance FIELD gate (Var[3][131], FieldPickupRandomizer). The
     // descent itself is gated on crater_lock in System fn 9 (patchCraterLanding).
 
-    // (e) Neuter the Diamond emerge cinematic fn (entry slots 28/73): play_sfx 266,
-    // set_vertical_speed(+10) emerge, sets Savemap bit 7220 "Diamond emerged". Also
-    // engine-reachable; RETURN its head. Anchor extends through the PUSH 266 ; PLAY_SFX
-    // to be unique (the bare head shape appears 6x in wm0.ev).
-    const QByteArray emergeVanilla = QByteArray::fromHex("000110010400100100000e03000110010a011d03");
-    const int e = lgp.indexOf(emergeVanilla, dataStart);
-    if (e >= 0 && e < dataEnd) {
-        lgp[e] = char(0x03); lgp[e + 1] = char(0x02);   // RESET -> RETURN
-        ++patched;
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): RETURN'd Diamond emerge fn @0x"
-                 + QString::number(e, 16);
-    } else if (lgp.indexOf(QByteArray::fromHex("030210010400100100000e03000110010a011d03"), dataStart) >= 0) {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): Diamond emerge fn already neutered";
-    } else {
-        qDebug() << "CraterBarrierPatcher(diamond-boarding): Diamond emerge anchor not found";
-    }
+    // (e) REMOVED 2026-07-27 — IT WAS NEVER A DIAMOND FUNCTION.
+    //
+    // It claimed to neuter a "Diamond emerge cinematic fn (entry slots 28/73)" by
+    // writing RETURN over the head of the body at wm0 0x32E0. That body is
+    // **`ultima_weapon_27` — Ultimate Weapon's Northern Crater crash cinematic**.
+    // The call table exposes it twice (slot 28 = System fn 27, slot 73 = model 11
+    // fn 27), and "slots 28/73" is what made it look like a sibling of the real
+    // Diamond fn 28 at 0x3AA8 (slot 29 / model 10 fn 28, handled by (b) above).
+    //
+    // The comment even described the function correctly and I misread it:
+    // play_sfx 266, set_vertical_speed(+10), and "sets Savemap bit 7220" are fn 27
+    // lines 2, 4 and 11 — and bit 7220 is **submarine_flags.bit[4]**, Ultimate's
+    // CRASH-DONE flag, not anything of Diamond's.
+    //
+    // Effect of the bug: fn 27 returned on its first instruction. `highwind_init`
+    // still ran the crash block (Highwind hidden, music cut, player teleported to
+    // the crater) and still issued `call_function(ultima_weapon, 27)` — which did
+    // nothing. bit[4] was never set, and because fn 27 never occupied Ultimate's
+    // script thread his `update` kept running and re-triggered battle 287 ~0.4s
+    // later. That is the entire multi-day "crater crash never plays" investigation.
+    //
+    // Diagnosed by the user with a clean controlled test: the SAME vanilla save
+    // played the death sequence without the Gold Saucer mod and not with it, which
+    // ruled out every savemap-flag theory in one step. Diamond boarding stays
+    // suppressed by (a), (b), patchDiamondAmbientSpawn and the field gate.
+    //
+    // DO NOT re-add an anchor here without checking which call-table slots point at
+    // the body: `slots[0x32E0] = System fn 27 + model 11 fn 27`.
 
     return patched;
 }
@@ -394,27 +421,33 @@ int CraterBarrierPatcher::patchUltimateCrashGate(QByteArray& lgp) const
         return 0;
     }
 
-    // Ultimate Weapon's crater crash is NOT in his own scripts — the HIGHWIND's
-    // init calls it:
-    //     if Special.unknown_5 == 0 then ... goto label_1 end       <- line 1/24
-    //     if Special.unknown_5 == 1 then
-    //       if weapons_killed.bit[0] and !submarine_flags.bit[4]
-    //          and 0xF2B.bit[0] then
-    //            ... position at the crater, camera, music off ...
-    //            System.call_function(Entities.ultima_weapon, 27)
+    // Make Ultimate Weapon's crater-crash cinematic reachable in Free Roam.
     //
-    // Free Roam always enters the overworld with unknown_5 == 0, so the FIRST
-    // block's `goto label_1` jumps straight past the crash block and it can never
-    // run (playtester 2026-07-23: he dies and the crater appears, but the crash
-    // cinematic never plays). Its own savemap conditions are already satisfied by
-    // the client, so the only thing in the way is which unknown_5 branch is taken.
+    // The scene is built in TWO places, both gated on the same four conditions:
+    //     Special[5] == 1  AND weapons_killed.bit[0] (bit 984 = 0xC1F.0)
+    //     AND !submarine_flags.bit[4] (bit 7220 = 0xF2A.4)
+    //     AND 0xF2B.bit[0] (bit 7224)
+    //   * wm0 0x3818  — PLACES Ultimate at the crater (mesh 11,21 / 5533,160)
+    //   * highwind_init 0x476E — calls ultima_weapon_27, the crash itself
+    // and highwind_init's preceding `if Special[5] == 0` block ends in a goto that
+    // jumps PAST the second one.
     //
-    // Two length-preserving PUSH_CONSTANT rewrites:
-    //   line 1  `unknown_5 == 0` -> `== 0xFFFF`  (never true; no goto skip)
-    //   line 26 `unknown_5 == 1` -> `== 0`       (matches the normal overworld)
-    // The block we bypass is already inert — patchHighwindDiamondScene deletes its
-    // inner Diamond if, leaving only that goto. Anchored on the fn-27 CALL and
-    // walked backwards, so it survives the instruction shifts that patch causes.
+    // Special[5] is world_map_type, a RUNTIME register (ff7-lib world_map_type =
+    // 0xE045E8), and it reads **0** on the overworld — confirmed live via the
+    // client's /weapons dump. So the gate can never pass in Free Roam and no
+    // savemap write can reach it. Every other condition is already satisfied.
+    //
+    // Fix: replace each gate's PUSH_SPECIAL[5] with a PUSH_CONSTANT so the test
+    // becomes two literals with a fixed result (both are 4-byte instructions, so
+    // this is length-preserving):
+    //     0x3818  `Special[5] == 1` -> `1 == 1`  = always TRUE  (placement runs)
+    //     0x476E  `Special[5] == 1` -> `1 == 1`  = always TRUE  (crash runs)
+    //     0x4698  `Special[5] == 0` -> `1 == 0`  = always FALSE (no goto skip)
+    // The scene then depends only on the three savemap bits, as intended.
+    //
+    // NOTE the earlier attempt patched ONLY highwind_init, which would have called
+    // fn 27 with Ultimate never placed at the crater — a likely cause of the
+    // misbehaviour it produced. Both sites must move together.
     QByteArray ev = lgp.mid(dataStart, dataSize);
     WorldScriptEditor w;
     QString err;
@@ -423,43 +456,52 @@ int CraterBarrierPatcher::patchUltimateCrashGate(QByteArray& lgp) const
         return 0;
     }
 
-    // call_function(ultima_weapon, 27): CALL_FN_27 = 0x204 + 27, preceded by
-    // PUSH_CONSTANT 11 (the ultima_weapon entity id).
-    const quint16 kCallFn27 = 0x204 + 27;
-    int callIdx = -1;
-    for (int i = w.findOpcode(kCallFn27); i >= 0; i = w.findOpcode(kCallFn27, i + 1)) {
-        if (i >= 1 && w.opAt(i - 1) == 0x110 && w.paramAt(i - 1, 0) == 11) {
-            callIdx = i;
-            break;
-        }
-    }
-    if (callIdx < 0) {
-        qDebug() << "CraterBarrierPatcher(ultimate-crash): fn-27 call not found";
-        return 0;
-    }
-
-    // Walk back for the enclosing `unknown_5 == 1` gate, then the earlier
-    // `unknown_5 == 0` gate. Shape: RESET; PUSH_SPECIAL 5; PUSH_CONSTANT n; EQ;
-    // GOTO_IF_FALSE. We return the index of the PUSH_CONSTANT.
-    auto findGate = [&w](int from, quint16 want) -> int {
-        for (int i = from; i >= 4; --i) {
-            if (w.opAt(i) == 0x201                                     // GOTO_IF_FALSE
-                && w.opAt(i - 1) == 0x070                              // EQ
-                && w.opAt(i - 2) == 0x110 && w.paramAt(i - 2, 0) == want
-                && w.opAt(i - 3) == 0x11b && w.paramAt(i - 3, 0) == 5)  // Special[5]
-                return i - 2;
-        }
-        return -1;
+    // A gate is: RESET ; PUSH_SPECIAL[5] ; PUSH_CONSTANT n ; EQ ; GOTO_IF_FALSE.
+    // Returns the index of the PUSH_SPECIAL (what we rewrite), or -1.
+    auto gateAt = [&w](int i, int wantConst) -> int {
+        if (i < 3) return -1;
+        if (!(w.opAt(i) == 0x201                                     // GOTO_IF_FALSE
+              && w.opAt(i - 1) == 0x070                              // EQ
+              && w.opAt(i - 2) == 0x110                              // PUSH_CONSTANT
+              && int(w.paramAt(i - 2, 0)) == wantConst
+              && w.opAt(i - 3) == 0x11b                              // PUSH_SPECIAL
+              && int(w.paramAt(i - 3, 0)) == 5))
+            return -1;
+        return i - 3;
     };
-    const int gateOne  = findGate(callIdx, 1);
-    if (gateOne < 0) {
-        qDebug() << "CraterBarrierPatcher(ultimate-crash): unknown_5==1 gate not found "
-                    "(already patched?)";
+    // Does the block guarded by the GOTO_IF_FALSE at `i` test the crash bits?
+    auto guardsCrashBits = [&w](int i) -> bool {
+        bool b984 = false, b7220 = false, b7224 = false;
+        for (int j = i + 1; j < i + 20 && j < w.instrCount(); ++j) {
+            if (w.opAt(j) != 0x114) continue;                        // PUSH_SAVEMAP_BIT
+            const int b = int(w.paramAt(j, 0));
+            if (b == 984)  b984  = true;
+            if (b == 7220) b7220 = true;
+            if (b == 7224) b7224 = true;
+        }
+        return b984 && b7220 && b7224;
+    };
+
+    QVector<int> trueGates;      // Special[5] == 1 sites -> force TRUE
+    int skipGate = -1;           // highwind_init's == 0 outer block -> force FALSE
+    for (int i = w.findOpcode(0x201); i >= 0; i = w.findOpcode(0x201, i + 1)) {
+        const int g = gateAt(i, 1);
+        if (g >= 0 && guardsCrashBits(i))
+            trueGates.append(g);
+    }
+    if (trueGates.size() != 2) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): expected 2 crash gates, found"
+                 << trueGates.size() << "(already patched?)";
         return 0;
     }
-    const int gateZero = findGate(gateOne, 0);
-    if (gateZero < 0) {
-        qDebug() << "CraterBarrierPatcher(ultimate-crash): unknown_5==0 gate not found";
+    // The outer `Special[5] == 0` whose goto skips the crash block is the nearest
+    // such gate before the LAST (highwind_init) crash gate.
+    for (int i = trueGates.last(); i >= 3; --i) {
+        const int g = gateAt(i, 0);
+        if (g >= 0) { skipGate = g; break; }
+    }
+    if (skipGate < 0) {
+        qDebug() << "CraterBarrierPatcher(ultimate-crash): outer Special[5]==0 gate not found";
         return 0;
     }
 
@@ -469,26 +511,12 @@ int CraterBarrierPatcher::patchUltimateCrashGate(QByteArray& lgp) const
         b[2] = char(v & 0xFF); b[3] = char((v >> 8) & 0xFF);
         return b;
     };
-    // Make the outcome INDEPENDENT of unknown_5 rather than guessing its value.
-    // An earlier attempt assumed Free Roam entered with unknown_5 == 0 and simply
-    // swapped the two constants; the patch verified as applied in the deployed IRO
-    // yet the crash still never fired, so unknown_5 is neither 0 nor 1 here. Each
-    // gate is `RESET; PUSH_SPECIAL[5]; PUSH_CONSTANT n; EQ; GOTO_IF_FALSE`, so
-    // replacing the PUSH_SPECIAL with a PUSH_CONSTANT turns the test into a
-    // comparison of two literals with a fixed result:
-    //     outer (line 1)  -> `1 == 0`  = false : never taken, so its goto can no
-    //                                            longer skip the crash block
-    //     inner (line 26) -> `0 == 0`  = true  : always entered
-    // The crash then depends only on its real savemap conditions (bit0 set, bit4
-    // clear, 0xF2B.0 set), which the client already satisfies. Both instructions
-    // are 4 bytes, so this stays length-preserving.
-    const int outerSpecial = gateZero - 1;   // PUSH_SPECIAL[5] of the outer gate
-    const int innerSpecial = gateOne  - 1;   // PUSH_SPECIAL[5] of the inner gate
-    // All four or none — never leave the script half-rewritten.
-    if (!w.replaceAt(innerSpecial, pushConst(0), err)
-        || !w.replaceAt(gateOne, pushConst(0), err)
-        || !w.replaceAt(outerSpecial, pushConst(1), err)
-        || !w.replaceAt(gateZero, pushConst(0), err)) {
+    // All three or none — never leave the script half-rewritten.
+    bool ok = true;
+    for (int g : trueGates)
+        ok = ok && w.replaceAt(g, pushConst(1), err);   // `1 == 1` -> true
+    ok = ok && w.replaceAt(skipGate, pushConst(1), err); // `1 == 0` -> false
+    if (!ok) {
         qDebug() << "CraterBarrierPatcher(ultimate-crash): replaceAt failed —" << err;
         return 0;
     }
@@ -498,8 +526,98 @@ int CraterBarrierPatcher::patchUltimateCrashGate(QByteArray& lgp) const
         return 0;
     }
     lgp.replace(dataStart, dataSize, out);
-    qDebug() << "CraterBarrierPatcher(ultimate-crash): crater-crash cinematic re-gated "
-                "(unknown_5 checks made constant: outer false, inner true)";
+    qDebug() << "CraterBarrierPatcher(ultimate-crash): crater crash re-gated — both"
+             << "Special[5]==1 sites forced true, outer ==0 skip forced false";
+    return 1;
+}
+
+int CraterBarrierPatcher::patchUltimateModelLoad(QByteArray& lgp) const
+{
+    int dataStart = 0, dataSize = 0;
+    if (!findWm0(lgp, dataStart, dataSize)) {
+        qDebug() << "CraterBarrierPatcher(ultimate-model): wm0.ev not found";
+        return 0;
+    }
+
+    // Keep Ultimate Weapon's MODEL loaded until the crater crash has played.
+    //
+    // patchUltimateCrashGate makes the crash's BRANCHES reachable, but the scene
+    // still did nothing: the Highwind hid itself and the music cut (highwind_init
+    // lines 31/38, so the block ran) and then nothing else happened —
+    // `call_function(Entities.ultima_weapon, 27)` was firing at an entity that does
+    // not exist.
+    //
+    // wm0's overworld model-loader has two arms, chosen at 0x058E by
+    // `Special[5] == 0` (goto_if_false -> 0x147E). Free Roam always reads
+    // Special[5] == 0, i.e. block 1 — and block 1 loads model 11 only under
+    //     if !weapons_killed.bit[0] and game_progress >= 1580
+    // so the instant he is flagged dead his model is gone. The loader that DOES
+    // load him while dead is block 2's crash-scene setup at 0x14AA
+    // (`bit 984 && !bit 7220 && bit 7224` -> load Highwind, enter_vehicle, load
+    // model 11) — the exact conditions of the crash, in the arm Free Roam never
+    // reaches. `ultima_weapon_init` (wm0 0x3818, which places him at the crater)
+    // never runs either, for the same reason.
+    //
+    // Fix: in block 1 — and the identically shaped block 3 — swap the load gate
+    //     `!weapons_killed.bit[0]` (bit 984)  ->  `!submarine_flags.bit[4]` (bit 7220)
+    // "load him until the crash is DONE" instead of "until he is dead". That covers
+    // the whole window the crash needs and unloads him the moment fn 27 sets bit 4,
+    // so no dead, invisible Ultimate is ever left standing on the map. The
+    // `game_progress >= 1580` half of the gate is untouched.
+    //
+    // Anchored on the full gate + its guarded body, which occurs exactly twice.
+    QByteArray ev = lgp.mid(dataStart, dataSize);
+    WorldScriptEditor w;
+    QString err;
+    if (!w.parse(ev, err)) {
+        qDebug() << "CraterBarrierPatcher(ultimate-model): wm0 parse failed —" << err;
+        return 0;
+    }
+
+    // PUSH_SAVEMAP_BIT 984 ; NOT ; GOTO_IF_FALSE ; RESET ; PUSH_SAVEMAP_WORD 0 ;
+    // PUSH_CONSTANT 1580 ; GE ; GOTO_IF_FALSE ; RESET ; PUSH_CONSTANT 11 ; LOAD_MODEL
+    QVector<int> gates;
+    for (int i = w.findOpcode(0x114); i >= 0; i = w.findOpcode(0x114, i + 1)) {
+        if (int(w.paramAt(i, 0)) != 984)                      continue;
+        if (i + 10 >= w.instrCount())                         continue;
+        if (w.opAt(i + 1) != 0x017)                           continue;  // NOT
+        if (w.opAt(i + 2) != 0x201)                           continue;  // GOTO_IF_FALSE
+        if (w.opAt(i + 3) != 0x100)                           continue;  // RESET
+        if (w.opAt(i + 4) != 0x11c || w.paramAt(i + 4, 0) != 0) continue; // game_progress
+        if (w.opAt(i + 5) != 0x110 || int(w.paramAt(i + 5, 0)) != 1580) continue;
+        if (w.opAt(i + 6) != 0x063)                           continue;  // >=
+        if (w.opAt(i + 7) != 0x201)                           continue;  // GOTO_IF_FALSE
+        if (w.opAt(i + 8) != 0x100)                           continue;  // RESET
+        if (w.opAt(i + 9) != 0x110 || int(w.paramAt(i + 9, 0)) != 11) continue;
+        if (w.opAt(i + 10) != 0x300)                          continue;  // LOAD_MODEL
+        gates.append(i);
+    }
+    if (gates.size() != 2) {
+        qDebug() << "CraterBarrierPatcher(ultimate-model): expected 2 model-11 load"
+                 << "gates, found" << gates.size() << "(already patched?)";
+        return 0;
+    }
+
+    // PUSH_SAVEMAP_BIT 7220 (0x1C34) — same 4-byte instruction, so offsets are
+    // untouched. Both or neither.
+    QByteArray bit7220(4, '\0');
+    bit7220[0] = char(0x14); bit7220[1] = char(0x01);
+    bit7220[2] = char(0x34); bit7220[3] = char(0x1C);
+    bool ok = true;
+    for (int g : gates)
+        ok = ok && w.replaceAt(g, bit7220, err);
+    if (!ok) {
+        qDebug() << "CraterBarrierPatcher(ultimate-model): replaceAt failed —" << err;
+        return 0;
+    }
+    const QByteArray out = w.assemble(err);
+    if (out.isEmpty()) {
+        qDebug() << "CraterBarrierPatcher(ultimate-model): assemble failed —" << err;
+        return 0;
+    }
+    lgp.replace(dataStart, dataSize, out);
+    qDebug() << "CraterBarrierPatcher(ultimate-model): Ultimate's model now stays"
+             << "loaded until the crater crash completes (2 gates re-keyed to bit 7220)";
     return 1;
 }
 
@@ -711,7 +829,12 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
     // tblIdx = the 1-based world field.tbl index the mesh ENTER_FIELD pushes
     // (verified against the shipped field.tbl + flevel maplist, 2026-07-09).
     static const Town towns[] = {
-        {  6, 0x403, 0, "Fort Condor"  },  // condor1
+        // Fort Condor (condor1, tbl#6, bit 0x403.0) REMOVED 2026-07-31 — the town
+        // is no longer gated. It is one of the few sphere-0 regions (eastern
+        // continent, walkable from Kalm), and sealing it cost 7 starting locations
+        // exactly when town gating added 13 keys, making seeds unfillable. The
+        // apworld drops "Fort Condor Key" from the item pool to match; leaving this
+        // entry in would seal condor1 with no key in existence.
         {  7, 0x403, 1, "Junon"        },  // ujunon1
         { 15, 0x403, 2, "North Corel"  },  // ncorel
         { 14, 0x403, 2, "Mt. Corel"    },  // mtcrl_0 (mountain path = Corel back door, same key)
@@ -886,18 +1009,26 @@ bool CraterBarrierPatcher::patch()
     // wm0.ev, so it must run AFTER all the byte-anchor patches above (barrier,
     // Diamond spawns, crater landing) — their anchors would otherwise shift.
     m_highwindScenePatched = patchHighwindDiamondScene(lgp);
-    // DISABLED 2026-07-25. patchUltimateCrashGate makes Ultimate's crater-crash
-    // cinematic reachable by neutralising highwind_init's `Special.unknown_5`
-    // gates. Verified applied in both the randomized lgp and the exported IRO —
-    // but the crash STILL did not play, and enabling it brought back the second
-    // Ultimate fight the client had just fixed. Two attempts (constant swap, then
-    // making both gates literal-constant) behaved the same. The cinematic is
-    // cosmetic; the run completes without it (he dies, no loop, crater appears on
-    // the next world-map load), so this is left OFF rather than trading a working
-    // endgame for an animation. The method is kept for a future attempt — the
-    // unexplained part is what else highwind_init's crash block disturbs when it
-    // runs at a point Free Roam never intended.
+    // ---- ULTIMATE WEAPON wm0.ev PATCHES: DISABLED 2026-07-27 (user's call) ----
+    // Both are switched off so the VANILLA world script can be observed unassisted
+    // and we can see for ourselves whether it plays the crater-crash cinematic. The
+    // client's Ultimate flag writes were removed at the same time, so nothing on
+    // either side is touching him now. The methods are KEPT (not deleted) — they are
+    // verified, idempotent and content-anchored; re-enable by uncommenting.
+    //
+    //   patchUltimateCrashGate  — rewrites the three Special[5] gates (the placement
+    //     at wm0 0x3818, the fn-27 call in highwind_init, and the outer ==0 skip) to
+    //     literal constants, so the crash depends only on its savemap bits.
+    //   patchUltimateModelLoad  — re-keys the model-11 load in loader arms 1 and 3
+    //     from `!weapons_killed.bit[0]` to `!submarine_flags.bit[4]`, so his model
+    //     survives long enough for the fn-27 call to have an entity to run on.
+    //
+    // NOTE what vanilla then does: highwind_init's outer `if Special[5] == 0` block
+    // ends in a `goto` PAST the crash block, and Special[5] measures 0 in Free Roam.
+    // So with these off, the crash is expected to be unreachable — the point of the
+    // test is to confirm that from the game rather than from the disassembly.
     // patchUltimateCrashGate(lgp);
+    // patchUltimateModelLoad(lgp);
 
     // Free Roam welcome banner: overwrite the world save-tutorial message (id 53,
     // shown on first world-map entry) with the FF7 Archipelago welcome text.

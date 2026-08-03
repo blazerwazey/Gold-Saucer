@@ -15,7 +15,10 @@ class StartingEquipmentRandomizer
 public:
     explicit StartingEquipmentRandomizer(Randomizer* parent);
     
-    bool randomize();
+    // `shuffleEquipment` gates ONLY the random starting gear. The starting-level
+    // patch below is applied unconditionally, so it still lands when the player
+    // has starting-equipment randomization switched off.
+    bool randomize(bool shuffleEquipment = true);
     
 private:
     Randomizer* m_parent;
@@ -35,6 +38,14 @@ private:
     
     bool randomizeAll();
     void randomizeStartingEquipment(QByteArray& data);
+
+    // Starting level. Rewrites a character's kernel section-3 init record so a NEW
+    // GAME begins at that level, with stats/HP/MP taken from their own growth
+    // curves in section 2. `growthData` is kernel section 2 (may be empty, in
+    // which case the patch is skipped rather than writing a half-levelled record).
+    void applyStartingLevels(QByteArray& initData, const QByteArray& growthData);
+    bool growthStatsAt(const QByteArray& growthData, int characterId, int level,
+                       quint8 stats[6], quint16& hp, quint16& mp) const;
     void randomizeCharacterEquipment(QByteArray& data, int characterId);
     
     quint16 getRandomWeapon(int characterId, int tier);

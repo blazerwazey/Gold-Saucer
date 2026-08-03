@@ -31,7 +31,7 @@ public:
     bool randomizeEnemyEncounters();
     bool randomizeShops();
     bool randomizeFieldPickups();
-    bool randomizeStartingEquipment();
+    bool randomizeStartingEquipment(bool shuffleEquipment = true);
     bool applyCraterBarrier();
     
     bool createBackup(const QString& filePath);

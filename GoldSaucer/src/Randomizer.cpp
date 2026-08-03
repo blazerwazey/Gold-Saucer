@@ -150,7 +150,7 @@ bool Randomizer::randomizeFieldPickups()
     return m_fieldPickupRandomizer->randomize();
 }
 
-bool Randomizer::randomizeStartingEquipment()
+bool Randomizer::randomizeStartingEquipment(bool shuffleEquipment)
 {
     // Equipment randomizer finds and validates kernel.bin on its own
     if (!m_startingEquipmentRandomizer) {
@@ -158,7 +158,7 @@ bool Randomizer::randomizeStartingEquipment()
         return false;
     }
     
-    return m_startingEquipmentRandomizer->randomize();
+    return m_startingEquipmentRandomizer->randomize(shuffleEquipment);
 }
 
 bool Randomizer::applyCraterBarrier()

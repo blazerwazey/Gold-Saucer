@@ -493,6 +493,21 @@ static void __cdecl hkAddMateria(uint32_t mid) {
             }
             return;   // ALWAYS suppress the reserved token grant (never enters inventory)
         }
+        // NOT the AP cell. If a deferred check is still armed, the player has moved
+        // OFF the AP slot onto real stock — disarm it.
+        //
+        // Without this, hovering the AP cell armed a pending token and nothing ever
+        // cleared it except a gil drop, a 2.5s timeout, or leaving the menu. Moving
+        // down and buying a REAL materia within that window dropped gil, and the
+        // render sampler cashed in the ARMED token: the player got the AP check for
+        // a Restore they bought themselves (reported 2026-07-27, Sector 5 materia).
+        // The grant routine is called for whatever slot is under the cursor, so a
+        // call with a different id is exactly the signal that the cursor moved.
+        if (g_pendingToken >= 0 && g_pendingToken != static_cast<int>(id)) {
+            LogLine("addMateria shop %u id %u is not an AP cell -> disarm pending token %d\n",
+                    shop, id, g_pendingToken);
+            g_pendingToken = -1;
+        }
     }
     if (oAddMateria) oAddMateria(mid);
 }

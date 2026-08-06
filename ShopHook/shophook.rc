@@ -1,0 +1,57 @@
+// Version resource for shophook.dll.
+//
+// Added 2026-08-06 after several virus scanners started reporting the DLL as a
+// Trojan. Blank version metadata is itself a heuristic signal: ML classifiers
+// score an unsigned binary with no CompanyName / FileDescription / ProductName
+// as suspicious, and shophook had NONE of them. That stacks on top of the
+// signals we can't remove (MinHook inline detours, and the client injecting via
+// CreateRemoteThread because FFNx will not load a gameplay DLL as a mod).
+//
+// This does not make the DLL trusted on its own — code signing is what ends the
+// file-reputation flags — but it is the cheapest real improvement and it tells
+// anyone who inspects the binary what it is and where it came from.
+//
+// Keep the numeric FILEVERSION and the "FileVersion" string in step, and bump
+// both with the randomizer release.
+
+#include <winver.h>
+
+#define VER_MAJOR  0
+#define VER_MINOR  0
+#define VER_PATCH  5
+#define VER_BUILD  0
+#define VER_STRING "0.0.5.0"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+ PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"                    // US English (0x0409), Unicode (1200)
+        BEGIN
+            VALUE "CompanyName",      "FF7pelago"
+            VALUE "FileDescription",  "FF7pelago shop hook - Archipelago shop display and purchase detection"
+            VALUE "FileVersion",      VER_STRING
+            VALUE "InternalName",     "shophook"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 FF7pelago contributors"
+            VALUE "OriginalFilename", "shophook.dll"
+            VALUE "ProductName",      "FF7pelago Archipelago Randomizer"
+            VALUE "ProductVersion",   VER_STRING
+            VALUE "Comments",         "Loaded into FF7_EN.exe by the FF7pelago Archipelago client so shops can display cross-player item names and report purchases. Open source; see Gold Saucer/ShopHook/dllmain.cpp."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

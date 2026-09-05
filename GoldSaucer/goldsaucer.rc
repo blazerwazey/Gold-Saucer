@@ -1,0 +1,58 @@
+// Version resource for GoldSaucer_GUI.exe.
+//
+// Added 2026-09-02 after a tester's Windows Defender removed the download as
+// Trojan:Script/Wacatac.B!ml. The exe had NO version metadata at all — no
+// CompanyName, ProductName, FileDescription or copyright — which is itself a
+// heuristic signal: ML classifiers score an unsigned, zero-prevalence binary
+// with blank metadata as suspicious. shophook.dll got the same treatment on
+// 2026-08-06 for the same reason; the GUI was simply missed.
+//
+// This does not make the exe trusted on its own — code signing is what ends
+// file-reputation flags, and every rebuild resets prevalence regardless — but it
+// is the cheapest real improvement and it tells anyone inspecting the binary
+// what it is and where it came from.
+//
+// Keep the numeric FILEVERSION and the "FileVersion" string in step, and bump
+// both with the randomizer release.
+
+#include <winver.h>
+
+#define VER_MAJOR  0
+#define VER_MINOR  0
+#define VER_PATCH  6
+#define VER_BUILD  0
+#define VER_STRING "0.0.6.0"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+ PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"                    // US English (0x0409), Unicode (1200)
+        BEGIN
+            VALUE "CompanyName",      "FF7pelago"
+            VALUE "FileDescription",  "Gold Saucer - Final Fantasy VII randomizer for Archipelago"
+            VALUE "FileVersion",      VER_STRING
+            VALUE "InternalName",     "GoldSaucer_GUI"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 FF7pelago contributors"
+            VALUE "OriginalFilename", "GoldSaucer_GUI.exe"
+            VALUE "ProductName",      "FF7pelago Archipelago Randomizer"
+            VALUE "ProductVersion",   VER_STRING
+            VALUE "Comments",         "Desktop tool that reads a player's own Final Fantasy VII installation and writes randomized copies to a separate output folder. Ships no game assets. Open source; see https://github.com/blazerwazey/Gold-Saucer."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

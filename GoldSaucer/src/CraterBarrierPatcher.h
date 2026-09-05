@@ -14,7 +14,7 @@
  *
  * Vanilla world_us.lgp / wm0.ev gates each barrier load with:
  *     if Savemap.game_progress < 1580 then load_model(north_crater_barrier)
- * which is always false in Free Roam (game_progress is fixed at 1603), so the
+ * which is always false in Free Roam (game_progress is fixed at 1997), so the
  * barrier never appears. This patcher rewrites that condition to:
  *     if Savemap[0xD27].byte == 0 then load_model(north_crater_barrier)
  * where 0xD27 ("crater_lock") is driven by the runtime client: 0 = locked
@@ -58,7 +58,7 @@ private:
     // "Enter from field 51" handler runs:
     //   if Savemap.vehicle_display.bit[4] then
     //       load_model(Highwind); enter_vehicle(); load_model(Diamond Weapon)
-    // which misfires at game moment 1603 (forced Highwind + Diamond Weapon on
+    // which misfires at game moment 1997 (forced Highwind + Diamond Weapon on
     // entry). We rewrite the inner bit test to push_const 0 (always false) so
     // the engine skips the three Entity calls — identical to the vanilla
     // "bit clear" path. Length-preserving (4 bytes), anchored on the unique
@@ -119,7 +119,7 @@ private:
 
     // Lower the Northern Crater landing gate in wm0.ev System fn 9 ("crater_landing"):
     //   if Savemap.game_progress >= 1620 then <Highwind descent>
-    // Free Roam runs at game moment 1603, so the descent never fires. We rewrite
+    // Free Roam runs at game moment 1997, so the descent never fires. We rewrite
     // the threshold 1620 -> 1580 (length-preserving, unique anchor, validated).
     // Returns 1 if newly patched, 0 if already patched / not found.
     int patchCraterLanding(QByteArray& lgp) const;

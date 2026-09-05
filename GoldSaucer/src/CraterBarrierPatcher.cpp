@@ -771,7 +771,7 @@ int CraterBarrierPatcher::patchWelcomeMessage(QByteArray& lgp) const
 {
     // Overwrite msg 53 (the save tutorial, shown on first world-map entry in Free
     // Roam) with the AP welcome banner, across two pages:
-    //   page 1: "Welcome to FF7 {RAINBOW}Archipelago v0.0.5"
+    //   page 1: "Welcome to FF7 {RAINBOW}Archipelago v0.0.6"
     //   page 2: "{WHITE}Please report all bugs on Github / or in the AP Discord!"
     // FF7 control codes: 0xFE 0xDB = {RAINBOW}, 0xFE 0xD9 = {WHITE}, 0xE7 = newline,
     // 0xE8 = {NEWPAGE}. Rainbow/flash can't be cancelled by a color code within a
@@ -781,7 +781,7 @@ int CraterBarrierPatcher::patchWelcomeMessage(QByteArray& lgp) const
     QByteArray w;
     w += encodeWorldText("Welcome to FF7 ");
     w.append(char(0xFE)); w.append(char(0xDB));                 // {RAINBOW}
-    w += encodeWorldText("Archipelago v0.0.5");
+    w += encodeWorldText("Archipelago v0.0.6");
     w.append(char(0xE8));                                       // {NEWPAGE} -> resets rainbow
     w.append(char(0xFE)); w.append(char(0xD9));                 // {WHITE}
     w += encodeWorldText("Please report all bugs on Github");
@@ -825,7 +825,12 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         }
     }
 
-    struct Town { int tblIdx; int relByte; int bit; const char* name; };
+    // relByte2/bit2 = an OPTIONAL second key ANDed with the first. relByte2 == 0
+    // means "no second key": every real key sits at 0x403 or above (the AP town
+    // keys) or 0x43 (vanilla key items), so 0 is free as a sentinel and existing
+    // 4-field rows keep working — C++ value-initialises the omitted members.
+    struct Town { int tblIdx; int relByte; int bit; const char* name;
+                  int relByte2; int bit2; };
     // tblIdx = the 1-based world field.tbl index the mesh ENTER_FIELD pushes
     // (verified against the shipped field.tbl + flevel maplist, 2026-07-09).
     static const Town towns[] = {
@@ -841,8 +846,12 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         { 18, 0x403, 3, "Cosmo Canyon" },  // cos_btm
         { 19, 0x403, 4, "Nibelheim"    },  // nivl_3 (entrance 1)
         { 43, 0x403, 4, "Nibelheim"    },  // nivl_3 (entrance 2, same key)
-        { 44, 0x403, 4, "Mt. Nibel"    },  // mtnvl2 (behind Nibelheim, same key)
-        { 46, 0x403, 4, "Mt. Nibel"    },  // mtnvl4 (behind Nibelheim, same key)
+        // Mt. Nibel (mtnvl2 tbl#44, mtnvl4 tbl#46) REMOVED 2026-09-05. Both were
+        // sealed on the Nibelheim key on the assumption that the mountain is
+        // entered through the town; it is not — each has its own world-map entry,
+        // so the seal blocked a route the player reaches directly. The apworld
+        // dropped the matching logic requirement in the same change; leaving these
+        // rows would seal a region logic now believes is open.
         { 20, 0x403, 5, "Rocket Town"  },  // rckt
         { 23, 0x403, 6, "Wutai"        },  // uutai1
         // CORRECTED 2026-07-15 (verified via field connections):
@@ -861,9 +870,19 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         // The Corral Valley strip is the back door into the Sleeping Forest /
         // Bone Village / Forgotten Capital chain — seal all three world entries
         // on the Bone Village key so the area only opens through Bone Village.
-        { 26, 0x404, 2, "Corral Valley Cave" },  // sandun_2 (same key)
-        { 57, 0x404, 2, "Corral Valley"      },  // sango2   (same key)
-        { 58, 0x404, 2, "Corral Valley"      },  // lost1    (same key)
+        //
+        // These three ALSO require the LUNAR HARP (bank 1 0x43 bit 3, the vanilla
+        // key-item flag the client sets). The apworld has always required it in
+        // logic for Forgotten Capital and Corel Valley, but nothing enforced it in
+        // game: a field-script scan shows neither slfrst_1 nor slfrst_2 tests the
+        // Harp at all (both gate on game_moment, which Free Roam pins at 1997), so
+        // the whole chain was walkable without it. Added 2026-09-05.
+        //
+        // The Sleeping Forest itself is deliberately NOT gated on the Harp — its
+        // logic rule was dropped the same day for exactly the reason above.
+        { 26, 0x404, 2, "Corral Valley Cave", 0x43, 3 },  // sandun_2 (+ Lunar Harp)
+        { 57, 0x404, 2, "Corral Valley"     , 0x43, 3 },  // sango2   (+ Lunar Harp)
+        { 58, 0x404, 2, "Corral Valley"     , 0x43, 3 },  // lost1    (+ Lunar Harp)
     };
     const int nTowns = int(sizeof(towns) / sizeof(towns[0]));
 
@@ -937,6 +956,21 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
 
         const int keyBit = t.relByte * 8 + t.bit;
         QByteArray pushKey; W(pushKey, 0x114); W(pushKey, keyBit);       // PUSH_SAVEMAP_BIT <key>
+        // A second key is ANDed onto the SAME condition rather than spliced as a
+        // second gate. Two gates would not compose: the first one's "key held"
+        // GOTO targets the tblIdx PUSH, so inserting another gate in front of that
+        // PUSH would simply be jumped over, silently enforcing only key one.
+        // Pushing both bits and combining them leaves the splice structure — and
+        // its GOTO targets — completely untouched; the stack still carries exactly
+        // one boolean when GOTO_IF_FALSE runs.
+        // 0x0B0 = logical_and, zero code params (Landscaper opcodes.ts), and it is
+        // already in WorldScriptEditor::opCodeParams so the re-offsetter parses it.
+        int keyBit2 = -1;
+        if (t.relByte2 != 0) {
+            keyBit2 = t.relByte2 * 8 + t.bit2;
+            W(pushKey, 0x114); W(pushKey, keyBit2);                      // PUSH_SAVEMAP_BIT <key2>
+            W(pushKey, 0x0B0);                                           // logical_and
+        }
 
         int done = 0;
         for (int si = sites.size() - 1; si >= 0; --si) {
@@ -952,8 +986,10 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         }
         if (done == 0) { LOG("towngate: " + QString(t.name) + " no sites gated"); continue; }
 
-        LOG(QStringLiteral("towngate: gated %1 (tbl#%2, key bit 0x%3, %4 site(s), msg id %5)")
-            .arg(t.name).arg(t.tblIdx).arg(keyBit,0,16).arg(done).arg(kMsgId));
+        LOG(QStringLiteral("towngate: gated %1 (tbl#%2, key bit 0x%3%4, %5 site(s), msg id %6)")
+            .arg(t.name).arg(t.tblIdx).arg(keyBit,0,16)
+            .arg(keyBit2 >= 0 ? QStringLiteral(" AND 0x%1").arg(keyBit2,0,16) : QString())
+            .arg(done).arg(kMsgId));
         ++gated;
     }
 
@@ -986,7 +1022,7 @@ bool CraterBarrierPatcher::patch()
         return false;
     }
 
-    // Free Roam: also neutralize the moment-1603 Diamond Weapon / forced-Highwind
+    // Free Roam: also neutralize the moment-1997 Diamond Weapon / forced-Highwind
     // spawn on entry from field 51. Non-fatal if absent (logged inside).
     m_diamondSitesPatched = patchDiamondWeaponSpawn(lgp);
 

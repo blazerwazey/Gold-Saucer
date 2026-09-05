@@ -8,8 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_PREFIX_PATH "C:\\Qt\\6.10.1\\msvc2022_64" ${CMAKE_PREFIX_PATH})
 set(Qt6_DIR "C:\\Qt\\6.10.1\\msvc2022_64\\lib\\cmake\\Qt6")
 
-# Find Qt6 (need Xml, Svg, Core5Compat, and Network for WebSocket)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Xml Svg Core5Compat Network)
+# Qt6::Network was linked "for WebSocket" and nothing ever used it - there is no
+# QNetwork* / QTcpSocket / websocket code anywhere in src/. The linker was already
+# dropping it (the exe imports no networking), so this only stops the 1.7 MB
+# Qt6Network.dll and its plugins riding along in the download. Removing dead
+# network capability from a tool that has no business talking to the internet is
+# also one less thing for an antivirus classifier to weigh; see
+# ShopHook/AV_FALSE_POSITIVE.md.
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Xml Svg Core5Compat)
 
 # Set up FF7TK
 set(FF7TK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../ff7tk-1.3.1.3")
@@ -45,6 +51,9 @@ set(CMAKE_AUTOMOC ON)
 
 # Add executable (simple GUI version)
 add_executable(GoldSaucer_GUI WIN32
+    # Version metadata. Blank metadata is scored by antivirus ML classifiers as a
+    # suspicion signal on an unsigned binary; see AV_FALSE_POSITIVE.md.
+    goldsaucer.rc
     src/main_gui.cpp
     src/Randomizer.cpp
     src/EnemyRandomizer.cpp
@@ -78,7 +87,6 @@ target_link_libraries(GoldSaucer_GUI
     Qt6::Xml
     Qt6::Svg
     Qt6::Core5Compat
-    Qt6::Network
     ff7tk::ff7tk
     ff7tk::ff7tkData
     ff7tk::ff7tkFormats

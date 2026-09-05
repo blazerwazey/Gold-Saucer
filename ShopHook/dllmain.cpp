@@ -147,6 +147,23 @@ static const uint32_t SHOP_CURSOR_ADDR  = 0xDD6B84;   // cursor row within the w
 static const uint32_t SHOP_SCROLL_ADDR  = 0xDD6B94;   // index of the top visible row
 static const int      SHOP_VISIBLE_ROWS = 5;
 
+// A SHOP MUST NEVER REACH ZERO ENTRIES.
+//
+// Vanilla FF7 ships no empty shop, so its shop code never defends against one:
+// with itemCount 0 the grid draws nothing, but the cursor/scroll keep whatever
+// values they held and confirm still reads entries[cursor] -- stale bytes the
+// player can "buy" as a ghost item. Reported 2026-09-02 at shop_slots_per_shop
+// = 10, where Gold Saucer evicts ALL vanilla stock to fit ten AP slots and the
+// shop therefore drains to nothing once every check in it has been bought.
+//
+// So compaction keeps a floor of one entry: the LAST sold AP cell is replaced
+// by a real, cheap vanilla item of the same kind rather than removed. The shop
+// stays a normal one-item shop the engine can render, scroll and sell from.
+// (Same safe defaults Gold Saucer falls back to when a tiered pool comes up
+// empty -- see ShopRandomizer::pickTiered.)
+static const uint16_t FILLER_ITEM    = 0x00;   // Potion
+static const uint16_t FILLER_MATERIA = 0x35;   // Restore
+
 static void LoadSold() {
     g_soldSlots.clear();
     if (g_soldPath.empty()) return;
@@ -175,9 +192,15 @@ static void ClampShopSelection(uint32_t shop) {
     __try {
         volatile uint8_t* base = reinterpret_cast<volatile uint8_t*>(SHOP_TABLE + shop * 0x54);
         const int count = base[2];
-        if (count <= 0 || count > 10) return;
+        if (count > 10) return;                 // not a shop record we understand
         volatile uint32_t* pCursor = reinterpret_cast<volatile uint32_t*>(SHOP_CURSOR_ADDR);
         volatile uint32_t* pScroll = reinterpret_cast<volatile uint32_t*>(SHOP_SCROLL_ADDR);
+        // An empty shop should now be impossible (RemoveSoldFromShop keeps a
+        // floor of one entry), but this used to bail out at count <= 0 and leave
+        // the selection wherever it was -- which is how the ghost row became
+        // reachable in the first place. Pin it to the top rather than trust the
+        // invariant.
+        if (count <= 0) { *pCursor = 0; *pScroll = 0; return; }
         int cursor = static_cast<int>(*pCursor);
         int scroll = static_cast<int>(*pScroll);
         int maxScroll = count - SHOP_VISIBLE_ROWS; if (maxScroll < 0) maxScroll = 0;
@@ -199,39 +222,74 @@ static void RemoveSoldFromShop(uint32_t shop) {
     if (shop >= 80) return;
     __try {
         volatile uint8_t* base = reinterpret_cast<volatile uint8_t*>(SHOP_TABLE + shop * 0x54);
-        bool removedAny = false;
-        bool again = true;
-        while (again) {
-            again = false;
-            int count = base[2];
-            if (count <= 0 || count > 10) return;
+        bool changedAny = false;
+        for (;;) {
+            const int count = base[2];
+            if (count <= 0 || count > 10) break;
+
+            // First cell that is one of our AP slots AND already bought.
+            int      found   = -1;
+            uint32_t section = KTEXT_ITEM;
+            uint16_t idx     = 0;
             for (int n = 0; n < count; ++n) {
                 volatile uint8_t* e = base + 4 + n * 8;
                 uint32_t etype = *reinterpret_cast<volatile uint32_t*>(const_cast<uint8_t*>(e));
-                uint16_t idx   = *reinterpret_cast<volatile uint16_t*>(const_cast<uint8_t*>(e + 4));
-                uint32_t section = (etype == 1) ? KTEXT_MATERIA : KTEXT_ITEM;
-                uint64_t key = SlotKey(shop, section, idx);
+                uint16_t eidx  = *reinterpret_cast<volatile uint16_t*>(const_cast<uint8_t*>(e + 4));
+                uint32_t esec  = (etype == 1) ? KTEXT_MATERIA : KTEXT_ITEM;
+                uint64_t key   = SlotKey(shop, esec, eidx);
                 if (g_apSlots.count(key) && g_soldSlots.count(key)) {
-                    for (int k = n; k < count - 1; ++k) {
-                        volatile uint8_t* dst = base + 4 + k * 8;
-                        volatile uint8_t* src = base + 4 + (k + 1) * 8;
-                        for (int b = 0; b < 8; ++b) dst[b] = src[b];
-                    }
-                    base[2] = static_cast<uint8_t>(count - 1);
-                    base[3] = 0;   // FF7 reads itemCount as a word; keep the pad byte 0
-                    LogLine("removed sold AP slot shop %u %u:%u (stock %d->%d)\n",
-                            shop, section, idx, count, count - 1);
-                    removedAny = true;
-                    again = true;
+                    found = n; section = esec; idx = eidx;
                     break;
                 }
             }
+            if (found < 0) break;
+
+            if (count == 1) {
+                // Removing this one would empty the shop. Restock a plain vanilla
+                // item of the same kind instead -- see FILLER_ITEM above.
+                const bool     materia = (section == KTEXT_MATERIA);
+                const uint16_t fill    = materia ? FILLER_MATERIA : FILLER_ITEM;
+                // If the filler were itself an AP cell in THIS shop we would be
+                // handing the player a second copy of a check, so leave the sold
+                // cell in place instead (buyable, but the grant stays suppressed:
+                // no item, no duplicate check, just wasted gil). Cannot happen
+                // with the token ids Gold Saucer reserves; cheap to be sure.
+                if (g_apSlots.count(SlotKey(shop, section, fill)))
+                    break;
+                volatile uint8_t* e = base + 4;
+                e[0] = materia ? 1 : 0; e[1] = 0; e[2] = 0; e[3] = 0;
+                e[4] = static_cast<uint8_t>(fill & 0xFF);
+                e[5] = static_cast<uint8_t>((fill >> 8) & 0xFF);
+                e[6] = 0; e[7] = 0;
+                base[2] = 1;
+                base[3] = 0;
+                LogLine("last AP slot shop %u %u:%u sold -> restocked %u:%u "
+                        "(a shop must never be empty)\n",
+                        shop, section, idx, section, fill);
+                changedAny = true;
+                break;
+            }
+
+            for (int k = found; k < count - 1; ++k) {
+                volatile uint8_t* dst = base + 4 + k * 8;
+                volatile uint8_t* src = base + 4 + (k + 1) * 8;
+                for (int b = 0; b < 8; ++b) dst[b] = src[b];
+            }
+            base[2] = static_cast<uint8_t>(count - 1);
+            base[3] = 0;   // FF7 reads itemCount as a word; keep the pad byte 0
+            LogLine("removed sold AP slot shop %u %u:%u (stock %d->%d)\n",
+                    shop, section, idx, count, count - 1);
+            changedAny = true;
         }
-        // Blank the vacated tail entry so a stale row can never be a real item.
-        if (removedAny) {
-            const int count = base[2];
-            if (count >= 0 && count < 10) {
-                volatile uint8_t* tail = base + 4 + count * 8;
+        // Blank EVERY vacated cell, not just the first past the new end: a visit
+        // that compacts several slots leaves stale copies all the way up to the
+        // old count, and those are what a ghost row reads from.
+        if (changedAny) {
+            int count = base[2];
+            if (count < 0)  count = 0;
+            if (count > 10) count = 10;
+            for (int n = count; n < 10; ++n) {
+                volatile uint8_t* tail = base + 4 + n * 8;
                 for (int b = 0; b < 8; ++b) tail[b] = 0xFF;
             }
         }

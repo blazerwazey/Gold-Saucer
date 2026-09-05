@@ -243,7 +243,7 @@ private:
                                QTextStream& debugStream);
     // Debug-only: dump a field's section-0 entity script table and a decoded
     // opcode listing for each script, to diagnose autonomous entry events
-    // (e.g. the Rocket Town soft-lock at game moment 1603).
+    // (e.g. the Rocket Town soft-lock at game moment 1997).
     void dumpFieldScripts(const QByteArray& decompressed, const QString& fieldName,
                           QTextStream& debugStream);
     // Overwrite an existing (never-shown in Free Roam) field dialog in place with

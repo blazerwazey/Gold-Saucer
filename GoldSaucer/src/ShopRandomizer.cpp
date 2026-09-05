@@ -9,6 +9,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QHash>
+#include <QSet>
 #include <algorithm>
 #include <cstring>
 
@@ -92,8 +94,21 @@ bool ShopRandomizer::randomize()
     buildTieredPools(log);
 
     // --- randomize -----------------------------------------------------------
+    // GOLD SAUCER'S OWN STOCK RANDOMIZATION IS INDEPENDENT OF THE AP SLOTS.
+    //
+    // This pass reshuffles each shop's vanilla stock from the price-tiered pools.
+    // The AP token injection below is a SEPARATE concern: it places Archipelago
+    // checks, and it must run whenever a seed defines them, whatever the player
+    // set this toggle to. Skipping it used to be possible — the caller gated this
+    // whole function on Config::ShopRandomization — which silently made every AP
+    // shop check unobtainable for anyone who preferred vanilla stock.
+    const bool doStock =
+        m_parent->m_config.isFeatureEnabled(Config::ShopRandomization);
+    if (!doStock && logOk)
+        log << "Stock randomization DISABLED — vanilla stock kept; "
+               "AP slots (if any) are still injected below.\n\n";
     int modified = 0;
-    for (int i = 0; i < shops.size(); ++i) {
+    for (int i = 0; doStock && i < shops.size(); ++i) {
         ExeShopRecord& s = shops[i];
         ExeShopType t = s.shopType;
 
@@ -117,7 +132,8 @@ bool ShopRandomizer::randomize()
         if (logOk) log << "\n";
     }
 
-    if (logOk) log << "\nShops randomized: " << modified << " / " << shops.size() << "\n";
+    if (logOk) log << "\nShops randomized: " << modified << " / " << shops.size()
+                   << (doStock ? "" : "  (stock randomization off)") << "\n";
 
     // --- inject Archipelago shop slots (token items) -------------------------
     applyApShops(shops, log);
@@ -339,9 +355,18 @@ bool ShopRandomizer::generateHextPatch(const QString& outputPath, const QVector<
                                              2, 16, QChar('0')).toUpper();
         hext << QString::number(priceAddr, 16).toUpper() << " = " << priceBytes.trimmed() << "\n";
     };
+    // One price line per distinct TOKEN, not per slot. AP token ids are reused
+    // across shops (the chain keys on shop+section+index, not on the bare id), so
+    // iterating slots emits the same address repeatedly — harmless in a Hext
+    // patch but noisy, and it grows with shop_slots_per_shop.
+    QSet<qint64> pricedAddrs;
     for (const ApShopSlot& e : m_apShops) {
         const qint64 delta = e.isMateria ? MATERIA_PRICE_DELTA : ITEM_PRICE_DELTA;
-        writePrice(SHOP_INVENTORY_VA + delta + static_cast<qint64>(e.token) * 4);
+        const qint64 addr  = SHOP_INVENTORY_VA + delta + static_cast<qint64>(e.token) * 4;
+        if (pricedAddrs.contains(addr))
+            continue;
+        pricedAddrs.insert(addr);
+        writePrice(addr);
     }
 
     hextFile.close();
@@ -392,6 +417,52 @@ void ShopRandomizer::loadApShops(QTextStream& log)
 
 void ShopRandomizer::applyApShops(QVector<ExeShopRecord>& shops, QTextStream& log)
 {
+    // AP SLOTS WIN OVER VANILLA STOCK.
+    //
+    // This used to append each AP token after the shop's normal stock and, when
+    // the shop was already full, quietly overwrite the LAST slot — so a second
+    // AP token for a full shop replaced the first one. Archipelago has already
+    // created and filled that location by then, so the check simply could not be
+    // bought: the same unbeatable-seed class as the randomize_shops bug fixed in
+    // v0.0.5. It never bit because the shipped data gives no shop more than 6
+    // slots; the shop_slots_per_shop option (v0.0.6, up to the exe's ceiling of
+    // 10) makes it reachable, and at 10 it is guaranteed.
+    //
+    // So: count this shop's AP slots first, truncate the vanilla stock to what is
+    // left, and place the AP tokens after it. Losing normal stock is a visible,
+    // acceptable cost; losing a check is not. The apworld has no honest way to
+    // know a shop's vanilla stock count, so the decision has to live here.
+    QHash<int, int> apCount;
+    for (const ApShopSlot& e : m_apShops) {
+        if (e.shopId >= 0 && e.shopId < shops.size())
+            apCount[e.shopId] += 1;
+    }
+    for (auto it = apCount.constBegin(); it != apCount.constEnd(); ++it) {
+        const int shopId = it.key();
+        const int wanted = qMin(it.value(), int(ExeShopRecord::SLOT_COUNT));
+        ExeShopRecord& s = shops[shopId];
+        const int keep = ExeShopRecord::SLOT_COUNT - wanted;
+        if (s.itemCount > keep) {
+            log << "AP shop " << shopId << " (" << shopName(shopId) << "): "
+                << (s.itemCount - keep) << " vanilla stock entr"
+                << ((s.itemCount - keep) == 1 ? "y" : "ies")
+                << " evicted to make room for " << wanted << " AP slot(s)\n";
+            s.itemCount = static_cast<quint8>(keep);
+        }
+        if (keep == 0) {
+            // Every entry in this shop is now an AP check, so the shop empties
+            // itself once they have all been bought — and FF7 cannot render, or
+            // safely take a confirm on, a shop with no entries. shophook.dll
+            // keeps a floor of one entry (it restocks a Potion / Restore when the
+            // last AP slot sells); note it here so a run log says which shops are
+            // relying on that. Reachable only at shop_slots_per_shop = 10.
+            log << "AP shop " << shopId << " (" << shopName(shopId)
+                << "): stock is 100% AP slots — shophook restocks a vanilla item "
+                << "when the last one is bought\n";
+        }
+    }
+
+    QHash<int, int> placed;
     for (const ApShopSlot& e : m_apShops) {
         const int     shopId = e.shopId;
         const quint16 token  = e.token;
@@ -400,16 +471,22 @@ void ShopRandomizer::applyApShops(QVector<ExeShopRecord>& shops, QTextStream& lo
             continue;
         }
         ExeShopRecord& s = shops[shopId];
-        // Append the AP token as a new slot so normal stock is preserved; if the
-        // shop is already full (10 slots), overwrite the last slot.
-        int slot = s.itemCount;
-        if (slot >= ExeShopRecord::SLOT_COUNT)
-            slot = ExeShopRecord::SLOT_COUNT - 1;
+        const int slot = s.itemCount;
+        if (slot >= ExeShopRecord::SLOT_COUNT) {
+            // Can only happen if a seed asks for more than SLOT_COUNT slots in
+            // one shop, which the apworld's option range forbids. Log loudly
+            // rather than overwrite a slot that already holds another check.
+            log << "AP shop " << shopId << " (" << shopName(shopId)
+                << "): OUT OF SLOTS — token 0x" << QString::number(token, 16)
+                << " DROPPED. This check is unobtainable; the seed asked for more "
+                << "than " << int(ExeShopRecord::SLOT_COUNT) << " AP slots here.\n";
+            continue;
+        }
         s.entries[slot].type    = e.isMateria ? 1 : 0;  // 1 = materia, 0 = item/weapon/etc.
         s.entries[slot].index   = token;
         s.entries[slot].padding = 0;
-        if (s.itemCount < ExeShopRecord::SLOT_COUNT)
-            s.itemCount = static_cast<quint8>(slot + 1);
+        s.itemCount = static_cast<quint8>(slot + 1);
+        placed[shopId] += 1;
         log << "AP shop " << shopId << " (" << shopName(shopId) << "): "
             << (e.isMateria ? "materia" : "item") << " token 0x"
             << QString::number(token, 16) << " at slot " << slot << "\n";
@@ -703,7 +780,7 @@ QString ShopRandomizer::shopName(int id)
 {
     static const char* names[] = {
         /*  0 */ "Sector 7 Weapon Shop",
-        /*  1 */ "Sector 7 Item Shop",
+        /*  1 */ "Mideel Item #2",          // NOT Sector 7: opened by itown1b
         /*  2 */ "Sector 7 Drug Store",
         /*  3 */ "Sector 5 Weapon Shop",
         /*  4 */ "Sector 5 Item Shop",

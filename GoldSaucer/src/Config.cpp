@@ -39,7 +39,7 @@ void Config::setDefaults()
     m_keyItemRandomization = false; // Disabled by default (experimental)
     
     // Starting equipment settings
-    m_startingEquipmentTier = 1; // Balanced tier
+    m_startingEquipmentTier = 2; // middle of 5 (= the YAML option's default, 3)
     
     // Output folder - default to "Randomized" next to FF7 installation
     m_outputFolder = "Randomized";

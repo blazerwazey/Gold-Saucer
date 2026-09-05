@@ -21,6 +21,7 @@
 #include <vector>
 #include <cstring>
 #include <QHash>
+#include <QMap>
 #include <QSet>
 
 // Forward decl: NOP all real PMVIE/MOVIE opcodes in a field's section-0 scripts.
@@ -32,6 +33,37 @@ static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextSt
 static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextStream& dbg);
 // Forward decl: NOP the Northern Crater party-split's "party = Cloud only" PRTYE.
 static int nopCraterPartyWipe(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// True for every Temple of the Ancients field (jtempl* / jtmpin* / kuro_*).
+static bool isTempleField(const QString& fieldName);
+// Forward decl: move the Temple's state machine off the global game moment.
+static int redirectTempleStateMachine(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: force the Temple's rooms into their pre-story state (Free Roam).
+static int neuterTempleStoryState(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: drop one entity script's WINDOW + MESSAGE pair.
+static int stripScriptDialog(QByteArray& d, const QString& fieldName,
+                             const char* wantField, const char* wantEntity,
+                             int wantScript, QTextStream& dbg);
+// Forward decl: take the "Aerith is not here" branch on jtempl's entry trigger.
+static int neuterTempleAerithPartyChecks(QByteArray& d, const QString& fieldName,
+                                         QTextStream& dbg);
+// Forward decl: stop jtempl teleporting the player into the post-collapse crater.
+static int nopTempleCraterJumps(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: stop jtempl hiding the background layers that draw the temple.
+static int showTempleBackground(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: stop Temple cutscenes blocking on absent party members.
+static int unblockTemplePartyWaits(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: replace a Temple party cutscene with just its state advance.
+static int skipTemplePartyCutscenes(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: silence the Temple trap sound effects.
+static int silenceTempleTrapAudio(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: NOP every JOIN (SPLIT's mirror) in a Temple field.
+static int nopTempleJoins(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: give kuro_9 a player-operated exit back to the world map.
+static int addTempleKuro9Exit(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: send kuro_82's exit to the world map instead of on to kuro_9.
+static int redirectTempleKuro82Exit(QByteArray& d, const QString& fieldName, QTextStream& dbg);
+// Forward decl: add a boss-fight treasure chest entity to a field.
+static int addBossChest(QByteArray& d, const QString& fieldName, QTextStream& dbg);
 // Forward decl: reduce one entity script to just its BITON (losinn inn softlock fix).
 static int neuterInnGoScript(QByteArray& d, const QString& fieldName,
                              const QByteArray& entityName,
@@ -580,6 +612,81 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             totalMods++;
     }
 
+    // Temple of the Ancients (v0.0.6): its rooms drive a self-contained state machine
+    // that, in vanilla, uses the GLOBAL game moment (604..638) as its variable. At
+    // Free Roam's 1997 those writes would slam the moment into the 600s and re-lock
+    // gates across the whole game. Move the whole machine — writes AND gates — onto a
+    // private word at savemap 0x0CC4 instead; see redirectTempleStateMachine. This
+    // must run FIRST: once redirected, the temple's gates no longer carry banks 0x20,
+    // so the pre-story gate-forcing below correctly leaves them alone and only its
+    // PRTYE handling applies.
+    if (freeRoam && isTempleField(fieldName)) {
+        if (redirectTempleStateMachine(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // PRTYE removal (Aerith is an AP item). Its moment-gate forcing is now inert
+        // for Temple fields by design — redirectTempleStateMachine has already moved
+        // those gates off banks 0x20, and a fresh savemap reads 0, which IS the
+        // pre-story state. Validation asserts 0 gates forced here.
+        if (neuterTempleStoryState(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // jtempl only: remove the two script jumps to the post-collapse crater so
+        // the player reaches the gateway into jtmpin1. See nopTempleCraterJumps.
+        if (fieldName.toLower() == "jtempl"
+            && nopTempleCraterJumps(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // jtempl only: its entry trigger runs a set piece ONLY when Aerith is in
+        // the party, and we gutted the middle of it. See the function comment.
+        if (fieldName.toLower() == "jtempl"
+            && neuterTempleAerithPartyChecks(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // kuro_1 earith:4 - drop Aerith's line. Requested 2026-09-04.
+        if (stripScriptDialog(decompressed, fieldName, "kuro_1", "earith", 4,
+                              debugStream) > 0)
+            totalMods++;
+        // The rooms' cutscenes were written for a party this field forces to
+        // Cloud|Aerith. We removed that force, so SPLIT and any wait on an optional
+        // character can now hang forever — see unblockTemplePartyWaits.
+        //
+        // FIRST reduce the party set pieces to just the state advance they perform;
+        // this keys on SPLIT, which the next call erases.
+        if (skipTemplePartyCutscenes(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        if (nopFieldScriptSplits(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // SPLIT's mirror. Same hazard, same fix — see nopTempleJoins.
+        if (nopTempleJoins(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        if (unblockTemplePartyWaits(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // The boulder traps go inert once the room's state says "finished", but
+        // the cycle driving them keeps running and keeps playing its audio, so
+        // drop the sound calls the trap entities make. See silenceTempleTrapAudio.
+        if (silenceTempleTrapAudio(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // jtempl only: stop sanctu hiding the layers that draw the temple.
+        if (fieldName.toLower() == "jtempl"
+            && showTempleBackground(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // kuro_82 only: end the dungeon here, on the world map, rather than
+        // continuing into kuro_9. Length-preserving.
+        if (redirectTempleKuro82Exit(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+        // kuro_9 only, and LAST: every pass above is a length-preserving byte
+        // patch working on the original layout, while this one reassembles the
+        // field through the FieldScriptEditor and moves offsets. Kept as a
+        // fallback exit now that kuro_82 bypasses the room.
+        if (addTempleKuro9Exit(decompressed, fieldName, debugStream) > 0)
+            totalMods++;
+    }
+
+    // Boss in a Box: add a boss-fight chest to the fields that carry one. Runs
+    // outside the Temple block because it applies anywhere, and it is the LAST
+    // structural pass in this function — it changes the entity count and every
+    // section offset, so anything that walks the original layout must already
+    // have run. See addBossChest.
+    if (freeRoam && addBossChest(decompressed, fieldName, debugStream) > 0)
+        totalMods++;
+
     if (freeRoam && fieldName.toLower() == "losinn") {
         nopFieldScriptSplits(decompressed, fieldName, debugStream);
         // Forgotten Capital inn: the line-trigger entity "line4" runs the sleep
@@ -891,9 +998,10 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     // semkin_7 (submarine dock): the vs_ssol line forces the "take the submarine"
     // sequence — soldier battle #769, then a MAPJUMP to subin_2b (#408, sub interior).
     // In Free Roam we keep the fight but redirect the exit to the WORLD MAP at Junon
-    // instead of boarding the sub. wm field 7 is Junon's world-map surface entry (it's
-    // what Lower Junon, junonl1, MAPJUMPs to); we reuse its zero-coord form (coords are
-    // ignored for wm dummy fields). Same 10-byte length, but routed via the
+    // instead of boarding the sub. Field id 7 (= wm6 by flevel's maplist, NOT wm7) is
+    // Junon's world-map surface entry — it is what Lower Junon, junonl1, MAPJUMPs to,
+    // so this copies the game's own data; we reuse its zero-coord form (the world map
+    // places the player from their stored position). Same 10-byte length, but routed via the
     // FieldScriptEditor for consistency. Anchor = the original MAPJUMP to subin_2b.
     if (freeRoam && fieldName.toLower() == "semkin_7") {
         QString fsErr;
@@ -2193,6 +2301,1887 @@ static int nopFieldScriptMovies(QByteArray& d, const QString& fieldName, QTextSt
     return nopped;
 }
 
+// True for every Temple of the Ancients field: the three exteriors (jtempl,
+// jtemplb, jtemplc), the two altar-descent rooms (jtmpin1/2) and the interior
+// (kuro_1..kuro_12 plus the odd-man-out kuro_82, which holds the Bahamut check).
+static bool isTempleField(const QString& fieldName)
+{
+    const QString f = fieldName.toLower();
+    if (f == "jtempl" || f == "jtemplb" || f == "jtemplc"
+        || f == "jtmpin1" || f == "jtmpin2" || f == "kuro_82")
+        return true;
+    if (f.startsWith("kuro_")) {
+        bool ok = false;
+        const int n = f.mid(5).toInt(&ok);
+        return ok && n >= 1 && n <= 12;
+    }
+    return false;
+}
+
+// NOP every SETWORD-to-game-moment write inside a Temple of the Ancients field.
+//
+// The Temple is a self-contained moment-state machine: its rooms drive themselves
+// by writing game moment 604..638 as the player advances (jtmpin1=604, jtmpin2=609,
+// kuro_3=612/618, kuro_8=615, kuro_9=621/627, kuro_82=624, kuro_12=630 — 9 sites
+// found by the Phase-1 audit). Vanilla enters the Temple AT moment 604, so those
+// writes only ever move the story forward.
+//
+// Free Roam runs at moment 1997. Entering any of these rooms would SLAM the global
+// moment down into the 600s, which re-locks moment gates across the ENTIRE game —
+// exactly the failure already documented four times over for losinn (664),
+// losin2 (677), gidun_3 (514), cos_btm (523) and seto1 (514). This is the highest
+// blast-radius patch in the Temple work, so it is deliberately broad: it NOPs ANY
+// moment write in the Temple's own range rather than the 9 audited offsets, so a
+// site the audit missed cannot slip through.
+//
+// SETWORD is 0x81 + 4 operands (banks, addr, u16 value). The moment lives at
+// Var[2][0] = savemap 0x0BA4, so the encoding is `81 20 00 <lo> <hi>`: banks 0x20 =
+// destination 16-bit bank 1 with a literal source, addr 0x00. Same 5-byte shape the
+// md1stin injection writes (see kGameMoment).
+//
+// Walks with the opcode-length table rather than scanning raw bytes: `81 20 00` is
+// only three bytes and would otherwise match script offset tables and text. Does
+// NOT break on RET — the same reason nopCraterPartyWipe and nopFieldScriptMovies
+// walk across it (a slot's S0-Main lives past the S0-Init RET). Length-preserving
+// (0x5F x5) and idempotent.
+static int redirectTempleStateMachine(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    // The Temple's own state-machine window. 638 is the top of the range the
+    // room IFSWs test, so anything inside it belongs to the Temple sequence.
+    static constexpr quint16 kTempleMomentLo = 604;
+    static constexpr quint16 kTempleMomentHi = 638;
+    // Destination: the 16-bit view of bank pair 3/4 is bank 4, so the banks byte
+    // is 0x40 (literal source). Address 0x20 -> savemap 0x0CA4 + 0x20 = 0x0CC4.
+    static constexpr quint8  kTempleBanks8   = 0x40;
+    static constexpr quint8  kTempleAddr     = 0x20;
+
+    // kuro_3's boulder traps. The room picks its state from two
+    // `IFSW templeState >= 618` gates: TRUE is "this room is already cleared"
+    // (one jumps straight to the script's RET, skipping the whole boulder
+    // block; the other sets the cleared-room entities up), FALSE drops through
+    // to the trap path. Free Roam seeds the state at 604 and kuro_3 only
+    // advances it to 618 from its OWN far-side exit triggers — entity `last`
+    // script 3 and entity `AD2` — which are on the way to kuro_4. So a player
+    // walking in meets live traps, and they only stop once kuro_4 has been
+    // entered; ducking out to kuro_2 and back leaves them running, because that
+    // route never crosses the trigger. Reported 2026-09-03.
+    //
+    // Forcing the comparand to 0 makes `>= 0` always true, so the room presents
+    // its cleared state from the first entry. Length-preserving (a 2-byte value
+    // swap), and deliberately NOT a savemap write: the state word still
+    // advances normally for every other room. Scoped to this one field and this
+    // one comparand — kuro_3's other gates (== 615, == 612, >= 615) are left
+    // exactly as they are.
+    static constexpr quint16 kKuro3TrapGate  = 618;
+
+    // kuro_7's exit already has BOTH destinations: `IFSW templeState >= 627`
+    // falls through to `MAPJUMP kuro_82` and jumps to `MAPJUMP kuro_8` when
+    // false. Forcing it true routes the player straight to kuro_82 and takes
+    // kuro_8 - and with it kuro_9, which only kuro_8 reaches - out of the map.
+    //
+    // Neither field holds a single AP location, so nothing becomes unobtainable,
+    // and the Red Dragon is unaffected: formation 652 lives in kuro_82's
+    // `produce:0` FALL-THROUGH branch, the one taken when the state is neither
+    // 630 nor 627, which is exactly how the player now arrives.
+    //
+    // WHAT THIS BREAKS ON ITS OWN: state 627 is written ONLY by kuro_9, and
+    // kuro_82 gates Bahamut behind it (627 -> `border2:4` writes 624 ->
+    // `mtra` grants the materia at savemap 0x1015 bit 1 = location 310095).
+    // Bypassing kuro_9 therefore makes that check unobtainable until the client
+    // writes 627 itself on the Red Dragon kill. THAT CLIENT WRITE IS REQUIRED -
+    // this edit alone ships an unbeatable seed whenever 310095 holds progression.
+    static constexpr quint16 kKuro7ExitGate  = 627;
+    static constexpr quint16 kAlwaysTrue     = 0;
+    static constexpr quint8  kOpGreaterEqual = 4;   // >=
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int nopped = 0, gates = 0, trapGates = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                // SETWORD  81 <banks> <addr> <u16>   : banks 0x20 = 16-bit bank 1,
+                // addr 0x00 = Var[2][0] = the global game moment.
+                if (op == 0x81 && len == 5 && pos + 5 <= fileSize
+                    && static_cast<quint8>(d.at(pos + 1)) == 0x20
+                    && static_cast<quint8>(d.at(pos + 2)) == 0x00) {
+                    quint16 value = 0;
+                    memcpy(&value, d.constData() + pos + 3, 2);
+                    if (value >= kTempleMomentLo && value <= kTempleMomentHi) {
+                        d[pos + 1] = static_cast<char>(kTempleBanks8);
+                        d[pos + 2] = static_cast<char>(kTempleAddr);
+                        ++nopped;
+                        dbg << "  TEMPLE_VAR: " << fieldName << " write " << value
+                            << " redirected to Var[4][0x" << QString::number(kTempleAddr, 16)
+                            << "] @" << pos << "\n";
+                    }
+                }
+                // IFSW  16 <banks> <addr16> <u16 value> <oper> <jump>
+                else if (op == 0x16 && len == 8 && pos + 8 <= fileSize
+                         && static_cast<quint8>(d.at(pos + 1)) == 0x20
+                         && static_cast<quint8>(d.at(pos + 2)) == 0x00
+                         && static_cast<quint8>(d.at(pos + 3)) == 0x00) {
+                    quint16 value = 0;
+                    memcpy(&value, d.constData() + pos + 4, 2);
+                    if (value >= kTempleMomentLo && value <= kTempleMomentHi) {
+                        d[pos + 1] = static_cast<char>(kTempleBanks8);
+                        d[pos + 2] = static_cast<char>(kTempleAddr);
+                        d[pos + 3] = static_cast<char>(0x00);
+                        ++gates;
+                        dbg << "  TEMPLE_VAR: " << fieldName << " gate on " << value
+                            << " redirected @" << pos << "\n";
+
+                        // Gates we force TRUE by zeroing the comparand, since
+                        // `>= 0` always holds. Both pick an existing branch the
+                        // field already contains; neither invents control flow.
+                        //   kuro_3 @618 - present the cleared room, no traps.
+                        //   kuro_7 @627 - always exit to kuro_82, skip kuro_8.
+                        const quint8 gateOper = static_cast<quint8>(d.at(pos + 6));
+                        const bool kuro3Trap =
+                            value == kKuro3TrapGate
+                            && fieldName.compare(QLatin1String("kuro_3"),
+                                                 Qt::CaseInsensitive) == 0;
+                        const bool kuro7Exit =
+                            value == kKuro7ExitGate
+                            && fieldName.compare(QLatin1String("kuro_7"),
+                                                 Qt::CaseInsensitive) == 0;
+                        if (gateOper == kOpGreaterEqual && (kuro3Trap || kuro7Exit)) {
+                            quint16 always = kAlwaysTrue;
+                            memcpy(d.data() + pos + 4, &always, 2);
+                            ++trapGates;
+                            if (kuro3Trap)
+                                dbg << "  TEMPLE_VAR: kuro_3 trap gate (>= "
+                                    << kKuro3TrapGate << ") forced TRUE @" << pos
+                                    << " - room presents as already cleared\n";
+                            else
+                                dbg << "  TEMPLE_VAR: kuro_7 exit gate (>= "
+                                    << kKuro7ExitGate << ") forced TRUE @" << pos
+                                    << " - always routes to kuro_82, bypassing "
+                                    << "kuro_8/kuro_9 (Bahamut needs the client's "
+                                    << "state-627 write on the Red Dragon kill)\n";
+                        }
+                    }
+                }
+                pos += len;
+            }
+        }
+    }
+    if (nopped || gates)
+        dbg << "  TEMPLE_VAR: " << fieldName << " redirected " << nopped
+            << " write(s) + " << gates << " gate(s) to savemap 0x0CC4"
+            << (trapGates ? QString(" (+%1 kuro_3 trap gate(s) forced true)")
+                              .arg(trapGates)
+                          : QString())
+            << "\n";
+    return nopped + gates;
+}
+
+// Force every Temple of the Ancients room into its PRE-STORY state, and stop the
+// rooms forcing a Cloud+Aerith party.
+//
+// (1) MOMENT GATES. Each room selects its state with IFSW comparisons against the
+// game moment (0x16 + 7 operands: banks, addr16, value16, oper, jump; jumps when
+// the comparison is FALSE). A survey of every Temple field found **40** such gates
+// — twice the ~20 the original audit estimated — split cleanly:
+//
+//     moment >= V   x15    TRUE at Free Roam's 1997   -> post-story branch
+//     moment == V   x25    FALSE at 1997              -> already correct
+//
+// and no `<` or `<=` anywhere. The state we want is "the Temple sequence never
+// started", i.e. moment < 604, at which EVERY gate is false. The 25 `==` gates are
+// already false at 1997, so only the 15 `>=` gates differ from the target — flip
+// those and the rooms behave byte-for-byte as if the sequence had never run.
+//
+// The flip sets the compared VALUE to 0xFFFF rather than touching the operator, so
+// the original comparison shape still reads correctly in a decompiler and the
+// intent ("can never be true") is obvious. mprogress caps at 1999, so 0xFFFF is
+// unreachable. Two bytes, no jump/offset recalculation.
+//
+// Anything else that would be TRUE at 1997 (a `>` or `!=` gate) is logged loudly
+// rather than silently skipped — the survey found none, but a different flevel
+// must not slip past unnoticed.
+//
+// (2) PRTYE. All 16 sites in the Temple are the same instruction, `ca 00 03 ff` =
+// party becomes Cloud | Aerith | empty. Aerith is an Archipelago item in Free Roam
+// and may not be recruited at all, so letting the rooms force her in is wrong.
+// NOP them (4 bytes -> 4x 0x5F), exactly as nopCraterPartyWipe does for the
+// Northern Crater's party-wiping PRTYE.
+//
+// Walks with the opcode-length table (never a raw byte scan). Length-preserving
+// and idempotent: a flipped gate no longer has a value in range, and a NOP'd PRTYE
+// is no longer 0xCA, so re-running matches nothing.
+static int neuterTempleStoryState(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint16 kTempleMomentLo = 604;
+    static constexpr quint16 kTempleMomentHi = 638;
+    static constexpr quint16 kNeverTrue      = 0xFFFF;
+    static constexpr quint8  kOpGreater      = 2;   // >
+    static constexpr quint8  kOpGreaterEq    = 4;   // >=
+    static constexpr quint8  kOpNotEqual     = 1;   // !=
+    static constexpr quint8  IFSW  = 0x16;
+    static constexpr quint8  PRTYE = 0xCA;
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int gates = 0, parties = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+
+                if (op == IFSW && len == 8
+                    && static_cast<quint8>(d.at(pos + 1)) == 0x20      // 16-bit bank 1, literal
+                    && static_cast<quint8>(d.at(pos + 2)) == 0x00
+                    && static_cast<quint8>(d.at(pos + 3)) == 0x00) {   // addr = Var[2][0]
+                    quint16 value = 0;
+                    memcpy(&value, d.constData() + pos + 4, 2);
+                    const quint8 oper = static_cast<quint8>(d.at(pos + 6));
+                    if (value >= kTempleMomentLo && value <= kTempleMomentHi) {
+                        if (oper == kOpGreater || oper == kOpGreaterEq) {
+                            quint16 never = kNeverTrue;
+                            memcpy(d.data() + pos + 4, &never, 2);
+                            ++gates;
+                            dbg << "  TEMPLE_STATE: " << fieldName << " forced gate FALSE "
+                                << "(moment " << (oper == kOpGreaterEq ? ">=" : ">")
+                                << " " << value << ") @" << pos << "\n";
+                        } else if (oper == kOpNotEqual) {
+                            dbg << "  TEMPLE_STATE: WARNING " << fieldName
+                                << " has an unhandled '!=' moment gate (value " << value
+                                << ") @" << pos << " — true at 1997, review it\n";
+                        }
+                        // '==' / '<' / '<=' are already false at 1997: nothing to do.
+                    }
+                } else if (op == PRTYE && len == 4) {
+                    for (int j = 0; j < 4; ++j)
+                        d[pos + j] = static_cast<char>(0x5F);
+                    ++parties;
+                }
+                pos += len;
+            }
+        }
+    }
+    if (gates || parties)
+        dbg << "  TEMPLE_STATE: " << fieldName << " forced " << gates
+            << " moment gate(s) false, NOP'd " << parties << " PRTYE\n";
+    return gates + parties;
+}
+
+// Drop one named entity script's WINDOW + MESSAGE pair, leaving the rest of the
+// script (movement, animation, facing) intact.
+//
+// Used for kuro_1 `earith:4`, which is
+//     MSPED / MOVE / ANIME1 / TURA cloud / WINDOW 0 / MESSAGE 3 / RET
+// i.e. Aerith walks over, turns to Cloud and speaks. `direct:0` starts it with a
+// request this build downgrades to a non-blocking REQ (she is optional and a
+// blocking wait would hang), so her script now runs CONCURRENTLY with whatever
+// the caller is doing - and both write window id 0. That is the same collision
+// that mangled the Temple shop menu in kuro_2. Removing just the dialogue leaves
+// her performing the scene silently and takes the window write out of the race.
+//
+// Scoped by field + entity NAME + script index rather than by opcode pattern:
+// this is a content decision about one line, not a class of bug, and the widest
+// possible reading of "NOP the risky opcode" is exactly what regressed kuro_8.
+// Stopping at RET is correct here - a non-zero script slot is a whole script.
+static int stripScriptDialog(QByteArray& d, const QString& fieldName,
+                             const char* wantField, const char* wantEntity,
+                             int wantScript, QTextStream& dbg)
+{
+    static constexpr quint8 WINDOW_OP = 0x50, MESSAGE_OP = 0x40, NOP = 0x5F;
+
+    if (fieldName.compare(QLatin1String(wantField), Qt::CaseInsensitive) != 0)
+        return 0;
+    if (wantScript < 0 || wantScript > 31) return 0;
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + wStringOffset;
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int entity = -1;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        QByteArray raw = d.mid(namesStart + 8 * e, 8);
+        const int nul = raw.indexOf('\0');
+        if (nul >= 0) raw.truncate(nul);
+        if (raw == QByteArray(wantEntity)) { entity = e; break; }
+    }
+    if (entity < 0) {
+        dbg << "  DIALOG_STRIP: " << fieldName << " has no entity '"
+            << wantEntity << "' - nothing done\n";
+        return 0;
+    }
+
+    quint16 slot = 0;
+    memcpy(&slot, d.constData() + offsetTableStart + 64 * entity + 2 * wantScript, 2);
+    int pos = sec0DataStart + static_cast<int>(slot);
+
+    int stripped = 0, guard = 0;
+    while (pos >= 0 && pos < walkEnd && guard++ < 400) {
+        const quint8 op = static_cast<quint8>(d.at(pos));
+        const int len = fieldOpcodeLength(d, pos, fileSize);
+        if (len <= 0) break;
+        if (op == WINDOW_OP || op == MESSAGE_OP) {
+            for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(NOP);
+            ++stripped;
+            dbg << "  DIALOG_STRIP: " << fieldName << " " << wantEntity << ":"
+                << wantScript << " NOP'd " << (op == WINDOW_OP ? "WINDOW" : "MESSAGE")
+                << " @" << pos << " (" << len << " bytes)\n";
+        }
+        if (op == 0x00) break;            // RET ends this script
+        pos += len;
+    }
+    return stripped;
+}
+
+// jtempl's entry line trigger softlocks when Aerith IS in the party.
+//
+// `border2` script 2 (Move), reached by walking in from the world map:
+//
+//     LINON 0                                   ; disable this line
+//     IFPRTYQ char 3 (Aerith), else -> Label 1  ; @0x0816  CB 03 28
+//     UC 1 / MENU2 1                            ; player control OFF
+//     BITON Var[3][233].6                       ; "entry scene played"
+//     SCR2DL (42, -41) speed 60                 ; camera pan
+//     <PRTYE + SPLIT>                           ; <- WE NOP THIS OUT
+//     REQ  earith script 7                      ; <- we downgraded from REQSW
+//     Label 1: RET
+//
+// Control is switched OFF here and only ever switched back ON by Aerith's own
+// script 7 — which relies on the SPLIT that makes her a standalone field entity.
+// nopFieldScriptSplits erases that SPLIT (it hangs when an optional character is
+// absent), so with Aerith actually in the party the trigger disables control,
+// starts a scene that cannot complete, and never restores it: the player runs
+// forward on the last held input and jams against a pillar. Reported 2026-09-03.
+//
+// Without Aerith the IFPRTYQ jumps to Label 1 and the field behaves perfectly,
+// so the fix is to make the block ALWAYS take that branch: rewrite the IFPRTYQ
+// into an unconditional JMPF to the same target.
+//
+// IFPRTYQ is `CB <charId> <jump>`; the jump is relative to its own operand, so
+// target = pos + 2 + v. JMPF is `10 <jump>` with target = pos + 1 + v', hence
+// v' = v + 1, and the freed third byte becomes NOP. Length-preserving, so no
+// offsets move. Scoped to charId 3 (Aerith): she is the character the removed
+// PRTYE/SPLIT used to force into the party, so hers are the checks left standing
+// on a set piece that no longer exists.
+static int neuterTempleAerithPartyChecks(QByteArray& d, const QString& fieldName,
+                                         QTextStream& dbg)
+{
+    static constexpr quint8 kIfPrtyQ  = 0xCB;
+    static constexpr quint8 kJmpF     = 0x10;
+    static constexpr quint8 kNop      = 0x5F;
+    static constexpr quint8 kAerithId = 3;
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + wStringOffset;
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int patched = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == kIfPrtyQ && len == 3 && pos + 3 <= fileSize
+                    && static_cast<quint8>(d.at(pos + 1)) == kAerithId) {
+                    const quint8 v = static_cast<quint8>(d.at(pos + 2));
+                    if (v < 0xFF) {          // v+1 must still fit in one byte
+                        d[pos]     = static_cast<char>(kJmpF);
+                        d[pos + 1] = static_cast<char>(v + 1);
+                        d[pos + 2] = static_cast<char>(kNop);
+                        ++patched;
+                        dbg << "  TEMPLE_AERITH: " << fieldName
+                            << " IFPRTYQ(Aerith) @" << pos
+                            << " -> unconditional JMPF +" << (v + 1)
+                            << " (always take the not-in-party branch)\n";
+                    } else {
+                        dbg << "  TEMPLE_AERITH: WARNING " << fieldName
+                            << " IFPRTYQ(Aerith) @" << pos
+                            << " has a 255-byte jump - left alone\n";
+                    }
+                }
+                pos += len;
+            }
+        }
+    }
+    if (patched)
+        dbg << "  TEMPLE_AERITH: " << fieldName << " neutered " << patched
+            << " Aerith party check(s)\n";
+    return patched;
+}
+
+// Stop jtempl teleporting the player into the post-collapse crater, so the
+// Temple's real entrance becomes reachable.
+//
+// Playtest 2026-08-14: "unable to enter temple, jtempl links to jtemplb which is
+// the collapsed temple." The original audit had the entry chain wrong. Field ids
+// from flevel's maplist: 600 jtempl, 601 jtemplb, 602 jtmpin1, 603 jtmpin2,
+// 604-616 kuro_*, 775 jtemplc. The real chain is
+//
+//     world -> jtempl --GATEWAY--> jtmpin1 -> jtmpin2 (the altar) / kuro_1
+//
+// and **jtemplb is the CRATER**, not the altar room (jtmpin2's entity list is
+// `altar, zero, first, second, third, first, fifth` — that is the altar).
+//
+// jtempl reaches jtmpin1 through a GATEWAY — static trigger data the engine
+// handles, no script — and jtempl contains no MPJPO, so that gateway is never
+// disabled. jtempl reaches the crater only through two script MAPJUMPs to field
+// 601, which are the post-collapse story transitions. A LINE trigger on the
+// approach fires one of them and teleports the player to the crater before they
+// ever reach the gateway.
+//
+// NOP both (MAPJUMP = 0x60 + 8 operands = 9 bytes -> 9x 0x5F). Verified safe
+// first: jtempl keeps gateway 1 -> jtmpin1 and gateways 2/3 -> wm7 (world map),
+// so the player can still get in and still get out.
+//
+// Walks with the opcode-length table, never a raw byte scan. Length-preserving
+// and idempotent (a NOP'd jump is no longer 0x60).
+static int nopTempleCraterJumps(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8  MAPJUMP        = 0x60;
+    // kOperands[0x60] = 9, so MAPJUMP is 10 bytes total (opcode + fieldId(2) +
+    // X(2) + Y(2) + triangle(2) + direction(1)). Writing 9 here matched nothing
+    // and silently did nothing — caught by the validator, not by the build.
+    static constexpr int     MAPJUMP_LEN    = 10;
+    static constexpr quint16 kCraterFieldId = 601;   // jtemplb
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == MAPJUMP && len == MAPJUMP_LEN && pos + MAPJUMP_LEN <= fileSize) {
+                    quint16 target = 0;
+                    memcpy(&target, d.constData() + pos + 1, 2);
+                    if (target == kCraterFieldId) {
+                        for (int j = 0; j < MAPJUMP_LEN; ++j)
+                            d[pos + j] = static_cast<char>(0x5F);
+                        ++nopped;
+                        dbg << "  TEMPLE_ENTRY: " << fieldName
+                            << " NOP'd MAPJUMP -> jtemplb (crater) @" << pos << "\n";
+                    }
+                }
+                pos += len;
+            }
+        }
+    }
+    if (nopped)
+        dbg << "  TEMPLE_ENTRY: " << fieldName << " NOP'd " << nopped
+            << " crater MAPJUMP(s); gateway -> jtmpin1 is now the way in\n";
+    return nopped;
+}
+
+// Stop jtempl hiding the background layers that draw the temple itself.
+//
+// Playtest 2026-08-14: "the temple background is also still not showing in
+// jtempl." The `sanctu` entity shows background parameters 1 and 2 (BGON, 0xE0)
+// and then hides them again with BGOFF (0xE1) — @0x0612 hides parameter 1 state 0
+// and @0x0636 hides parameter 2 state 0. Confirmed against Makou Reactor, which
+// renders those exact two instructions as "Hide the state #0 of the background
+// parameter #1 / #2" on the lines that bracket the `Var[5][0] > 0` test.
+//
+// NOTE 0xE0 = BGON and **0xE1 = BGOFF** (an earlier pass had these swapped, which
+// is why a scan for "BGOFF" came back empty while the field plainly had two).
+//
+// These are the only two BGOFFs in the field, so NOP both (4 bytes -> 4x 0x5F) and
+// the layers stay drawn. If that turns out to show something that should be
+// hidden, NOP only one — which layer is the temple is not yet confirmed.
+static int showTempleBackground(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8 BGON      = 0xE0;
+    static constexpr quint8 BGOFF     = 0xE1;
+    static constexpr int    BGOFF_LEN = 4;   // kOperands[0xE1] = 3
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == BGOFF && len == BGOFF_LEN) {
+                    const quint8 param = static_cast<quint8>(d.at(pos + 2));
+                    const quint8 state = static_cast<quint8>(d.at(pos + 3));
+                    // ONLY parameter 1 state 0 — playtest-confirmed as the layer
+                    // that draws the temple itself.
+                    //
+                    // Flip the opcode BGOFF -> BGON rather than NOPing it: same
+                    // length, same operands, and it positively turns the layer ON
+                    // at this point in the script instead of merely declining to
+                    // hide it (sanctu's earlier BGON evidently doesn't survive to
+                    // here — NOPing alone left the temple invisible).
+                    //
+                    // Parameter 2 is deliberately left hidden: only parameter 1 was
+                    // confirmed as the temple. Parameters 3 and 4 belong to
+                    // plazma1/plazma2, whose scripts cycle BGON -> WAIT -> BGOFF as
+                    // an animation — touching those freezes every state on
+                    // permanently. jtempl has 8 BGOFFs; exactly one is ours.
+                    if (param == 1 && state == 0) {
+                        d[pos] = static_cast<char>(BGON);
+                        ++nopped;
+                        dbg << "  TEMPLE_BG: " << fieldName << " BGOFF -> BGON param "
+                            << param << " state " << state << " @" << pos << "\n";
+                    }
+                }
+                pos += len;
+            }
+        }
+    }
+    if (nopped)
+        dbg << "  TEMPLE_BG: " << fieldName << " kept " << nopped
+            << " background layer(s) visible\n";
+    return nopped;
+}
+
+// Replace a Temple party cutscene with just the state advance it exists to perform.
+//
+// Playtest 2026-08-16, round 3 on the same softlock: kuro_3 still hung even after
+// SPLIT was NOP'd and every blocking wait downgraded to a non-blocking request. The
+// scene is a Cloud+Aerith set piece — it positions members by party slot, animates
+// them along paths, and hands control between them — and with an arbitrary Free Roam
+// party there is no arrangement of individual opcode fixes that makes it play
+// correctly. Trying to keep it working was the wrong goal.
+//
+// What the scene actually MEANS to the rest of the dungeon is one thing: it advances
+// the Temple's state variable. kuro_3's `last` S3-Move is
+//
+//     UC 01 / MENU2 01          <- take control away
+//     LINON 00                  <- disarm this trigger so it fires once
+//     SETWORD <temple var> 612  <- the part that matters
+//     ...50 lines of Cloud/Aerith choreography...
+//
+// So keep the first three ideas and drop the choreography: NOP the control-removal,
+// keep the line disarm and the state write, and RET immediately after it. The
+// trigger still fires when the player walks onto it, the dungeon still advances, and
+// there is nothing left to hang on. The remaining bytes become unreachable, so this
+// stays length-preserving — no jump or offset recalculation.
+//
+// Scoped by SPLIT: it is the reliable marker of "this script arranges the party",
+// and only those scripts are gutted. A script that merely writes the state variable
+// (the altar sequence in jtmpin1/jtmpin2, which is confirmed working) is untouched.
+// **This must run BEFORE nopFieldScriptSplits**, which erases that marker.
+static int skipTemplePartyCutscenes(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8 SPLIT   = 0x09;
+    static constexpr int    SPLIT_LEN = 15;
+    static constexpr quint8 SETWORD = 0x81;
+    static constexpr quint8 RET     = 0x00;
+    static constexpr quint8 UC      = 0x33;   // disable player control
+    static constexpr quint8 MENU2   = 0x4A;   // disable the menu
+    static constexpr quint8 NOP     = 0x5F;
+    // The Temple's private state word, after redirectTempleStateMachine.
+    static constexpr quint8 kTempleBanks8 = 0x40;
+    static constexpr quint8 kTempleAddr   = 0x20;
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    // Highest state value this field's own gates test. The gutted scene must leave
+    // the room reading as "past every beat", not merely past the one it belonged to.
+    // kuro_3 is the case that proved it: the scene writes 612, but the room keys on
+    // `>= 618` (produce and direct skip their set pieces) and `>= 615` (keeper stops
+    // arming the trap line). Keeping 612 left the room pre-beat with the traps live
+    // — the write landed, it was just the wrong value. Writing the field maximum
+    // puts every `>=` gate true and every `== <beat>` gate false, which is exactly
+    // "this room is finished".
+    quint16 fieldMaxState = 0;
+    {
+        QSet<quint16> seenScan;
+        for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+            quint16 slotScan[32];
+            memcpy(slotScan, d.constData() + offsetTableStart + 64 * e, 64);
+            for (int s = 0; s < 32; ++s) {
+                if (seenScan.contains(slotScan[s])) continue;
+                seenScan.insert(slotScan[s]);
+                int p = sec0DataStart + static_cast<int>(slotScan[s]);
+                int g2 = 0;
+                while (p >= 0 && p < walkEnd && g2++ < 4000) {
+                    const int l = fieldOpcodeLength(d, p, fileSize);
+                    if (l <= 0) break;
+                    if (static_cast<quint8>(d.at(p)) == 0x16 && l == 8
+                        && static_cast<quint8>(d.at(p + 1)) == kTempleBanks8
+                        && static_cast<quint8>(d.at(p + 2)) == kTempleAddr) {
+                        quint16 v = 0;
+                        memcpy(&v, d.constData() + p + 4, 2);
+                        if (v >= 604 && v <= 638 && v > fieldMaxState) fieldMaxState = v;
+                    }
+                    p += l;
+                }
+            }
+        }
+    }
+
+    int gutted = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+
+            // Pass 1: scan this script (to its RET) for a state write and a SPLIT.
+            int writeEnd = -1, writeVal = -1;
+            bool hasSplit = false;
+            QVector<int> controlOff;
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == RET) break;
+                if (op == SPLIT && len == SPLIT_LEN) hasSplit = true;
+                if (op == SETWORD && len == 5
+                    && static_cast<quint8>(d.at(pos + 1)) == kTempleBanks8
+                    && static_cast<quint8>(d.at(pos + 2)) == kTempleAddr
+                    && writeEnd < 0) {
+                    memcpy(&writeVal, d.constData() + pos + 3, 2);
+                    writeVal &= 0xFFFF;
+                    writeEnd = pos + len;
+                }
+                if ((op == UC || op == MENU2) && len == 2 && writeEnd < 0)
+                    controlOff.append(pos);
+                pos += len;
+            }
+            if (!hasSplit || writeEnd < 0 || writeEnd >= walkEnd) continue;
+
+            // Pass 2: hand control back, raise the write to the field's finished
+            // state, then stop right after it.
+            for (int c : controlOff) {
+                d[c]     = static_cast<char>(NOP);
+                d[c + 1] = static_cast<char>(NOP);
+            }
+            const int writeStart = writeEnd - 5;
+            quint16 finalVal = static_cast<quint16>(writeVal);
+            if (fieldMaxState > finalVal) {
+                finalVal = fieldMaxState;
+                memcpy(d.data() + writeStart + 3, &finalVal, 2);
+            }
+            d[writeEnd] = static_cast<char>(RET);
+            ++gutted;
+            dbg << "  TEMPLE_CUTSCENE: " << fieldName << " state write " << writeVal
+                << " -> " << finalVal << " (field's finished state), party "
+                << "choreography dropped @" << writeEnd << "\n";
+        }
+    }
+    if (gutted)
+        dbg << "  TEMPLE_CUTSCENE: " << fieldName << " reduced " << gutted
+            << " party cutscene(s) to their state advance\n";
+    return gutted;
+}
+
+// Stop Temple cutscenes hanging forever on a party member who isn't there.
+//
+// Playtest 2026-08-16: conversation softlock in kuro_3. This is a hazard WE
+// introduced. The Temple's cutscenes were written against a party the room forces
+// to "Cloud | Aerith | (Empty)" — we NOP'd those PRTYEs (correctly: Aerith is an
+// Archipelago item and may never be recruited), which leaves the scripts running
+// against whatever party the player actually has. kuro_3 shows the pattern
+// exactly:
+//
+//     @0x13A9  PRTYE                 <- NOP'd by us
+//     @0x13AD  SPLIT                 <- walks members 2 and 3, BLOCKS until both arrive
+//     @0x13BF  REQEW -> earith       <- waits for Aerith's script to END
+//     @0x13C5  REQEW -> earith
+//
+// A reduced party never fills SPLIT's slots, and a character who was never
+// recruited never finishes a script, so either one hangs the field with the
+// message box still up. Same failure the losinn inn had.
+//
+// Two length-preserving fixes:
+//   * SPLIT -> handled by nopFieldScriptSplits (15 bytes -> 0x5F). Cost is
+//     cosmetic: members simply aren't repositioned.
+//   * blocking waits -> drop the wait, keeping the request. One-byte opcode swaps
+//     (all these are 3 bytes): REQEW (0x03) -> REQ (0x01), and PRQSW (0x05) /
+//     PRQEW (0x06) -> PREQ (0x04). The script still asks the entity to run, it just
+//     stops waiting for a reply that may never come.
+//
+// **The two wait families address different things, and conflating them was a real
+// bug.** REQ* takes an ENTITY INDEX, so only the optional characters are a hazard —
+// Cloud is deliberately excluded, since he is always present and dropping his waits
+// would desynchronise cutscenes for nothing. PRQ* takes a PARTY SLOT (0/1/2) —
+// "the character #N in the current party" — so ANY of them can hang when the party
+// is short, regardless of which entities the field defines. The first version of
+// this helper checked PRQEW's operand against the entity table; in kuro_3 slot 2
+// resolved to entity 2 (`lg_ani`, an Animation), looked safe, and the room kept
+// softlocking on line 47 of `last`'s S3-Move script.
+static int unblockTemplePartyWaits(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8 REQSW = 0x02, REQEW = 0x03, REQ = 0x01;
+    static constexpr quint8 PRQSW = 0x05, PRQEW = 0x06, PREQ = 0x04;
+
+    // Field entity names of every character that is an Archipelago item.
+    static const QSet<QString> optional = {
+        "earith", "ballet", "tifa", "red", "cid", "yufi", "ketcy", "vince"
+    };
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    // Which entity indices are optional characters?
+    QSet<int> optionalIdx;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        QByteArray raw = d.mid(namesStart + 8 * e, 8);
+        int z = raw.indexOf('\0');
+        if (z >= 0) raw.truncate(z);
+        if (optional.contains(QString::fromLatin1(raw).toLower()))
+            optionalIdx.insert(e);
+    }
+    // NOTE: no early-out on an empty optionalIdx. Party-SLOT waits (PRQSW/PRQEW)
+    // are a hazard whether or not this field happens to name an optional character
+    // as an entity, because they address the party by position.
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int freed = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            // Has this script ALREADY put an interactive menu on screen by the
+            // time it makes the request? Set as the walk passes an ASK, so it
+            // only ever reflects code BEFORE the request - a forward pre-scan
+            // over-reached into later scripts and would have wrongly silenced
+            // kuro_7, whose ASKs sit well past its request. See the NOP below.
+            bool callerHasAsk = false;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == 0x48) callerHasAsk = true;   // ASK: a menu is up
+                // ENTITY-relative wait: operand is an entity index, so only the
+                // optional characters are a hazard.
+                //
+                // BOTH blocking request forms count. REQEW waits for the target's
+                // script to FINISH; REQSW waits for the request to be ACCEPTED —
+                // and an entity whose scripts never run (a character who is not in
+                // the party) never accepts one either. Handling only REQEW is what
+                // left kuro_9 hanging on `REQSW earith:4`, the instruction directly
+                // after the "Wake up!!" message.
+                if ((op == REQEW || op == REQSW) && len == 3) {
+                    const int target = static_cast<quint8>(d.at(pos + 1));
+                    if (optionalIdx.contains(target) && callerHasAsk) {
+                        // NOP THE WHOLE REQUEST, do not downgrade it to REQ.
+                        //
+                        // Downgrading removed the hang but started the optional
+                        // character's script CONCURRENTLY with the caller, and
+                        // both write the SAME window id. In kuro_2 the Temple
+                        // shop's `shop:1` did `REQEW earith:3` (wait for Aerith's
+                        // lines, THEN continue); as a bare REQ, earith:3's
+                        // `WINDOW 0 (x=190, y=8)` lands while the shop's own
+                        // `WINDOW 0 (x=8, y=160)` + `ASK` is drawing. The text
+                        // renders at the shop's origin inside Aerith's frame:
+                        // every line loses its first few characters and the last
+                        // two menu choices fall outside the box — including
+                        // "I want to save my game". Reported 2026-09-03; the same
+                        // downgrade exists in kuro_1 (x2), kuro_5, kuro_7,
+                        // kuro_8 (x2) and kuro_82 (x9), all on `earith`.
+                        //
+                        // These requests only ever start an optional character's
+                        // reaction lines, which in Free Roam are already
+                        // incoherent (she may not be in the party at all), so
+                        // dropping them outright costs nothing the player can
+                        // rely on — and it removes the whole class of window
+                        // race rather than one symptom. Length-preserving: a
+                        // 3-byte request becomes three 1-byte NOPs.
+                        for (int j = 0; j < len; ++j)
+                            d[pos + j] = static_cast<char>(0x5F);
+                        ++freed;
+                        dbg << "  TEMPLE_WAIT: " << fieldName << " NOP'd blocking "
+                            << (op == REQEW ? "REQEW" : "REQSW") << " on entity "
+                            << target << " @" << pos
+                            << " (caller owns a menu; a concurrent REQ raced its window)\n";
+                    } else if (optionalIdx.contains(target)) {
+                        // No menu in this script, so there is no window to race -
+                        // and the request is part of a CUTSCENE the room needs.
+                        // NOPping these is what broke kuro_8: its `produce:0`
+                        // director drives the whole Sephiroth sequence through
+                        // REQEW/REQSW on earith 3/4/7/8, and with those gone no
+                        // text played, Sephiroth never appeared and the scene
+                        // hung. Downgrade to a non-blocking REQ as before: the
+                        // scene still runs, and it cannot hang on a character who
+                        // was never recruited.
+                        d[pos] = static_cast<char>(REQ);
+                        ++freed;
+                        dbg << "  TEMPLE_WAIT: " << fieldName << " dropped blocking "
+                            << (op == REQEW ? "REQEW" : "REQSW") << " on entity "
+                            << target << " @" << pos << "\n";
+                    }
+                }
+                // PARTY-relative wait: the operand is a PARTY SLOT (0/1/2), NOT an
+                // entity index — "the character #N in the current party". Any of
+                // these is a hazard in Free Roam because slots 1 and 2 can simply be
+                // empty, and an empty slot never runs a script to wait on. Convert
+                // unconditionally; matching the operand against the entity table was
+                // the bug that left kuro_3 still softlocking (slot 2 resolved to
+                // entity 2 `lg_ani`, an Animation, so it looked safe).
+                else if ((op == PRQEW || op == PRQSW) && len == 3) {
+                    d[pos] = static_cast<char>(PREQ);
+                    ++freed;
+                    dbg << "  TEMPLE_WAIT: " << fieldName
+                        << " dropped blocking party-slot wait (slot "
+                        << static_cast<int>(static_cast<quint8>(d.at(pos + 1)))
+                        << ") @" << pos << "\n";
+                }
+                pos += len;
+            }
+        }
+    }
+    if (freed)
+        dbg << "  TEMPLE_WAIT: " << fieldName << " unblocked " << freed
+            << " wait(s) on optional party member(s)\n";
+    return freed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boss in a Box — add a treasure-chest entity that starts a boss fight
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Free Roam skips the whole story, so every mid-game boss is simply gone. This
+// puts them back as opt-in encounters: a chest stands where the fight used to
+// happen, and opening it starts that fight. Winning sets a savemap flag, which
+// Archipelago reads as an ordinary check.
+//
+// This is a genuine ADDITION to the field — a new model and a new entity, not a
+// repurposed one — so it touches structure the other passes never do:
+//
+//   section 0: header(32) | names(8*n) | akaoOffsets(4*a) | scriptOffsets(64*n)
+//              | code | dialogTable+strings | akaoData
+//
+// One more entity inserts 8 bytes of name table and 64 of script-offset table,
+// so ALL code shifts by 72 and every u16 script offset gains 72. The chest's own
+// script goes at the end of the code region, pushing the dialog table and akao
+// data along again, so strOffset and every u32 akao offset gain 72 + code size.
+// Jumps inside existing scripts are relative and the code block moves as a unit,
+// so they need no fixing. Finally section 2 gains a model record and every
+// section offset in the file header is recomputed.
+//
+// The layout, the opcode encodings and the model-record format were all taken
+// from real shipped data rather than inferred (Makou Reactor's own loader for
+// the model record; kuro_1's `box1` for the chest model HJGA.HRC / HJHB.anm;
+// gonjun2's `reno` for the coordinates and the BATTLE encoding). The whole
+// transform was prototyped and validated in Python first — see
+// K:/FF7 AP/proto_chest_inject.py, which re-parses the patched field and checks
+// section contiguity, script-offset validity and model-record framing.
+struct BossChestSpec {
+    const char* field;        // field to add the chest to
+    const char* entityName;   // <= 8 chars
+    quint16     formation;    // battle formation id
+    qint16      x, y, z;      // placement, from an entity already in that field
+    quint16     triangle;     // walkmesh triangle
+    quint8      direction;    // facing, 0-255 (0 = the engine's north)
+    quint8      flagBank;     // savemap bank nibble (3 -> savemap 0x0CA4)
+    quint8      flagAddr;     // byte offset within that bank
+    quint8      flagBit;
+    const char* bossName;     // for the log only
+};
+
+// Verified free: a scan of all 702 field scripts found bank 3/4 addresses
+// 0x1B-0x3F referenced by NO field. 0x20/0x21 are taken by the Temple's state
+// word, so chests start at 0x1B.
+static const BossChestSpec kBossChests[] = {
+    // Reno & Rude at the Gongaga jungle crossroads. gonjun2 already contains
+    // this exact fight (`reno` script 5 ends with BATTLE 539); it never happens
+    // in Free Roam because reno's init hides him behind `moment >= 598`, and
+    // 1997 always satisfies that. The chest gives it back without touching the
+    // original cutscene, which is a long party-dependent set piece of exactly
+    // the kind that softlocked the Temple repeatedly.
+    //
+    // PLACEMENT: these are `irena`'s coordinates, not `reno`'s. Reno's start
+    // position is where he confronts the party, which is essentially the spot
+    // the player materialises on when arriving from gonjun1 (that gateway lands
+    // at -674,97). A chest standing on the arrival point fired its Talk script
+    // the instant the field loaded, with no chance to interact — the script and
+    // its slot were correct all along, the placement was not. irena stands well
+    // clear on the far side and is a known-walkable triangle.
+    { "gonjun2", "chest", 539, -72, -86, -24, 46, 0, 3, 0x1B, 0, "Reno & Rude" },
+
+    // Bottomswell in ujunon2 — the field that actually stages the fight. `drctr`
+    // script 0's Main holds the whole set piece and ends with `BATTLE 00e001`
+    // (= formation 480) at 0x005eb, gated by `IFSW moment < 388` at 0x005a5, which
+    // Free Roam's 1997 fails — so the sequence is jumped over entirely. As with
+    // Gongaga, the chest runs BATTLE directly rather than calling that script: it
+    // is a party-dependent cutscene with SPLIT/JOIN/IDLCK of exactly the kind that
+    // softlocked the Temple.
+    //
+    // PLACEMENT: triangle 19, centroid (-801,518,-16). 327 units from the ujunon3
+    // arrival (-512,670 tri 26) and well clear of the blackbg8 arrival
+    // (-467,1325 tri 137). Verified walkable against section 4.
+    { "ujunon2", "chest", 480, -801, 518, -16, 19, 0, 3, 0x1C, 0, "Bottomswell" },
+
+    // Motor Ball. Vanilla runs this fight from blackbg9/blackbgb — pure
+    // black-background cutscene fields with no walkmesh to stand on — so the
+    // chest goes in mds5_5, the field the highway actually empties into
+    // (roadend and blackbg1 both MAPJUMP here).
+    //
+    // PLACEMENT: triangle 14, where `cl` stands in the arrival cutscene. The
+    // player materialises on triangle 83 at (952,-2492); this is ~575 units
+    // west of it, so the chest is not under the party on load.
+    { "mds5_5",  "chest", 468, 590, -2241, 0, 0, 248, 3, 0x1D, 0, "Motor Ball" },
+
+    // Demons Gate in kuro_12 - the field that already stages the fight
+    // (`BATTLE 644` at 0x0C3B), same as Bottomswell in ujunon2. It stopped
+    // firing once Free Roam bypassed the story that triggers it, and the
+    // kuro_7 -> kuro_82 reroute does not restore it, so the chest gives it
+    // back without touching the surrounding cutscene.
+    //
+    // Coordinates are the centroid of walkmesh triangle 22, picked off to
+    // one side of the room; refine in Ultima if it lands somewhere awkward.
+    { "kuro_12", "chest", 644, -197, 194, 0, 22, 0, 3, 0x1E, 0, "Demons Gate" },
+};
+
+static int addBossChest(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    const BossChestSpec* spec = nullptr;
+    for (const BossChestSpec& s : kBossChests) {
+        if (fieldName.compare(QString::fromLatin1(s.field), Qt::CaseInsensitive) == 0) {
+            spec = &s;
+            break;
+        }
+    }
+    if (!spec) return 0;
+
+    const int fileSize = d.size();
+    if (fileSize < 6 + 9 * 4) return 0;
+    quint32 secs[9];
+    memcpy(secs, d.constData() + 6, 9 * 4);
+    const int s0 = static_cast<int>(secs[0]) + 4;
+    if (s0 + 32 > fileSize) return 0;
+
+    const int nEnt    = static_cast<quint8>(d.at(s0 + 2));
+    const int nModels = static_cast<quint8>(d.at(s0 + 3));
+    quint16 strOff = 0, nAkao = 0;
+    memcpy(&strOff, d.constData() + s0 + 4, 2);
+    memcpy(&nAkao,  d.constData() + s0 + 6, 2);
+    if (nEnt <= 0 || nEnt >= 255 || nModels >= 255) {
+        dbg << "  BOSSCHEST: " << fieldName << " entity/model count at the limit — skipped\n";
+        return 0;
+    }
+
+    const int namesAt = s0 + 32;
+    const int akaoAt  = namesAt + 8 * nEnt;
+    const int offsAt  = akaoAt + 4 * nAkao;
+    const int codeAt  = offsAt + 64 * nEnt;
+    quint32 sec0Len = 0;
+    memcpy(&sec0Len, d.constData() + secs[0], 4);
+    const int sec0End = s0 + static_cast<int>(sec0Len);
+    if (codeAt >= s0 + strOff || sec0End > fileSize) {
+        dbg << "  BOSSCHEST: " << fieldName << " section 0 layout not as expected — skipped\n";
+        return 0;
+    }
+
+    // ── the chest's scripts ───────────────────────────────────────────────
+    auto u16 = [](QByteArray& b, quint16 v) {
+        b.append(char(v & 0xFF)); b.append(char((v >> 8) & 0xFF));
+    };
+    const quint8 bankNib = static_cast<quint8>(spec->flagBank << 4);
+
+    // Flag tests are BIT tests, not byte comparisons: the third operand is the
+    // BIT INDEX and the oper is 0x09/0x0A, matching kuro_1's box1
+    // (`IFUB f0 71 02 0a 57`). Comparing the whole byte to zero made the chest
+    // take the looted branch whenever that savemap byte held anything at all,
+    // which is how it first shipped invisible and non-solid.
+    //
+    // The jump is measured from the JUMP OPERAND (the 6th byte), not the end of
+    // the instruction, so skipping N bytes of body needs N+1. Verified against
+    // box1: `IFUB f0 51 02 09 09` at 0x3a4 has its jump operand at 0x3a9 and
+    // lands on 0x3b2 = 0x3a9 + 9, with 8 bytes of body between.
+    static constexpr quint8 OPER_BIT_ON = 0x09, OPER_BIT_OFF = 0x0A;
+    auto ifub = [&](QByteArray& b, quint8 oper, int bodyLen) {
+        b.append(char(0x14)).append(char(bankNib)).append(char(spec->flagAddr));
+        b.append(char(spec->flagBit)).append(char(oper)).append(char(bodyLen + 1));
+    };
+
+    // Chest lid frames, taken from kuro_1's box1, which drives the SAME model
+    // (HJGA.HRC): frame 0 is closed, frame 0x1D is open. box1 pins one of them
+    // with CANM!2 (0xBC, no wait) every frame. Without pinning a frame the model
+    // free-runs its animation — the chest sat there opening over and over.
+    // CANIM2 (0xBB) is the WAITING variant: it plays through and blocks, so the
+    // battle starts after the lid has finished opening rather than during it.
+    static constexpr quint8 FRAME_CLOSED = 0x00, FRAME_OPEN = 0x1D;
+    QByteArray poseClosed, poseOpen, playOpen;
+    poseClosed.append(char(0xBC)).append(char(0x00))
+              .append(char(FRAME_CLOSED)).append(char(FRAME_CLOSED)).append(char(0x01));
+    poseOpen.append(char(0xBC)).append(char(0x00))
+            .append(char(FRAME_OPEN)).append(char(FRAME_OPEN)).append(char(0x01));
+    playOpen.append(char(0xBB)).append(char(0x00))
+            .append(char(FRAME_CLOSED)).append(char(FRAME_OPEN)).append(char(0x01));
+
+    QByteArray hide;                                    // 6 bytes, no RET
+    hide.append(char(0x7E)).append(char(0x01));         // TLKON off
+    hide.append(char(0xC7)).append(char(0x01));         // SOLID off
+    hide.append(char(0xA4)).append(char(0x00));         // VISI  invisible
+
+    // SCRIPT 0 HOLDS BOTH INIT AND MAIN. Init runs to the first RET; MAIN is
+    // whatever follows that RET and runs EVERY FRAME. Makou shows this as two
+    // rows both labelled "S0", which is why its script list has 33 rows for 32
+    // slots — and it is the whole reason this took so long to find.
+    //
+    // Everything used to live in Init, so the engine ran to its RET and then
+    // fell straight into the next bytes of the blob — the Talk script — and
+    // executed it as Main. The battle (and later, with the battle removed for a
+    // diagnostic build, the AP flag) fired the instant the field loaded, from
+    // any slot and at any distance from the chest. Confirmed by reading the flag
+    // byte live: 0 on the world map, 1 immediately on entering gonjun2.
+    //
+    // kuro_1's box1 has exactly this shape: `CHAR 0a; RET` for Init, then
+    // XYZI/DIR/IFUB/animation as its Main. What looked like dead code after a
+    // stray RET was the Main script all along.
+    QByteArray init;
+    init.append(char(0xA1)).append(char(nModels));      // CHAR <new model>
+    init.append(char(0x00));                            // RET — ends Init
+
+    // MAIN: placement and visible state, re-asserted every frame, hidden once
+    // the flag bit is set. MUST end in RET so it never runs on into Talk.
+    QByteArray main;
+    main.append(char(0xA5)).append(char(0x00)).append(char(0x00));   // XYZI
+    u16(main, static_cast<quint16>(spec->x));
+    u16(main, static_cast<quint16>(spec->y));
+    u16(main, static_cast<quint16>(spec->z));
+    u16(main, spec->triangle);
+    main.append(char(0xB3)).append(char(0x00))
+        .append(char(spec->direction));                              // DIR (facing)
+    main.append(char(0x7E)).append(char(0x00));         // TLKON on  (arms Talk)
+    main.append(char(0xC7)).append(char(0x00));         // SOLID on
+    main.append(char(0xA4)).append(char(0x01));         // VISI  visible
+    // Pin the lid CLOSED, then remove the chest entirely once the flag bit is set
+    // (user's call — leaving it sitting open, as vanilla does, is the other
+    // option and is what poseOpen is kept for).
+    main.append(poseClosed);
+    ifub(main, OPER_BIT_ON, hide.size());               // already looted -> gone
+    main.append(hide);
+    main.append(char(0x00));                            // RET
+
+    // Open the lid, wait for it, THEN fight. The chest hides itself immediately
+    // rather than waiting for Main's next frame, so it vanishes as the battle
+    // ends instead of blinking back for a frame.
+    QByteArray fight;
+    fight.append(playOpen);                                          // CANIM2
+    fight.append(char(0x70)).append(char(0x00));                     // BATTLE
+    u16(fight, spec->formation);
+    fight.append(char(0x82)).append(char(bankNib))
+         .append(char(spec->flagAddr)).append(char(spec->flagBit));  // BITON
+    fight.append(hide);
+
+    QByteArray talk;
+    ifub(talk, OPER_BIT_OFF, fight.size());             // not looted -> fight
+    talk.append(fight);
+    talk.append(char(0x00));                            // RET
+
+    // Init and Main must be CONTIGUOUS — Main is reached by running off the end
+    // of Init, not via a slot offset — so they sit back to back and only Init
+    // gets a slot.
+    QByteArray blob = init + main + talk;
+    const int initOff = 0;
+    const int talkOff = init.size() + main.size();
+    const int retOff  = blob.size();
+    blob.append(char(0x00));                                          // shared RET
+
+    const int TABLE_GROWTH = 8 + 64;
+    const int delta = TABLE_GROWTH + blob.size();
+    const int blobBase = (codeAt + TABLE_GROWTH) + (s0 + strOff - codeAt) - s0;
+    if (blobBase + blob.size() > 0xFFFF) {
+        dbg << "  BOSSCHEST: " << fieldName << " script offsets would overflow u16 — skipped\n";
+        return 0;
+    }
+
+    // ── rebuild section 0 ─────────────────────────────────────────────────
+    QByteArray out;
+    QByteArray head = d.mid(s0, 32);
+    head[2] = char(nEnt + 1);
+    head[3] = char(nModels + 1);
+    const quint16 newStrOff = static_cast<quint16>(strOff + delta);
+    memcpy(head.data() + 4, &newStrOff, 2);
+    out += head;
+    out += d.mid(namesAt, 8 * nEnt);
+    out += QByteArray(spec->entityName).leftJustified(8, '\0', true);
+    for (int i = 0; i < nAkao; ++i) {
+        quint32 a = 0;
+        memcpy(&a, d.constData() + akaoAt + 4 * i, 4);
+        a += static_cast<quint32>(delta);
+        out.append(reinterpret_cast<const char*>(&a), 4);
+    }
+    for (int i = 0; i < 32 * nEnt; ++i) {
+        quint16 v = 0;
+        memcpy(&v, d.constData() + offsAt + 2 * i, 2);
+        v = static_cast<quint16>(v + TABLE_GROWTH);
+        out.append(reinterpret_cast<const char*>(&v), 2);
+    }
+    // Slot 0 = Init (Main runs on from it), slot 1 = TALK, slot 2 = Contact.
+    // box1's open sequence lives in slot 1, which is what a chest opens with.
+    for (int s = 0; s < 32; ++s) {
+        const int off = (s == 0) ? initOff : (s == 1 ? talkOff : retOff);
+        quint16 v = static_cast<quint16>(blobBase + off);
+        out.append(reinterpret_cast<const char*>(&v), 2);
+    }
+    out += d.mid(codeAt, s0 + strOff - codeAt);     // existing code, unchanged
+    out += blob;
+    out += d.mid(s0 + strOff, sec0End - (s0 + strOff));   // dialog + akao data
+
+    // ── rebuild section 2 (model loader) ──────────────────────────────────
+    quint32 sec2Len = 0;
+    memcpy(&sec2Len, d.constData() + secs[2], 4);
+    QByteArray sec2 = d.mid(static_cast<int>(secs[2]) + 4, static_cast<int>(sec2Len));
+    if (sec2.size() < 6) return 0;
+    const quint16 newModels = static_cast<quint16>(nModels + 1);
+    memcpy(sec2.data() + 2, &newModels, 2);
+    {
+        // Makou's FieldModelLoaderPC layout: u16 nameLen | name | u16 unknown |
+        // char hrc[8] | char scale[4] | u16 nAnim | 30 bytes colour/light |
+        // per anim: u16 len | name | u16 unknown.
+        //
+        // EVERY constant below is copied from kuro_1's shipped `trbox_k` record,
+        // not derived from those field names. The first version of this built
+        // them from the descriptions and produced a field that CRASHED ON LOAD:
+        // the name lengths counted a trailing NUL the shipped data does not
+        // carry, so the parser read the HRC one byte late, every field after it
+        // shifted, and the game tried to load a model that does not exist.
+        // proto_chest_inject.py now asserts this record is byte-identical to the
+        // shipped one.
+        //
+        // Name lengths are the EXACT string length — no terminator.
+        const QByteArray mname =
+            (fieldName.toLower() + "fieldbg_trbox_k.char").toLatin1();
+        QByteArray rec;
+        u16(rec, static_cast<quint16>(mname.size()));
+        rec += mname;
+        u16(rec, 1);                                    // unknown: 1, not 0
+        rec += QByteArray("HJGA.HRC").leftJustified(8, '\0', true);
+        rec += QByteArray("512").leftJustified(4, '\0', true);
+        u16(rec, 1);                                    // one animation
+        // 27 zero bytes then the global colour, which is WHITE.
+        rec += QByteArray(27, '\0');
+        rec += QByteArray("\xff\xff\xff", 3);
+        const QByteArray aname = QByteArray("HJHB.anm");
+        u16(rec, static_cast<quint16>(aname.size()));
+        rec += aname;
+        u16(rec, 1);
+        sec2 += rec;
+    }
+
+    // ── SPLICE the new sections into the original file ────────────────────
+    //
+    // This mirrors FieldScriptEditor::assemble, which is proven — it ships the
+    // kuro_9 exit and the Temple work. An earlier version here rebuilt the file
+    // section by section instead, and that can only ever be as complete as one's
+    // model of the format: it silently dropped the 14-byte trailer every field
+    // carries past section 8 (taking the tail off the background data, so the
+    // field crashed on load), and nothing guarantees that is the only thing
+    // living outside the nine sections. Splicing preserves everything that is
+    // not explicitly replaced, by construction.
+    //
+    // Section 2 is spliced FIRST because it lies after section 0, so replacing
+    // it cannot move section 0. Section 0 then shifts pointers 1..8 on top.
+    auto shiftPointers = [](QByteArray& buf, int from, int growth) {
+        for (int i = from; i < 9; ++i) {
+            quint32 p = 0;
+            memcpy(&p, buf.constData() + 6 + 4 * i, 4);
+            p = static_cast<quint32>(static_cast<int>(p) + growth);
+            memcpy(buf.data() + 6 + 4 * i, &p, 4);
+        }
+    };
+    auto writeLen = [](QByteArray& buf, int at, int len) {
+        const quint32 v = static_cast<quint32>(len);
+        memcpy(buf.data() + at, &v, 4);
+    };
+
+    QByteArray rebuilt = d;
+    const int sec2Growth = sec2.size() - static_cast<int>(sec2Len);
+    writeLen(rebuilt, static_cast<int>(secs[2]), sec2.size());
+    shiftPointers(rebuilt, 3, sec2Growth);
+    rebuilt.replace(static_cast<int>(secs[2]) + 4, static_cast<int>(sec2Len), sec2);
+
+    const int sec0Growth = out.size() - static_cast<int>(sec0Len);
+    writeLen(rebuilt, static_cast<int>(secs[0]), out.size());
+    shiftPointers(rebuilt, 1, sec0Growth);
+    rebuilt.replace(s0, static_cast<int>(sec0Len), out);
+
+    // The file must have grown by exactly what was added. Anything else means
+    // bytes were lost, and a corrupt field is worse than no chest.
+    const int expected = sec0Growth + sec2Growth;
+    if (rebuilt.size() - fileSize != expected) {
+        dbg << "  BOSSCHEST: " << fieldName << " REBUILD SIZE MISMATCH (expected +"
+            << expected << ", got +" << (rebuilt.size() - fileSize)
+            << ") — field left unchanged\n";
+        return 0;
+    }
+
+    d = rebuilt;
+    dbg << "  BOSSCHEST: " << fieldName << " gained a chest for " << spec->bossName
+        << " (formation " << spec->formation << ", flag bank " << spec->flagBank
+        << " addr 0x" << QString::number(spec->flagAddr, 16)
+        << " bit " << spec->flagBit << "); entities " << nEnt << " -> " << (nEnt + 1)
+        << ", models " << nModels << " -> " << (nModels + 1)
+        << ", +" << (rebuilt.size() - fileSize) << " bytes\n";
+    return 1;
+}
+
+// Send kuro_82's exit to the world map instead of on to kuro_9.
+//
+// kuro_82 is the last room that matters in Free Roam: it holds the dragon fight
+// and the Bahamut check, and once that is done the Temple sequence is effectively
+// over. Vanilla continues into kuro_9 — a long story set piece written for a fixed
+// Cloud+Aerith party, and the room that has produced softlock after softlock. So
+// rather than keep repairing kuro_9, skip it: the fade-out that ends kuro_82 now
+// lands the player on the world map outside the Temple.
+//
+// Both of kuro_82's exits are byte-identical `MAPJUMP kuro_9 (#613) x=923 y=18
+// tri=5 dir=68`, one in `ad` (the director) and one in `border2` (a line trigger),
+// so repointing the pattern covers whichever the player reaches. The anchor is
+// matched at opcode boundaries only, and a whole-file scan confirms those two are
+// its only occurrences — the byte run appears nowhere in operand data.
+//
+// Destination is field id 8 (wm7) with zero coordinates: the Temple's own
+// world-map exit, the same one jtempl's gateways use. Length-preserving (10 bytes
+// for 10), so no reassembly and no offset changes.
+static int redirectTempleKuro82Exit(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    if (fieldName.toLower() != "kuro_82") return 0;
+
+    static constexpr quint8 MAPJUMP = 0x60;
+    const QByteArray toKuro9 = QByteArray::fromHex("6065029b031200050044"); // -> kuro_9 #613
+    const QByteArray toWorld = QByteArray::fromHex("60080000000000000000"); // -> wm7 (#8)
+
+    const int fileSize = d.size();
+    if (fileSize < 6 + 9 * 4) return 0;
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    const int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    const int nbEntities = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    const int namesStart       = sec0DataStart + 32;
+    const int akaoTableStart   = namesStart + 8 * nbEntities;
+    const int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * nbEntities > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        const int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int repointed = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < nbEntities; ++e) {
+        quint16 slot[32];
+        memcpy(slot, d.constData() + offsetTableStart + 64 * e, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 6000) {
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == MAPJUMP && len == toKuro9.size()
+                    && pos + len <= walkEnd
+                    && d.mid(pos, len) == toKuro9) {
+                    d.replace(pos, len, toWorld);
+                    ++repointed;
+                    dbg << "  KURO82_EXIT: MAPJUMP kuro_9 -> wm7 (world map) @" << pos << "\n";
+                }
+                pos += len;
+            }
+        }
+    }
+    if (repointed)
+        dbg << "  KURO82_EXIT: kuro_82 now exits to the world map (" << repointed
+            << " site(s)); kuro_9 is bypassed\n";
+    else
+        dbg << "  KURO82_EXIT: kuro_9 MAPJUMP anchor not found\n";
+    return repointed;
+}
+
+// Give kuro_9 a player-operated exit back to the world map.
+//
+// kuro_9 has NO gateways of its own (verified: all 12 slots unused) — vanilla
+// leaves it only by script, at the end of a long story set piece written for a
+// fixed Cloud+Aerith party. That set piece has proven to be a seam of blocking
+// constructs (SPLIT, JOIN, REQEW, REQSW, PRQ*, and the still-unhandled MOVA/TURA
+// family), and fixing them one at a time has not converged. By the time the
+// player reaches this room the Temple sequence is effectively over, so rather
+// than keep repairing the cutscene, give them a way out they operate themselves.
+//
+// `mini` (the Temple model the room is built around) is the natural control, and
+// exactly ONE edit is made: its Talk script, a bare RET, becomes a MAPJUMP to the
+// world map followed by RET.
+//
+// Its Init is deliberately left ALONE. `mini` runs `TLKON 01` / `SOLID 01` there —
+// talk and collision both OFF — and is only switched on by `direct`, which calls
+// `mini:3` (TLKON 00 / SOLID 00 / VISI) inside its `state == 624` and `state == 630`
+// branches. 624 is kuro_82's state, so the model becomes interactable only after the
+// player has been through kuro_82 and taken the Bahamut check. Forcing it on at Init
+// would hand the player an exit before that check and make Bahamut uncollectable;
+// leaving the vanilla gating in place is what keeps the check honest, so this exit
+// needs no pool exclusion.
+//
+// Destination is the Temple's OWN world-map exit, not an invented one: jtempl's
+// gateways 1 and 2 both target field id 8 (wm7) with zero coordinates — the world
+// map places the player from their stored position, which is why the coords are
+// zero. MAPJUMP field ids are maplist ids, confirmed independently by kuro_9's own
+// `MAPJUMP 612`, which resolves to kuro_82 exactly as the room's flow requires.
+//
+// Routed through FieldScriptEditor so offsets and jumps are recomputed; the Talk
+// script grows from 1 byte to 11.
+static int addTempleKuro9Exit(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    if (fieldName.toLower() != "kuro_9") return 0;
+
+    static constexpr quint8 RET = 0x00;
+    // MAPJUMP wm7 (field id 8), x/y/triangle/direction all zero, then RET.
+    const QByteArray exitScript = QByteArray::fromHex("6008000000000000000000");
+
+    // Resolve `mini`'s entity index from the header before parsing.
+    const int fileSize = d.size();
+    if (fileSize < 6 + 9 * 4) return 0;
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    const int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+    const int nbEntities = static_cast<quint8>(d.at(sec0DataStart + 2));
+    const int namesStart = sec0DataStart + 32;
+    if (namesStart + 8 * nbEntities > fileSize) return 0;
+
+    int miniIdx = -1;
+    for (int e = 0; e < nbEntities; ++e) {
+        QByteArray raw = d.mid(namesStart + 8 * e, 8);
+        const int z = raw.indexOf('\0');
+        if (z >= 0) raw.truncate(z);
+        if (QString::fromLatin1(raw).toLower() == "mini") { miniIdx = e; break; }
+    }
+    if (miniIdx < 0) {
+        dbg << "  KURO9_EXIT: entity 'mini' not found\n";
+        return 0;
+    }
+
+    QString err;
+    FieldScriptEditor ed;
+    if (!ed.parse(d, err)) {
+        dbg << "  KURO9_EXIT: FieldScriptEditor parse failed (" << err << ")\n";
+        return 0;
+    }
+
+    // Replace the empty Talk script (a bare RET) with MAPJUMP + RET. Replacing
+    // rather than inserting keeps the script anchored to the new first
+    // instruction — an insertBefore at a script start would leave Talk pointing
+    // at the old RET and strand the MAPJUMP at the tail of the Main script,
+    // where it would fire on load.
+    const int talkStart = ed.scriptStart(miniIdx, 2);
+    if (talkStart < 0) {
+        dbg << "  KURO9_EXIT: mini Talk script not found\n";
+        return 0;
+    }
+    const QByteArray talkBytes = ed.instrBytes(talkStart);
+    if (talkBytes.size() != 1 || static_cast<quint8>(talkBytes.at(0)) != RET) {
+        dbg << "  KURO9_EXIT: mini Talk is not the expected empty RET (got 0x"
+            << QString::number(talkBytes.isEmpty() ? 0 : static_cast<quint8>(talkBytes.at(0)), 16)
+            << ") — leaving it alone\n";
+        return 0;
+    }
+    if (!ed.replaceAt(talkStart, exitScript, err)) {
+        dbg << "  KURO9_EXIT: talk replace failed (" << err << ")\n";
+        return 0;
+    }
+    QByteArray out = ed.assemble(err);
+    if (out.isEmpty()) {
+        dbg << "  KURO9_EXIT: assemble failed (" << err << ")\n";
+        return 0;
+    }
+    d = out;
+    dbg << "  KURO9_EXIT: mini Talk -> MAPJUMP wm7 (world map) @instr " << talkStart
+        << "; vanilla TLKON/LINON gating left intact\n";
+    return 1;
+}
+
+// NOP every JOIN (0x08) opcode in a Temple of the Ancients field.
+//
+// JOIN is SPLIT's mirror: SPLIT walks the non-leader party members away to fixed
+// coordinates, JOIN walks them back onto the leader — and, like SPLIT, it BLOCKS
+// until every member has arrived. A Free Roam party can be one character, and an
+// empty slot never arrives, so the script waits forever.
+//
+// This is the same failure already fixed for SPLIT (the Forgotten Capital inn),
+// and it was simply never applied to the mirror opcode. kuro_9 is where it bites
+// first, because there the JOIN sits on the room director's live path:
+//
+//     direct, main:  REQEW cloud:18  /  JOIN 0a  /  REQEW cloud:19
+//
+// so the room hangs on the way to the script that advances the state and leaves.
+// 11 of the Temple's 18 fields contain a JOIN, so kuro_9 was only the first to be
+// walked into.
+//
+// Cost is cosmetic and identical to the SPLIT fix: members are not gathered onto
+// the leader. Scoped to Temple fields — losinn's own SPLIT handling is left as it
+// is rather than widened on the back of one room's evidence.
+//
+// Walks with the opcode-length table so operand bytes that happen to be 0x08 are
+// never touched. Length-preserving (0x08 + 1 operand -> two 0x5F), idempotent.
+static int nopTempleJoins(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8 JOIN = 0x08, NOP = 0x5F;
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    int nopped = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 6000) {
+                // Re-read from the LIVE buffer: earlier passes rewrite opcodes
+                // underneath this walk, and a stale copy double-counts.
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (op == JOIN && pos + len <= walkEnd) {
+                    for (int i = 0; i < len; ++i)
+                        d[pos + i] = static_cast<char>(NOP);
+                    ++nopped;
+                    dbg << "  TEMPLE_JOIN: " << fieldName << " NOP'd JOIN @" << pos << "\n";
+                }
+                pos += len;
+            }
+        }
+    }
+    if (nopped)
+        dbg << "  TEMPLE_JOIN: " << fieldName << " NOP'd " << nopped << " JOIN opcode(s)\n";
+    return nopped;
+}
+
+// Silence the Temple's rolling-boulder traps.
+//
+// kuro_3's traps are the entities `iwa1/2/3` (iwa = boulder): each of their
+// scripts is a roll (LINE / SLIDR / a move) followed by an AKAO3 that plays the
+// rumble, and `hantei1/2/3` are the paired sound-only scripts they kick off —
+// nothing but AKAO3 + WAIT + a temp flag, on channels 0x28/0x29/0x2A.
+//
+// Once the room's state reaches "finished" the trap LINEs go dead, so the
+// boulders stop being a hazard — but the cycle that drives them keeps running,
+// and so does its audio. Vanilla never had to care: the room is only ever left
+// in that state by the story leaving the field for good.
+//
+// Because the sound lives in a separate script chain from the state gate, there
+// is no gate to flip. Instead drop the sound calls outright from the six trap
+// entities. They exist for nothing else, so this costs only the trap's audio
+// cue while the traps are still live, and it cannot affect any other entity.
+//
+// Ownership is resolved by SCRIPT RANGE (which entity's slot offset an
+// instruction falls after), never by where a walk happened to start: the
+// instruction walk does not stop at RET, so walks converge and an offset
+// reached from one entity may well be another entity's code.
+//
+// Length-preserving (each call is overwritten with its own length in 0x5F NOPs)
+// and idempotent.
+static int silenceTempleTrapAudio(QByteArray& d, const QString& fieldName, QTextStream& dbg)
+{
+    static constexpr quint8 NOP = 0x5F;
+    // Sound-emitting opcodes. MUSIC (0xD2) is deliberately NOT here: a trap has
+    // no business changing the track, so a hit would mean the range attribution
+    // is wrong and the field would go silent.
+    auto isSoundOp = [](quint8 op) {
+        return op == 0xD0    // AKAO2
+            || op == 0xD3    // SOUND
+            || op == 0xD8    // AKAO
+            || op == 0xF2;   // AKAO3
+    };
+
+    const int fileSize = d.size();
+    const int HEADER_SIZE = 6 + 9 * 4;
+    if (fileSize < HEADER_SIZE) return 0;
+
+    quint32 sectionPositions[9];
+    memcpy(sectionPositions, d.constData() + 6, 9 * 4);
+    int sec0DataStart = static_cast<int>(sectionPositions[0]) + 4;
+    if (sec0DataStart + 32 > fileSize) return 0;
+
+    quint8  nbEntities    = static_cast<quint8>(d.at(sec0DataStart + 2));
+    quint16 wStringOffset = 0, nAkaoOffsets = 0;
+    memcpy(&wStringOffset, d.constData() + sec0DataStart + 4, 2);
+    memcpy(&nAkaoOffsets,  d.constData() + sec0DataStart + 6, 2);
+    if (nbEntities == 0) return 0;
+
+    int namesStart       = sec0DataStart + 32;
+    int akaoTableStart   = namesStart + 8 * static_cast<int>(nbEntities);
+    int offsetTableStart = akaoTableStart + 4 * static_cast<int>(nAkaoOffsets);
+    if (offsetTableStart + 64 * static_cast<int>(nbEntities) > fileSize) return 0;
+
+    // Trap entities, by name.
+    QSet<int> trapIdx;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        QByteArray raw = d.mid(namesStart + 8 * e, 8);
+        int z = raw.indexOf('\0');
+        if (z >= 0) raw.truncate(z);
+        const QString name = QString::fromLatin1(raw).toLower();
+        if (name.startsWith("iwa") || name.startsWith("hantei"))
+            trapIdx.insert(e);
+    }
+    if (trapIdx.isEmpty()) return 0;
+
+    int walkEnd = sec0DataStart + static_cast<int>(wStringOffset);
+    if (nAkaoOffsets > 0 && akaoTableStart + 4 <= fileSize) {
+        quint32 firstAkao = 0;
+        memcpy(&firstAkao, d.constData() + akaoTableStart, 4);
+        int akaoAbs = sec0DataStart + static_cast<int>(firstAkao);
+        if (akaoAbs > offsetTableStart && akaoAbs < walkEnd) walkEnd = akaoAbs;
+    }
+    if (walkEnd > fileSize || walkEnd <= offsetTableStart) walkEnd = fileSize;
+
+    // Script-range map: every slot offset in the field, paired with its owner.
+    // An offset belongs to the entity with the greatest slot offset <= it.
+    QMap<int, int> ownerAt;  // absolute script start -> entity index
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            int abs = sec0DataStart + static_cast<int>(slot[s]);
+            if (abs < offsetTableStart || abs >= walkEnd) continue;
+            // Shared offsets: first entity to claim one wins. A shared script is
+            // only silenced if that first owner is itself a trap.
+            if (!ownerAt.contains(abs)) ownerAt.insert(abs, e);
+        }
+    }
+    if (ownerAt.isEmpty()) return 0;
+
+    auto ownerOf = [&ownerAt](int pos) -> int {
+        auto it = ownerAt.upperBound(pos);   // first start strictly after pos
+        if (it == ownerAt.constBegin()) return -1;
+        --it;
+        return it.value();
+    };
+
+    int silenced = 0;
+    QSet<quint16> seen;
+    for (int e = 0; e < static_cast<int>(nbEntities); ++e) {
+        int tbl = offsetTableStart + 64 * e;
+        quint16 slot[32];
+        memcpy(slot, d.constData() + tbl, 64);
+        for (int s = 0; s < 32; ++s) {
+            if (seen.contains(slot[s])) continue;
+            seen.insert(slot[s]);
+            int pos = sec0DataStart + static_cast<int>(slot[s]);
+            int guard = 0;
+            while (pos >= 0 && pos < walkEnd && guard++ < 4000) {
+                // Re-read the opcode from the LIVE buffer every step; earlier
+                // passes rewrite instructions underneath this walk.
+                const quint8 op = static_cast<quint8>(d.at(pos));
+                const int len = fieldOpcodeLength(d, pos, fileSize);
+                if (len <= 0) break;
+                if (isSoundOp(op) && pos + len <= walkEnd
+                    && trapIdx.contains(ownerOf(pos))) {
+                    for (int i = 0; i < len; ++i)
+                        d[pos + i] = static_cast<char>(NOP);
+                    ++silenced;
+                    dbg << "  TEMPLE_TRAP_SFX: " << fieldName << " silenced op 0x"
+                        << QString::number(op, 16) << " (" << len << " B) @" << pos
+                        << " [entity " << ownerOf(pos) << "]\n";
+                }
+                pos += len;
+            }
+        }
+    }
+    if (silenced)
+        dbg << "  TEMPLE_TRAP_SFX: " << fieldName << " silenced " << silenced
+            << " trap sound call(s)\n";
+    return silenced;
+}
+
 // NOP every SPLIT (0x09) opcode in a field's section-0 scripts. SPLIT walks the
 // non-leader party members to fixed coordinates and BLOCKS until each arrives;
 // with a reduced party (Free Roam can have a single character) the empty slots
@@ -2306,6 +4295,7 @@ static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextSt
     }
     if (walkEnd > fileSize || walkEnd <= offt) walkEnd = fileSize;
 
+    const bool templeField = isTempleField(fieldName);
     int nopped = 0;
     QSet<quint16> seen;
     for (int e = 0; e < static_cast<int>(nb); ++e) {
@@ -2321,7 +4311,20 @@ static int nopFieldScriptSplits(QByteArray& d, const QString& fieldName, QTextSt
                 if (op == 0x09) {                       // SPLIT -> NOP all bytes
                     for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(0x5F);
                     ++nopped;
-                } else if (op == 0x00) {
+                } else if (op == 0x00 && !templeField) {
+                    // Stopping at RET only ever sees a script's Init half: slot 0
+                    // holds Init THEN Main, separated by exactly this RET. Every
+                    // SPLIT in a Main was therefore invisible to this pass -
+                    // kuro_1 `produce:0` and kuro_7 `produce:0` both kept theirs
+                    // while nopTempleJoins (which does NOT stop at RET) removed
+                    // their matching JOINs, leaving those fields half-split.
+                    //
+                    // Walking past RET everywhere would newly NOP 67 SPLITs in 49
+                    // fields - Junon, the submarine, Gold Saucer, the crater - so
+                    // it is scoped to the Temple, where removing the SPLIT/JOIN
+                    // pair is already the tested policy and the JOIN half already
+                    // behaves this way. Measured: 6 new sites, all in Temple
+                    // fields (kuro_1, kuro_5, kuro_7, kuro_8, kuro_9, jtmpin1).
                     break;
                 }
                 pos += len;
@@ -2573,7 +4576,10 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     //                   incl. Materia = bit 2) and locking = 0x0000 (none).
     //   SETBYTE       - Kalm conversation flags = 0x03 (NPC-spoken bits) to
     //                   avoid the Kalm progression lock.
-    //   SETWORD       - game moment = 1603.
+    //   SETWORD       - game moment = kGameMoment (1997, declared below). Keep
+    //                   this comment in step with the constant: it read 1603 for
+    //                   months while the constant said 1997, which sent a later
+    //                   investigation down the wrong path entirely.
     //   MAPJUMP + RET - transfer to wm1 and halt the script cleanly.
     //
     // Field memory banks (cf. FF7 savemap): bank 1 maps to savemap 0x0BA4.
@@ -2606,7 +4612,7 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
     // BITON Var[3][130] bit 3 — marks the Rocket Town first-visit intro as
     // already played. The rckt/rckt2 'cloud' init runs
     //   IFUB Var[3][130] bitOFF 3 -> UC(01) [disable control] + MENU2(01)
-    // expecting the intro cutscene to re-enable control. On a moment-1603 Free
+    // expecting the intro cutscene to re-enable control. On a moment-1997 Free
     // Roam the bit is OFF and that cutscene never fires, soft-locking the player
     // on entry. Setting the bit makes the IFUB take the skip branch.
     static constexpr quint8  kRocketFlagAddr = 0x82; // Var[3][130]
@@ -2699,7 +4705,7 @@ bool FieldPickupRandomizer_ff7tk::injectFreeRoamMapJump(
 // dumpFieldScripts — decode a field's section-0 entity script table + opcodes.
 //   Diagnostic only (writes to the randomization debug log). Used to locate the
 //   autonomous entry event that freezes the player (no control) on certain maps
-//   at game moment 1603 in Free Roam.
+//   at game moment 1997 in Free Roam.
 // ============================================================================
 namespace {
 // Mnemonics for the control-flow / scene opcodes that matter when reading an

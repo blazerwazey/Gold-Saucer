@@ -107,7 +107,6 @@ StartingEquipmentRandomizer::StartingEquipmentRandomizer(Randomizer* parent)
     : m_parent(parent)
     , m_rng(const_cast<std::mt19937&>(parent->m_rng))
 {
-    initializeEquipmentPools();
 }
 
 // Use FF7tk's GZIP class for proper decompression/compression
@@ -354,8 +353,58 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
     const int MATERIA_OFFSET = 0x40;   // 64 — 16 slots × 4 bytes (id + 3 bytes AP)
     const int MATERIA_SLOT_SIZE = 4;
     const int TOTAL_MATERIA_SLOTS = 16;
-    const int MAX_WEAPON_MATERIA = 3;    // cap to avoid exceeding actual weapon slots
-    const int MAX_ARMOR_MATERIA  = 2;    // cap to avoid exceeding actual armor slots
+
+    // ---- starting equipment tier -------------------------------------------
+    //
+    // The tier used to do NOTHING: this function ignored it, and the tier-aware
+    // helpers were orphaned by an earlier rewrite and fed by placeholder pools
+    // with item ids that do not exist. Those have been deleted; the tier now
+    // narrows the ranges here, inside the function that carries the safety work
+    // (materia bounded by the equipped item's real slot count, AP token ids
+    // excluded from the pool).
+    //
+    // FIVE tiers, not three. The YAML option is a Range 1-5 ("higher = better",
+    // default 3) while this code had three, and the importer clamped to 0-2: YAML
+    // 1 became Balanced, 2 became Strong, and 3/4/5 were all Strong. The weakest
+    // tier was unreachable from a YAML and the default silently meant Strong.
+    // Config stores the tier 0-BASED (0-4); SimpleMainWindow converts on import.
+    //
+    // WEAPONS, ARMOR AND ACCESSORIES take this tier's BAND of their id range
+    // (a fifth of it). In FF7 those ranges are broadly power-ordered already -
+    // a character's weapon list runs weakest to strongest, and so do the bangles
+    // - so banding is a fair approximation with no new data to maintain.
+    //
+    // MATERIA IS DELIBERATELY NOT SPLIT BY ID. That list is ordered by TYPE, not
+    // power: thirds would hand a "weak" party no healing magic at all and give a
+    // "strong" one nothing but summons. The tier instead controls how much
+    // materia you start with, which is the honest power axis for it.
+    const int TIER_COUNT = Config::STARTING_EQUIPMENT_TIERS;   // 5
+    const int tier = qBound(0, m_parent->m_config.getStartingEquipmentTier(),
+                            TIER_COUNT - 1);
+
+    // [lo, hi) - this tier's band of a range of n items. A range too small to
+    // split stays whole rather than collapsing to a single forced item.
+    auto tierBand = [tier, TIER_COUNT](int n, int& lo, int& hi) {
+        if (n <= 0)         { lo = 0; hi = 0; return; }
+        if (n < TIER_COUNT) { lo = 0; hi = n; return; }
+        lo = (n * tier) / TIER_COUNT;
+        hi = (n * (tier + 1)) / TIER_COUNT;
+        if (hi <= lo) hi = lo + 1;
+        if (hi > n)   hi = n;
+    };
+
+    // Materia volume, interpolated across the five tiers. Tier 2 (the YAML
+    // default, 3) reproduces the pre-tier behaviour exactly.
+    static const double kWeaponFill[5]  = { 0.35, 0.48, 0.60, 0.73, 0.85 };
+    static const double kArmorFill[5]   = { 0.25, 0.38, 0.50, 0.63, 0.75 };
+    static const double kNoAccessory[5] = { 0.40, 0.30, 0.20, 0.12, 0.05 };
+    const int    MAX_WEAPON_MATERIA = (tier == 0) ? 2 : 3;
+    const int    MAX_ARMOR_MATERIA  = (tier == 0) ? 1 : 2;
+    const double WEAPON_FILL_CHANCE  = kWeaponFill[tier];
+    const double ARMOR_FILL_CHANCE   = kArmorFill[tier];
+    const double NO_ACCESSORY_CHANCE = kNoAccessory[tier];
+    log(QString("Starting equipment tier: %1 of %2 (YAML value %3)")
+            .arg(tier).arg(TIER_COUNT).arg(tier + 1));
 
     // Valid materia IDs from ff7tk FF7Materia enum (excludes gap/nameless IDs
     // 0x16, 0x26, 0x2D-0x2F, 0x3F, 0x42-0x43 and master materia 0x30, 0x49, 0x5A)
@@ -462,24 +511,29 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
         log(QString("Character %1: weaponStart=%2 numWeapons=%3")
             .arg(charId).arg(weaponStart).arg(numWeapons));
         
-        // Randomize weapon (pick from character's valid weapons)
-        std::uniform_int_distribution<int> weaponDist(0, numWeapons - 1);
+        // Randomize weapon within this tier's third of the character's list
+        int wLo = 0, wHi = 0;
+        tierBand(numWeapons, wLo, wHi);
+        std::uniform_int_distribution<int> weaponDist(wLo, wHi - 1);
         quint8 newWeapon = static_cast<quint8>(weaponStart + weaponDist(m_rng));
         data[charOffset + WEAPON_OFFSET] = static_cast<char>(newWeapon);
         
         // Randomize armor (0-31 for armor IDs, game adds 256 internally)
-        std::uniform_int_distribution<int> armorDist(0, 31);
+        int aLo = 0, aHi = 0;
+        tierBand(32, aLo, aHi);
+        std::uniform_int_distribution<int> armorDist(aLo, aHi - 1);
         quint8 newArmor = static_cast<quint8>(armorDist(m_rng));
         data[charOffset + ARMOR_OFFSET] = static_cast<char>(newArmor);
         
         // Randomize accessory (0-31 for accessory IDs, or 255 for none)
-        // 20% chance of no accessory
         std::uniform_real_distribution<double> chanceDist(0.0, 1.0);
         quint8 newAccessory;
-        if (chanceDist(m_rng) < 0.2) {
+        if (chanceDist(m_rng) < NO_ACCESSORY_CHANCE) {
             newAccessory = 255; // No accessory
         } else {
-            std::uniform_int_distribution<int> accessoryDist(0, 31);
+            int cLo = 0, cHi = 0;
+            tierBand(32, cLo, cHi);
+            std::uniform_int_distribution<int> accessoryDist(cLo, cHi - 1);
             newAccessory = static_cast<quint8>(accessoryDist(m_rng));
         }
         data[charOffset + ACCESSORY_OFFSET] = static_cast<char>(newAccessory);
@@ -517,7 +571,7 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
             // Fill ONLY if this physical slot exists on the equipped item and the
             // soft power cap isn't reached. All other slots are explicitly cleared.
             bool canFill = (physIdx < slotCount) && (count < cap);
-            double fillChance = isWeaponSlot ? 0.60 : 0.50;
+            double fillChance = isWeaponSlot ? WEAPON_FILL_CHANCE : ARMOR_FILL_CHANCE;
             if (canFill && chanceDist(m_rng) < fillChance) {
                 quint8 matId = selectableMateria[materiaDist(m_rng)];
                 if (isWeaponSlot) ++weaponMateriaCount;
@@ -543,119 +597,6 @@ void StartingEquipmentRandomizer::randomizeStartingEquipment(QByteArray& data)
             .arg(newAccessory == 255 ? "None" : QString::number(newAccessory))
             .arg(materiaLog.isEmpty() ? "none" : materiaLog.join(", ")));
     }
-}
-
-void StartingEquipmentRandomizer::randomizeCharacterEquipment(QByteArray& data, int characterId)
-{
-    // Now handled in randomizeStartingEquipment
-    Q_UNUSED(data);
-    Q_UNUSED(characterId);
-}
-
-quint16 StartingEquipmentRandomizer::getRandomWeapon(int characterId, int tier)
-{
-    if (tier < 0 || tier > 2) tier = 1; // Default to balanced tier
-    
-    if (!m_weaponPools[tier].contains(characterId) || 
-        m_weaponPools[tier][characterId].isEmpty()) {
-        return 1; // Default weapon
-    }
-    
-    const QVector<quint16>& weapons = m_weaponPools[tier][characterId];
-    std::uniform_int_distribution<int> dist(0, weapons.size() - 1);
-    return weapons[dist(m_rng)];
-}
-
-quint16 StartingEquipmentRandomizer::getRandomArmor(int tier)
-{
-    if (tier < 0 || tier > 2) tier = 1;
-    
-    if (m_armorPools[tier].isEmpty()) {
-        return 1; // Default armor
-    }
-    
-    std::uniform_int_distribution<int> dist(0, m_armorPools[tier].size() - 1);
-    return m_armorPools[tier][dist(m_rng)];
-}
-
-quint16 StartingEquipmentRandomizer::getRandomAccessory(int tier)
-{
-    if (tier < 0 || tier > 2) tier = 1;
-    
-    if (m_accessoryPools[tier].isEmpty()) {
-        return 1; // Default accessory
-    }
-    
-    std::uniform_int_distribution<int> dist(0, m_accessoryPools[tier].size() - 1);
-    return m_accessoryPools[tier][dist(m_rng)];
-}
-
-void StartingEquipmentRandomizer::randomizeMateria(QByteArray& data, int characterId)
-{
-    const Config& config = m_parent->m_config;
-    int tier = config.getStartingEquipmentTier();
-    
-    if (tier < 0 || tier > 2) tier = 1;
-    
-    if (m_materiaPools[tier].isEmpty()) {
-        return; // No materia to assign
-    }
-    
-    const int equipmentDataOffset = 0x3000;
-    const int characterEntrySize = 32;
-    int offset = equipmentDataOffset + (characterId * characterEntrySize) + 6; // Materia starts at offset 6
-    
-    // Assign 8 materia slots
-    for (int i = 0; i < 8; ++i) {
-        int materiaOffset = offset + (i * 2);
-        
-        if (materiaOffset + 2 > data.size()) {
-            break;
-        }
-        
-        // 30% chance for empty slot
-        std::uniform_real_distribution<double> dist(0.0, 1.0);
-        if (dist(m_rng) < 0.3) {
-            data[materiaOffset] = 0xFF; // Empty slot
-            data[materiaOffset + 1] = 0xFF;
-        } else {
-            std::uniform_int_distribution<int> materiaDist(0, m_materiaPools[tier].size() - 1);
-            quint16 materiaId = m_materiaPools[tier][materiaDist(m_rng)];
-            
-            data[materiaOffset] = static_cast<char>(materiaId & 0xFF);
-            data[materiaOffset + 1] = static_cast<char>((materiaId >> 8) & 0xFF);
-        }
-    }
-}
-
-void StartingEquipmentRandomizer::initializeEquipmentPools()
-{
-    // Weak tier (0) - Basic starting equipment
-    m_weaponPools[0][Cloud] = {1, 2};        // Buster Sword, Iron Bar
-    m_weaponPools[0][Barret] = {101, 102};   // Gatling Gun, Machine Gun
-    m_weaponPools[0][Tifa] = {201, 202};     // Knuckles, Metal Knuckle
-    
-    m_armorPools[0] = {301, 302};            // Bronze Bangle, Iron Bangle
-    m_accessoryPools[0] = {401, 402};        // Power Wrist, Guard Source
-    m_materiaPools[0] = {501, 502};          // Fire, Ice
-    
-    // Balanced tier (1) - Mid-tier equipment
-    m_weaponPools[1][Cloud] = {3, 4, 5};     // Mythril Saber, Hardedge, Butterfly Edge
-    m_weaponPools[1][Barret] = {103, 104};   // W Machine Gun, Atomic Scissors
-    m_weaponPools[1][Tifa] = {203, 204};     // Tiger Fang, Dragon Claw
-    
-    m_armorPools[1] = {303, 304, 305};       // Mythril Armlet, Titanium Bangle, Silver Armlet
-    m_accessoryPools[1] = {403, 404, 405};   // Tatoo, Jem Ring, White Cape
-    m_materiaPools[1] = {503, 504, 505};     // Lightning, Earth, Restore
-    
-    // Strong tier (2) - Advanced starting equipment
-    m_weaponPools[2][Cloud] = {6, 7, 8};     // Enhance Sword, Organics, Crystal Sword
-    m_weaponPools[2][Barret] = {105, 106};   // Heated Drill, Pile Bunker
-    m_weaponPools[2][Tifa] = {205, 206};     // Master Fist, God's Hand
-    
-    m_armorPools[2] = {306, 307, 308};       // Gold Armlet, Diamond Bangle, Platinum Bangle
-    m_accessoryPools[2] = {406, 407, 408};   // Fairy Ring, Peace Ring, Ribbon
-    m_materiaPools[2] = {506, 507, 508};     // Heal, Revive, Barrier
 }
 
 bool StartingEquipmentRandomizer::replaceStartingEquipmentText()

@@ -110,6 +110,7 @@ int IroExporter::stageFields(QStringList& log)
     }
 
     int count = 0;
+    int models = 0;
     for (const QString& field : out.fileList()) {
         if (field.startsWith("blackbg"))
             continue;
@@ -132,10 +133,49 @@ int IroExporter::stageFields(QStringList& log)
         QByteArray chunk = dec.mid(start, end - start);
         if (stageBytes("flevel.lgp/" + field + ".chunk.1", chunk))
             ++count;
+
+        // Section 2 (the model loader) -> chunk.3, but ONLY when it differs.
+        //
+        // Staging just the script chunk was silently wrong for any pass that
+        // adds a MODEL. Boss in a Box appends a chest model and an entity whose
+        // `CHAR <n>` indexes it; with only chunk.1 shipped the game ran the new
+        // 15-entity script section against the VANILLA 12-model loader, so that
+        // CHAR indexed past the end of the model array and the field crashed on
+        // load. Every structural check on the patched field passed, because the
+        // field was correct — only half of it was reaching the game.
+        quint32 s2 = 0, s3 = 0;
+        memcpy(&s2, dec.constData() + 6 + 2 * 4, 4);
+        memcpy(&s3, dec.constData() + 6 + 3 * 4, 4);
+        const int mStart = static_cast<int>(s2) + 4;
+        const int mEnd   = static_cast<int>(s3);
+        if (mStart < 0 || mEnd <= mStart || mEnd > dec.size())
+            continue;
+
+        const QByteArray oDec = LZS::decompressAllWithHeader(o);
+        bool modelsDiffer = true;
+        if (oDec.size() >= 46) {
+            quint32 os2 = 0, os3 = 0;
+            memcpy(&os2, oDec.constData() + 6 + 2 * 4, 4);
+            memcpy(&os3, oDec.constData() + 6 + 3 * 4, 4);
+            const int oStart = static_cast<int>(os2) + 4;
+            const int oEnd   = static_cast<int>(os3);
+            if (oStart >= 0 && oEnd > oStart && oEnd <= oDec.size())
+                modelsDiffer = (oDec.mid(oStart, oEnd - oStart)
+                                != dec.mid(mStart, mEnd - mStart));
+        }
+        if (modelsDiffer
+            && stageBytes("flevel.lgp/" + field + ".chunk.3",
+                          dec.mid(mStart, mEnd - mStart))) {
+            ++models;
+            log << QString("  IRO: %1 also needs its model loader (chunk.3)").arg(field);
+        }
     }
     if (count)
         log << QString("  IRO: staged %1 field script override(s) (flevel.lgp/*.chunk.1)")
                    .arg(count);
+    if (models)
+        log << QString("  IRO: staged %1 field model-loader override(s) (flevel.lgp/*.chunk.3)")
+                   .arg(models);
     return count;
 }
 

@@ -75,7 +75,13 @@ public:
     bool getKeyItemRandomization() const;
     
     // Starting equipment settings
-    void setStartingEquipmentTier(int tier); // 0: weak, 1: balanced, 2: strong
+    // Starting equipment tier, stored 0-BASED (0 = weakest .. 4 = strongest).
+    // The Archipelago YAML option is 1-5, so SimpleMainWindow subtracts one on
+    // import; the count lives here so the GUI, the importer and the randomizer
+    // cannot drift apart again. They already had: the importer clamped to 0-2
+    // against a 1-5 option, making YAML 3/4/5 identical and tier 0 unreachable.
+    static constexpr int STARTING_EQUIPMENT_TIERS = 5;
+    void setStartingEquipmentTier(int tier);
     int getStartingEquipmentTier() const;
     
     void setOutputFolder(const QString& folder);
@@ -129,7 +135,7 @@ private:
     // Archipelago JSON path (output from AP generator, consumed by Gold Saucer)
     QString m_apJsonPath;
 
-    // Free Roam mode: start on world map at game moment 1603
+    // Free Roam mode: start on world map at game moment 1997
     bool m_freeRoam;
 
     // Export randomized files as a 7th Heaven .iro archive (in addition to loose)

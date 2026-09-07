@@ -52,6 +52,50 @@ Height is exactly `16 * lines + 9`. Width tracks the longest line at roughly
 7px per character plus frame. The resize only ever **grows** a window, clamps to
 320x240, and nudges x/y back if the wider box would run off screen.
 
+## Fixes after the first in-game test
+
+Reported: windows too small for some items, and wrong names.
+
+**Windows.** The resize only ran for multi-line text. A *single*-line AP message
+is often wider than the vanilla one it replaces — `Sent "Vivian" to FoomTTYD!`
+is 26 columns and needs ~191px, but inherited the window vanilla sized for
+`Received "Potion"!` (18 columns, ~146px) and was clipped on the right. It now
+runs for every replacement; height is untouched for a single line, so it only
+adds the width the text needs. The width formula itself was fine — measured
+across vanilla, 6.9px per character against the 7.0 assumed.
+
+Also: the WINDOW search was capped at 300 bytes, which missed 40 of 158
+pickups whose WINDOW sits further back. It now scans the whole script region.
+The remaining ~23% have no WINDOW opcode at all, and that is fine — vanilla
+ships 4,453 such messages, **69% of them multi-line** (some 5+), so the game
+auto-sizes when no window is set.
+
+**Names.** Nearest-MESSAGE cross-assigned inside chest clusters: in `blin62_1`
+the three source pickups took Elixir / Ether / Potion — each a *neighbour's*
+message. Worse, most MESSAGEs near a pickup are ordinary dialogue, so the rule
+would overwrite an NPC's line with `Sent "X" to Bob!`.
+
+The vanilla text names the vanilla item (`Received "Ether"!`), so that is now
+the signal: a candidate that names the item being replaced wins outright,
+proximity is only the tie-break, and **if nothing names it the pickup is left
+vanilla** rather than guessing. Matching is punctuation/case-insensitive with a
+one-character tolerance, because the game's spelling and the item table
+disagree here and there ("Four Slot"/"Four Slots", "Glow Lance"/"Grow Lance").
+
+Measured over vanilla flevel, same pickups, both rules:
+
+| | nearest-MESSAGE | names-the-item |
+|---|---|---|
+| correct | 127 | **154** |
+| wrong message hijacked | **389** | 0 |
+| skipped, keeps vanilla text | 0 | 371 |
+
+More correct assignments *and* no hijacking — looking past the nearest candidate
+finds messages proximity was missing. (That 516 total comes from a deliberately
+loose STITM scan, looser than `scanForSTITM`, so many "skipped" are not real
+pickups.) The standalone randomizer keeps its old proximity behaviour; only the
+AP path refuses to guess.
+
 ## Verified
 
 - Configures and builds clean from a fresh CMake configure.

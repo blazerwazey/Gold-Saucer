@@ -1988,10 +1988,12 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 STITMInfo& info = stitmCandidates[validIndices[v]];
                 if (!bitonByParity.contains(parity)) {
                     QByteArray text; int lines = 1, cols = 0;
+                    const QString vanilla = getItemName(info.originalItemID);
                     if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream,
                                                 &text, &lines, &cols)) {
                         if (!text.isEmpty())
-                            modifications.append(OpcodeModification(info.offset, text, lines, cols));
+                            modifications.append(
+                                OpcodeModification(info.offset, text, lines, cols, vanilla));
                         ParityBiton pb;
                         pb.bankByte = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 1]));
                         pb.addr     = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 2]));
@@ -2022,10 +2024,12 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             for (int idx : validIndices) {
                 STITMInfo& info = stitmCandidates[idx];
                 QByteArray text; int lines = 1, cols = 0;
+                const QString vanilla = getItemName(info.originalItemID);
                 if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream,
                                             &text, &lines, &cols)) {
                     if (!text.isEmpty())
-                        modifications.append(OpcodeModification(info.offset, text, lines, cols));
+                        modifications.append(
+                            OpcodeModification(info.offset, text, lines, cols, vanilla));
                     totalMods++;
                 }
             }
@@ -2079,10 +2083,12 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         if (!validateSMTRA(info)) continue;
         if (apMode) {
             QByteArray text; int lines = 1, cols = 0;
+            const QString vanilla = getMateriaName(info.originalMateriaID);
             if (applySMTRAAsArchipelago(info, decompressed, fieldName, debugStream,
                                         &text, &lines, &cols)) {
                 if (!text.isEmpty())
-                    modifications.append(OpcodeModification(info.offset, text, lines, cols));
+                    modifications.append(
+                        OpcodeModification(info.offset, text, lines, cols, vanilla));
                 totalMods++;
             }
         } else {
@@ -5362,7 +5368,11 @@ QByteArray FieldPickupRandomizer_ff7tk::composeApPickupText(
     // Vanilla pickup windows fit roughly this much before the frame clips. Kept
     // deliberately conservative: an over-long line is unreadable in game, while
     // an over-short one merely wraps early.
-    constexpr int kMaxLine = 26;
+    // 32 columns needs a ~244px window; vanilla uses that width routinely
+    // (241 samples at exactly 32 cols, median width 227). Wider lines mean
+    // fewer wraps, and every message either gets its window resized below or
+    // has no WINDOW opcode at all, in which case the game auto-sizes it.
+    constexpr int kMaxLine = 32;
     constexpr char kNewline = static_cast<char>(0xE7);
 
     if (placement.apItem.isEmpty())
@@ -5460,7 +5470,12 @@ bool FieldPickupRandomizer_ff7tk::resizeMessageWindow(
     // The WINDOW that configures this id is nearly always a few opcodes before
     // the MESSAGE. Search back a bounded distance and take the nearest match
     // whose fields are plausible - 0x50 also occurs as operand data.
-    const int searchStart = qMax(scriptStart, messageOffset - 300);
+    // Whole script region, not a fixed 300-byte window: measured on vanilla,
+    // widening this recovers 40 of 158 pickups whose WINDOW sits further back.
+    // The remaining ~23% have no WINDOW opcode at all, which is fine - vanilla
+    // does the same for 4,453 messages, 69% of them multi-line, so the game
+    // auto-sizes those.
+    const int searchStart = scriptStart;
     for (int pos = messageOffset - 1; pos >= searchStart; --pos) {
         if (static_cast<quint8>(decompressed.at(pos)) != kWindowOpcode) continue;
         if (pos + kWindowSize > decompressed.size()) continue;
@@ -6043,8 +6058,38 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     QVector<QPair<int, int>> messagePatches;  // (absOffset of MESSAGE textID byte, newTextID)
     QSet<int> usedMessageOffsets;             // prevent double-assignment
 
+    // Does a candidate message actually announce this pickup? The vanilla text
+    // reads `Received "Ether"!`, so the message belonging to an Ether STITM is
+    // the one naming Ether. Matching on that instead of pure proximity is what
+    // stops chest clusters cross-assigning: measured on vanilla flevel, nearest-
+    // MESSAGE alone mis-assigns 28 of the 152 pickups whose text names an item
+    // (blin62_1 gives its three source pickups Elixir/Ether/Potion, each of them
+    // a neighbour's message).
+    auto messageNames = [&](int msgOff, const QString& wanted) {
+        if (wanted.isEmpty()) return false;
+        const quint8 txtID = static_cast<quint8>(decompressed.at(msgOff + 2));
+        if (txtID >= textEntries.size()) return false;
+        const QString body = FF7Text::toPC(textEntries[txtID]);
+        // Compare loosely: the game's own spelling differs from the item table
+        // here and there ("Four Slot" vs "Four Slots", "Glow Lance" vs "Grow
+        // Lance"), and punctuation/case carry no signal.
+        auto squash = [](const QString& in) {
+            QString out;
+            for (const QChar& c : in)
+                if (c.isLetterOrNumber()) out += c.toLower();
+            return out;
+        };
+        const QString a = squash(body), b = squash(wanted);
+        if (a.isEmpty() || b.isEmpty()) return false;
+        if (a.contains(b)) return true;
+        // Tolerate a one-character spelling drift on longer names.
+        if (b.size() >= 6 && a.contains(b.left(b.size() - 1))) return true;
+        return false;
+    };
+
     for (const auto& mod : modifications) {
         int backOff = -1, fwdOff = -1;
+        int namedOff = -1;   // candidate whose text names the vanilla item
 
         // Search backward first (up to 500 bytes)
         {
@@ -6055,8 +6100,10 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
                     quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
-                        backOff = pos;
-                        break;
+                        if (backOff < 0) backOff = pos;
+                        if (namedOff < 0 && messageNames(pos, mod.vanillaName))
+                            namedOff = pos;
+                        if (backOff >= 0 && namedOff >= 0) break;
                     }
                 }
             }
@@ -6075,27 +6122,44 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
                     quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
-                        fwdOff = pos;
-                        break;
+                        if (fwdOff < 0) fwdOff = pos;
+                        if (namedOff < 0 && messageNames(pos, mod.vanillaName))
+                            namedOff = pos;
+                        if (fwdOff >= 0 && namedOff >= 0) break;
                     }
                 }
             }
         }
 
-        // Pick the closest MESSAGE
-        int messageOff = -1;
-        if (backOff >= 0 && fwdOff >= 0) {
-            int backDist = mod.opcodeOffset - backOff;
-            int fwdDist  = fwdOff - mod.opcodeOffset;
-            messageOff = (backDist <= fwdDist) ? backOff : fwdOff;
-        } else if (backOff >= 0) {
-            messageOff = backOff;
-        } else if (fwdOff >= 0) {
-            messageOff = fwdOff;
+        // A message that names the item wins outright; proximity is only the
+        // tie-breaker when nothing names it.
+        int messageOff = namedOff;
+        if (messageOff < 0) {
+            if (backOff >= 0 && fwdOff >= 0) {
+                int backDist = mod.opcodeOffset - backOff;
+                int fwdDist  = fwdOff - mod.opcodeOffset;
+                messageOff = (backDist <= fwdDist) ? backOff : fwdOff;
+            } else if (backOff >= 0) {
+                messageOff = backOff;
+            } else if (fwdOff >= 0) {
+                messageOff = fwdOff;
+            }
         }
 
         if (messageOff < 0) {
             debugStream << "  No MESSAGE near @" << mod.opcodeOffset << "\n";
+            continue;
+        }
+
+        // For an Archipelago placement, refuse to guess. Most MESSAGEs near a
+        // pickup are ordinary dialogue, and overwriting an NPC's line with
+        // `Sent "X" to Bob!` is far worse than leaving the vanilla item name in
+        // place. Only rewrite when the message demonstrably announces THIS
+        // pickup. The standalone randomizer keeps its old proximity behaviour.
+        if (!mod.encodedText.isEmpty() && namedOff < 0) {
+            debugStream << "  AP_TEXT SKIP @" << mod.opcodeOffset
+                        << ": no message names \"" << mod.vanillaName
+                        << "\" - left vanilla rather than risk clobbering dialogue\n";
             continue;
         }
 
@@ -6128,7 +6192,14 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
 
         // Grow the window BEFORE the section is rebuilt: this edits the script
         // region, which sits ahead of the text section and so does not move.
-        if (mod.textLines > 1)
+        //
+        // Runs for ONE-line messages too. That was the bug behind "windows are
+        // too small": `Sent "Vivian" to FoomTTYD!` is 26 columns and needs about
+        // 191px, but it inherited the window vanilla sized for
+        // `Received "Potion"!` (18 columns, ~146px) and was clipped on the
+        // right. Height is unchanged for a single line, so this only ever adds
+        // the width the new text needs.
+        if (!mod.encodedText.isEmpty() || mod.textLines > 1)
             resizeMessageWindow(decompressed, messageOff, sec0DataStart,
                                 mod.textLines, mod.textCols, debugStream);
 

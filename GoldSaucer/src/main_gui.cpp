@@ -2,14 +2,20 @@
 #include <QDir>
 #include <QDebug>
 #include "GUI/SimpleMainWindow.h"
+#include "GsLog.h"
 
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    
+
     app.setApplicationName("Gold Saucer");
     app.setApplicationVersion("1.0.0");
     app.setOrganizationName("Gold Saucer Team");
+
+    // Before anything else: this build is WIN32 (no console), so without a
+    // message handler every qDebug() in the program is discarded and a failed
+    // run leaves the user with nothing to send us.
+    GsLog::init();
     
     // Set application style
     app.setStyle("Fusion");
@@ -37,7 +43,7 @@ int main(int argc, char *argv[])
     window.show();
     
     qDebug() << "Gold Saucer FF7 Randomizer GUI started";
-    qDebug() << "Version 1.0.0";
+    qDebug() << "Version" << app.applicationVersion();
     
     return app.exec();
 }

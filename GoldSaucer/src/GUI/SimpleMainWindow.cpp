@@ -1,4 +1,5 @@
 #include "../ApSeedFile.h"
+#include "../GsLog.h"
 #include <QApplication>
 #include <QMainWindow>
 #include <QVBoxLayout>
@@ -1458,8 +1459,27 @@ void SimpleMainWindow::startRandomization()
         return true;
     };
 
+    // Everything needed to reproduce the run, at the top of the log, before
+    // anything can go wrong. A bug report that starts here is actionable.
+    GsLog::banner("Randomization run");
+    qInfo().noquote() << "FF7 path   :" << ff7Path;
+    qInfo().noquote() << "Output     :" << m_config.getOutputFolder();
+    qInfo().noquote() << "Seed       :" << QString::number(m_config.getSeed());
+    qInfo().noquote() << "AP seed    :" << (m_config.getApJsonPath().isEmpty()
+                                                ? QStringLiteral("(none)")
+                                                : m_config.getApJsonPath());
+    qInfo().noquote() << "Features   : fields="
+                      << m_config.isFeatureEnabled(Config::FieldPickupRandomization)
+                      << " shops=" << m_config.isFeatureEnabled(Config::ShopRandomization)
+                      << " equip=" << m_config.isFeatureEnabled(Config::StartingEquipmentRandomization)
+                      << " enemyStats=" << m_config.isFeatureEnabled(Config::EnemyStatsRandomization)
+                      << " encounters=" << m_config.isFeatureEnabled(Config::EnemyEncounterRandomization)
+                      << " ap=" << m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
+
     try {
         Randomizer randomizer(ff7Path, m_config);
+        qInfo().noquote() << "Resolved   :" << randomizer.getFF7Path()
+                          << "(2026 layout detected if this differs from FF7 path)";
 
         setStage(StageCopy, 1);
         m_runDetail->setText("Preparing the output folder…");
@@ -1468,8 +1488,11 @@ void SimpleMainWindow::startRandomization()
         QApplication::processEvents();
 
         if (!randomizer.copyOriginalFiles()) {
-            appendConsoleMessage("ERROR: Failed to copy original files to output directory");
-            QMessageBox::critical(this, "Error", "Failed to copy original files to output directory");
+            reportPassFailure("Copying the original files",
+                              QStringLiteral("Could not copy the game files into:\n%1\n\n"
+                                             "Check the output folder is writable and has room for a "
+                                             "full copy of the game data.")
+                                  .arg(randomizer.getOutputPath()));
             goToStep(StepOutput);
             return;
         }
@@ -1498,8 +1521,7 @@ void SimpleMainWindow::startRandomization()
             QApplication::processEvents();
 
             if (!randomizer.randomizeShops()) {
-                appendConsoleMessage("ERROR: Shop pass failed");
-                QMessageBox::critical(this, "Error", "Shop randomization failed");
+                reportPassFailure("Shop randomization", randomizer.lastError());
                 goToStep(StepOptions);
                 return;
             }
@@ -1519,8 +1541,7 @@ void SimpleMainWindow::startRandomization()
             QApplication::processEvents();
 
             if (!randomizer.randomizeFieldPickups()) {
-                appendConsoleMessage("ERROR: Field pickup randomization failed");
-                QMessageBox::critical(this, "Error", "Field pickup randomization failed");
+                reportPassFailure("Field pickup randomization", randomizer.lastError());
                 goToStep(StepOptions);
                 return;
             }
@@ -1550,8 +1571,7 @@ void SimpleMainWindow::startRandomization()
             QApplication::processEvents();
 
             if (!randomizer.randomizeStartingEquipment(shuffleEquipment)) {
-                appendConsoleMessage("ERROR: Starting equipment/level pass failed");
-                QMessageBox::critical(this, "Error", "Starting equipment/level pass failed");
+                reportPassFailure("Starting equipment/level pass", randomizer.lastError());
                 goToStep(StepOptions);
                 return;
             }
@@ -1643,7 +1663,9 @@ void SimpleMainWindow::startRandomization()
 
     } catch (const std::exception& e) {
         appendConsoleMessage("ERROR: " + QString(e.what()));
-        QMessageBox::critical(this, "Error", QString("Randomization failed: %1").arg(e.what()));
+        qCritical() << "Unhandled exception during randomization:" << e.what();
+        reportPassFailure("Randomization",
+                          QStringLiteral("Unexpected error: %1").arg(QString::fromUtf8(e.what())));
         m_runHeadline->setText("Randomization failed");
         m_runDetail->setText("The log below has the details.");
         m_cancelButton->setText("Back");
@@ -1869,8 +1891,50 @@ void SimpleMainWindow::applyConfigToUI()
     refreshRail();
 }
 
+void SimpleMainWindow::reportPassFailure(const QString& passName, const QString& reason)
+{
+    // One place that turns a failed pass into something a user can act on or
+    // send us. Before this, every pass failed with a bare "<pass> failed" and
+    // the actual reason - when one existed at all - went to a qDebug() stream
+    // that a WIN32 build discards.
+    const QString detail = reason.trimmed();
+    appendConsoleMessage("ERROR: " + passName + " failed");
+    if (!detail.isEmpty())
+        appendConsoleMessage("REASON: " + detail);
+
+    const QString logPath = GsLog::path();
+    if (!logPath.isEmpty())
+        appendConsoleMessage("Full log: " + logPath);
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Critical);
+    box.setWindowTitle("Randomization failed");
+    box.setText(passName + " failed.");
+    box.setInformativeText(detail.isEmpty()
+                               ? QStringLiteral("No reason was reported. The run log has the last "
+                                                "steps the pass took before it stopped.")
+                               : detail);
+    if (!logPath.isEmpty())
+        box.setDetailedText("Log file:\n" + logPath +
+                            "\n\nAttach this file to a bug report - it has the full run.");
+
+    QPushButton* openLog = nullptr;
+    if (!logPath.isEmpty())
+        openLog = box.addButton("Open log folder", QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Close);
+    box.exec();
+
+    if (openLog && box.clickedButton() == openLog)
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(logPath).absolutePath()));
+}
+
 void SimpleMainWindow::appendConsoleMessage(const QString& message)
 {
+    // Tee to the run log so a bug report contains the user-facing narrative and
+    // the internal diagnostics interleaved in one file. The console pane itself
+    // is memory-only and dies with the window.
+    GsLog::note(message);
+
     if (m_consoleOutput) {
         m_consoleOutput->append(message);
         // Auto-scroll to bottom

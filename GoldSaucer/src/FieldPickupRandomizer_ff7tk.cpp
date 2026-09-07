@@ -9,6 +9,7 @@
 #include <QTextStream>
 #include <QFileInfo>
 #include <QDateTime>
+#include <QStorageInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -103,9 +104,17 @@ FieldPickupRandomizer_ff7tk::~FieldPickupRandomizer_ff7tk()
 // randomize()  –  main entry point from Randomizer::randomizeFieldPickups()
 // ============================================================================
 
+bool FieldPickupRandomizer_ff7tk::fail(const QString& reason)
+{
+    m_lastError = reason;
+    qCritical() << "Field pickup randomization FAILED:" << reason;
+    return false;
+}
+
 bool FieldPickupRandomizer_ff7tk::randomize()
 {
     qDebug() << "FieldPickupRandomizer_ff7tk::randomize() called";
+    m_lastError.clear();
 
     // --- build item pools ---------------------------------------------------
     initializeItemPools();
@@ -113,8 +122,15 @@ bool FieldPickupRandomizer_ff7tk::randomize()
     // --- locate flevel.lgp --------------------------------------------------
     QString flevelPath = findFlevelPath();
     if (flevelPath.isEmpty()) {
-        qDebug() << "ERROR: Could not find flevel.lgp";
-        return false;
+        // Name every path tried: the usual cause is a game root one level off
+        // (the 2026 re-release nests everything under ff7/workingdir), and the
+        // list makes that obvious at a glance.
+        return fail(QStringLiteral(
+                        "Could not find flevel.lgp. Looked in:%1  %2%1"
+                        "Check that the FF7 folder you picked is the one containing "
+                        "ff7_en.exe and a data folder.")
+                        .arg(QStringLiteral("\n"),
+                             flevelCandidates().join(QStringLiteral("\n  "))));
     }
     qDebug() << "Found flevel.lgp at:" << flevelPath;
 
@@ -135,8 +151,17 @@ bool FieldPickupRandomizer_ff7tk::randomize()
     // --- open LGP using the proven MakouLgpManager --------------------------
     MakouLgpManager lgp;
     if (!lgp.open(flevelPath)) {
-        qDebug() << "ERROR: Failed to open LGP:" << lgp.lastError();
-        return false;
+        const QFileInfo fi(flevelPath);
+        return fail(QStringLiteral("Could not open flevel.lgp (%1).\n"
+                                   "File: %2\nSize: %3 bytes%4")
+                        .arg(lgp.lastError().isEmpty() ? QStringLiteral("no reason given")
+                                                       : lgp.lastError(),
+                             flevelPath,
+                             QString::number(fi.size()),
+                             fi.isReadable()
+                                 ? QString()
+                                 : QStringLiteral("\nThe file is not readable - check "
+                                                  "permissions, or whether the game is running.")));
     }
 
     QStringList allFiles = lgp.fileList();
@@ -147,6 +172,16 @@ bool FieldPickupRandomizer_ff7tk::randomize()
     QFile debugFile(debugPath);
     bool debugOk = debugFile.open(QIODevice::WriteOnly | QIODevice::Truncate);
     QTextStream debugStream(&debugFile);
+    if (!debugOk) {
+        // Not fatal - the pass runs fine without it - but it silently removes
+        // every per-field diagnostic, so say so rather than leave the user
+        // hunting for a file that was never written.
+        qWarning() << "Could not open the field debug log at" << debugPath
+                   << "-" << debugFile.errorString()
+                   << "- per-field detail will be missing from this run.";
+    } else {
+        qDebug() << "Field debug log:" << debugPath;
+    }
     if (debugOk) {
         debugStream << "=== Field Pickup Randomization ===\n";
         debugStream << "Date      : " << QDateTime::currentDateTime().toString() << "\n";
@@ -161,11 +196,23 @@ bool FieldPickupRandomizer_ff7tk::randomize()
         QString apJson = m_parent->m_config.getApJsonPath();
         if (apJson.isEmpty()) {
             if (debugOk) debugStream << "AP JSON: path not configured in config.json (apJsonPath)\n";
-            return false;
+            return fail(QStringLiteral(
+                "Archipelago mode is on but no seed file is loaded. Go back to the "
+                "seed step and import your .apff7, or turn Archipelago integration off."));
         }
         if (!loadApJson(apJson, debugStream)) {
             if (debugOk) debugStream << "AP JSON: failed to load " << apJson << "\n";
-            return false;
+            const QFileInfo fi(apJson);
+            return fail(QStringLiteral("Could not read the Archipelago seed file.\n"
+                                       "File: %1\n%2")
+                            .arg(apJson,
+                                 !fi.exists()
+                                     ? QStringLiteral("It does not exist - it may have been moved "
+                                                      "or deleted since it was selected.")
+                                 : fi.size() == 0
+                                     ? QStringLiteral("It is empty (0 bytes).")
+                                     : QStringLiteral("It exists but could not be parsed as an FF7 "
+                                                      "seed - re-export it from Archipelago.")));
         }
     }
 
@@ -378,8 +425,16 @@ bool FieldPickupRandomizer_ff7tk::randomize()
     // --- save LGP -----------------------------------------------------------
     if (filesWithChanges > 0) {
         if (!lgp.save(outputFlevel)) {
-            qDebug() << "ERROR: Failed to save LGP:" << lgp.lastError();
-            return false;
+            const QStorageInfo out(QFileInfo(outputFlevel).absolutePath());
+            return fail(QStringLiteral(
+                            "Could not write the randomized flevel.lgp (%1).\n"
+                            "Target: %2\nFree space on that drive: %3 MB\n"
+                            "Close the game and any tool holding that file, and make sure "
+                            "the output folder is writable.")
+                            .arg(lgp.lastError().isEmpty() ? QStringLiteral("no reason given")
+                                                           : lgp.lastError(),
+                                 outputFlevel,
+                                 QString::number(out.bytesAvailable() / (1024 * 1024))));
         }
         qDebug() << "Saved randomised LGP to:" << outputFlevel;
     } else {
@@ -6718,31 +6773,29 @@ QString FieldPickupRandomizer_ff7tk::getMateriaName(quint8 materiaId) const
 // Helpers
 // ============================================================================
 
-QString FieldPickupRandomizer_ff7tk::findFlevelPath() const
+QStringList FieldPickupRandomizer_ff7tk::flevelCandidates() const
 {
-    if (!m_parent) return QString();
+    if (!m_parent) return QStringList();
 
-    QString ff7Path = m_parent->getFF7Path();
-    QStringList candidates = {
+    // One source of truth for both the search and the error message, so the
+    // "looked in" list can never drift from where we actually looked.
+    const QString ff7Path = m_parent->getFF7Path();
+    const QString outputPath = m_parent->getOutputPath();
+    return {
         ff7Path + "/data/field/flevel.lgp",
         ff7Path + "/data/flevel/flevel.lgp",
         ff7Path + "/field/flevel.lgp",
-    };
-
-    for (const QString& p : candidates) {
-        if (QFile::exists(p)) return p;
-    }
-
-    // Also check if user placed it in the output folder already
-    QString outputPath = m_parent->getOutputPath();
-    QStringList outputCandidates = {
+        // The user may have staged a copy in the output folder already.
         outputPath + "/data/field/flevel.lgp",
         outputPath + "/data/flevel/flevel.lgp",
     };
-    for (const QString& p : outputCandidates) {
+}
+
+QString FieldPickupRandomizer_ff7tk::findFlevelPath() const
+{
+    for (const QString& p : flevelCandidates()) {
         if (QFile::exists(p)) return p;
     }
-
     return QString();
 }
 

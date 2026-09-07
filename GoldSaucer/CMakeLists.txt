@@ -55,6 +55,7 @@ add_executable(GoldSaucer_GUI WIN32
     # suspicion signal on an unsigned binary; see AV_FALSE_POSITIVE.md.
     goldsaucer.rc
     src/main_gui.cpp
+    src/GsLog.cpp
     src/Randomizer.cpp
     src/EnemyRandomizer.cpp
     src/EnemyDatabase.cpp

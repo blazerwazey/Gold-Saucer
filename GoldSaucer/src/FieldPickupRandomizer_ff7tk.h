@@ -91,6 +91,12 @@ public:
     // Entry point called by Randomizer::randomizeFieldPickups()
     bool randomize();
 
+    // Why the last randomize() returned false, in a form fit to show a user.
+    // The pass has ~45 `return false` sites; without this the GUI could only
+    // say "Field pickup randomization failed", which is unactionable in a bug
+    // report. Empty after a successful run.
+    QString lastError() const { return m_lastError; }
+
     // Item pool helpers (public so tests can call them)
     void initializeItemPools();
     quint16 getRandomItem(int rarityMode);
@@ -101,6 +107,11 @@ private:
     Randomizer* m_parent;
     QRandomGenerator m_rng;
     bool m_debugMode;
+    QString m_lastError;
+
+    // Record a fatal reason, log it, and return false in one step so no exit
+    // path can forget to do one of the three.
+    bool fail(const QString& reason);
 
     // Item pools by rarity tier
     QVector<quint16> m_commonItems;
@@ -259,6 +270,8 @@ private:
     QString getItemName(quint16 itemId) const;
     QString getMateriaName(quint8 materiaId) const;
     QString findFlevelPath() const;
+    // Every path findFlevelPath() checks, in order, for error reporting.
+    QStringList flevelCandidates() const;
 
     // --- Constants ---
     static const int    MAX_ITEM_ID        = 319;

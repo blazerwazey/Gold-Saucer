@@ -53,28 +53,55 @@ void Randomizer::initializeRandomizers()
 bool Randomizer::validateFF7Installation()
 {
     QDir ff7Dir(m_ff7Path);
-    
-    // Check for essential directories and files
-    if (!ff7Dir.exists("data")) {
-        qDebug() << "Error: data directory not found in FF7 installation";
+
+    // Every branch here names the exact path that was missing. This check used
+    // to fail with nothing but a qDebug() into a GUI-subsystem void, so a user
+    // whose install did not match got "<pass> failed" and no way to find out why.
+    auto missing = [&](const QString& what, const QString& hint) {
+        m_lastError = QStringLiteral("This does not look like a complete FF7 install.\n"
+                                     "Missing: %1\nUnder: %2%3")
+                          .arg(what, m_ff7Path,
+                               hint.isEmpty() ? QString()
+                                              : QStringLiteral("\n\n%1").arg(hint));
+        qCritical() << "FF7 install validation failed - missing" << what << "under" << m_ff7Path;
         return false;
+    };
+
+    if (!ff7Dir.exists("data"))
+        return missing(QStringLiteral("data"),
+                       QStringLiteral("Pick the folder that contains ff7_en.exe and data. On the "
+                                      "2026 re-release that is ff7/workingdir inside the Steam "
+                                      "install, which the tool normally finds on its own."));
+
+    // The language checks are the ones that bite. These paths are hardcoded to
+    // lang-en, so a German/French/Spanish/Japanese install fails here even
+    // though it is perfectly intact - say that outright rather than reporting a
+    // missing folder the user can see is not missing.
+    if (!ff7Dir.exists("data/lang-en/battle") ||
+        (!ff7Dir.exists("data/lang-en/kernel") && !ff7Dir.exists("data/lang-en/kernel.bin"))) {
+        const QStringList langs =
+            QDir(m_ff7Path + "/data").entryList(QStringList("lang-*"),
+                                                QDir::Dirs | QDir::NoDotAndDotDot);
+        const bool otherLanguage = !langs.isEmpty() && !langs.contains("lang-en");
+        return missing(ff7Dir.exists("data/lang-en/battle")
+                           ? QStringLiteral("data/lang-en/kernel (or kernel.bin)")
+                           : QStringLiteral("data/lang-en/battle"),
+                       otherLanguage
+                           ? QStringLiteral("This install has %1 instead of lang-en. Gold Saucer "
+                                            "only supports the ENGLISH game files - set the game's "
+                                            "language to English in Steam, let it download, then "
+                                            "run the randomizer again.")
+                                 .arg(langs.join(QStringLiteral(", ")))
+                           : QStringLiteral("The install looks incomplete. Verify the game files "
+                                            "through Steam and try again."));
     }
-    
-    if (!ff7Dir.exists("data/lang-en/battle")) {
-        qDebug() << "Error: data/lang-en/battle directory not found";
-        return false;
-    }
-    
-    if (!ff7Dir.exists("data/lang-en/kernel") && !ff7Dir.exists("data/lang-en/kernel.bin")) {
-        qDebug() << "Error: data/lang-en/kernel directory or file not found";
-        return false;
-    }
-    
-    if (!ff7Dir.exists("data/field") && !ff7Dir.exists("data/flevel")) {
-        qDebug() << "Error: data/field or data/flevel directory not found";
-        return false;
-    }
-    
+
+    if (!ff7Dir.exists("data/field") && !ff7Dir.exists("data/flevel"))
+        return missing(QStringLiteral("data/field (or data/flevel)"),
+                       QStringLiteral("Verify the game files through Steam - the field data is "
+                                      "missing from this install."));
+
+    m_lastError.clear();
     return true;
 }
 
@@ -138,16 +165,29 @@ bool Randomizer::randomizeShops()
 
 bool Randomizer::randomizeFieldPickups()
 {
+    m_lastError.clear();
+
     if (!validateFF7Installation()) {
-        return false;
+        return false;   // validateFF7Installation() has set m_lastError
     }
-    
+
     if (!m_fieldPickupRandomizer) {
-        qDebug() << "Error: Field pickup randomizer not initialized";
+        m_lastError = QStringLiteral("Internal error: the field pickup randomizer was never "
+                                     "constructed. Please report this with the log.");
+        qCritical() << m_lastError;
         return false;
     }
-    
-    return m_fieldPickupRandomizer->randomize();
+
+    if (!m_fieldPickupRandomizer->randomize()) {
+        m_lastError = m_fieldPickupRandomizer->lastError();
+        if (m_lastError.isEmpty()) {
+            // A failure path that predates fail(); still better than nothing.
+            m_lastError = QStringLiteral("The field pass stopped without reporting a reason. "
+                                         "The run log has the last steps it took.");
+        }
+        return false;
+    }
+    return true;
 }
 
 bool Randomizer::randomizeStartingEquipment(bool shuffleEquipment)

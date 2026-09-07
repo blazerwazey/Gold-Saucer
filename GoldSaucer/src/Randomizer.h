@@ -34,6 +34,11 @@ public:
     bool randomizeStartingEquipment(bool shuffleEquipment = true);
     bool applyCraterBarrier();
     
+    // Why the last pass returned false, in a form fit to show a user. The GUI
+    // shows this instead of a bare "<pass> failed", which told a bug reporter
+    // nothing about which of the many failure paths they hit.
+    QString lastError() const { return m_lastError; }
+
     bool createBackup(const QString& filePath);
     QString getFF7Path() const { return m_ff7Path; }
     QString getOutputPath() const;
@@ -42,6 +47,7 @@ public:
     
 private:
     QString m_ff7Path;
+    QString m_lastError;
     const Config& m_config;
     std::mt19937 m_rng;
     

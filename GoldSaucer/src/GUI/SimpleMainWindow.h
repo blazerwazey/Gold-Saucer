@@ -30,6 +30,8 @@ private slots:
     void resetToDefaults();
     void randomSeed();
     void appendConsoleMessage(const QString& message);
+    // Show a failed pass with its reason, and offer the run log.
+    void reportPassFailure(const QString& passName, const QString& reason);
     void importArchipelagoJSON();
     void toggleArchipelagoMode(bool enabled);
 

@@ -73,10 +73,28 @@ struct OpcodeModification {
     int opcodeOffset;       // absolute offset in decompressed data
     QString newName;        // new item/materia display name
     bool isMateria;         // true for SMTRA, false for STITM
+    // Fully composed, FF7-ENCODED replacement message, including any 0xE7 line
+    // breaks. When set, updateFieldTexts writes it verbatim instead of building
+    // `Received "<newName>"!` itself.
+    //
+    // Archipelago needs this: the sentence depends on who the item belongs to
+    // ("Sent ... to Bob!"), and the AP item has no relation to the vanilla
+    // opcode - a materia chest can hold another player's weapon - so the
+    // item/materia distinction the vanilla path infers from the opcode is
+    // simply wrong here.
+    QByteArray encodedText;
+    // Shape of encodedText, for sizing the window that shows it. Vanilla pickup
+    // windows are sized for ONE line and FF7 does not wrap or grow them - a
+    // second line simply renders outside the frame.
+    int textLines{1};
+    int textCols{0};
 
     OpcodeModification() : opcodeOffset(-1), isMateria(false) {}
     OpcodeModification(int off, const QString& name, bool mat)
         : opcodeOffset(off), newName(name), isMateria(mat) {}
+    OpcodeModification(int off, const QByteArray& encoded, int lines, int cols)
+        : opcodeOffset(off), isMateria(false), encodedText(encoded),
+          textLines(lines), textCols(cols) {}
 };
 
 // Main Field Pickup Randomizer Class
@@ -143,7 +161,16 @@ private:
     // in the JSON.  Bank is preserved so we can route key-item placements to
     // bank 1 (vanilla key-item flag) and auto-allocated AP locations to
     // bank 3 (the safe range, away from FF7's busy bank-1 NPC state vars).
-    struct ApBitonCoord { quint8 bank; quint8 address; quint8 bit; };
+    struct ApBitonCoord {
+        quint8 bank; quint8 address; quint8 bit;
+        // What Archipelago actually placed here, carried so the field's pickup
+        // message can name it. It rides on the coord rather than a parallel
+        // table because the coord IS the placement: the queue and the
+        // last-BITON fallback both hand back the right one for free.
+        QString apItem;     // AP item name, e.g. "Rocket Launcher"
+        QString apOwner;    // receiving player's name
+        bool    apLocal{true};  // item belongs to this slot
+    };
     QHash<QString, QQueue<ApBitonCoord>> m_apJsonLookup;
     // Tracks the most-recently dequeued BITON per (field|item_text) key so
     // that duplicate SMTRA/STITM opcodes (e.g. NPC dialogue branch + actual
@@ -153,10 +180,25 @@ private:
     QHash<QString, ApBitonCoord> m_apJsonLastBiton;
 
     bool loadApJson(const QString& path, QTextStream& debugStream);
+    // outText, when non-null, receives the FF7-encoded pickup message for the
+    // placement that was consumed, ready to hand to updateFieldTexts.
     bool applySTITMAsArchipelago(STITMInfo& info, QByteArray& fieldData,
-                                 const QString& fieldName, QTextStream& debugStream);
+                                 const QString& fieldName, QTextStream& debugStream,
+                                 QByteArray* outText = nullptr,
+                                 int* outLines = nullptr, int* outCols = nullptr);
     bool applySMTRAAsArchipelago(SMTRAInfo& info, QByteArray& fieldData,
-                                 const QString& fieldName, QTextStream& debugStream);
+                                 const QString& fieldName, QTextStream& debugStream,
+                                 QByteArray* outText = nullptr,
+                                 int* outLines = nullptr, int* outCols = nullptr);
+    // Compose the in-game message for an Archipelago placement.
+    QByteArray composeApPickupText(const ApBitonCoord& placement,
+                                   QTextStream& debugStream,
+                                   int* outLines = nullptr,
+                                   int* outCols = nullptr) const;
+    // Grow the WINDOW that shows a patched MESSAGE so multi-line text fits.
+    bool resizeMessageWindow(QByteArray& decompressed, int messageOffset,
+                             int scriptStart, int lines, int cols,
+                             QTextStream& debugStream) const;
     void writeArchipelagoSidecar(const QString& outputPath, QTextStream& debugStream) const;
 
     // --- Key item structs (must be declared before processFieldFile) ---

@@ -817,7 +817,8 @@ QWidget* SimpleMainWindow::buildStepRun()
 
     static const char* kStages[StageCount] = {
         "Copy original files", "Shops + AP slots", "Field pickups",
-        "Starting equipment", "Northern Crater barrier", "Pack .iro archive"
+        "Enemy encounters", "Starting equipment", "Northern Crater barrier",
+        "Pack .iro archive"
     };
     QWidget* stages = new QWidget(page);
     QVBoxLayout* stl = new QVBoxLayout(stages);
@@ -1416,6 +1417,8 @@ void SimpleMainWindow::startRandomization()
     // forever, so the list is an honest account of what this run will do.
     const bool willCrater = m_config.getFreeRoam();
     const bool willIro    = m_config.getExportIro();
+    setStageVisible(StageEnemies,
+                    m_config.isFeatureEnabled(Config::EnemyEncounterRandomization));
     setStageVisible(StageCrater, willCrater);
     setStageVisible(StageIro, willIro);
 
@@ -1552,6 +1555,33 @@ void SimpleMainWindow::startRandomization()
             setStage(StageFields, 3);
         }
         m_progressBar->setValue(60);
+
+        // ── Enemy encounters ──────────────────────────────────────────────
+        // Off by default and unproven in play, so a failure here is reported
+        // as a WARNING and the run continues: a bad scene.bin shuffle should
+        // not cost the player the field and shop work already done.
+        if (!stopHere(StageEnemies)
+            && m_config.isFeatureEnabled(Config::EnemyEncounterRandomization)) {
+            setStage(StageEnemies, 1);
+            m_statusLabel->setText("Shuffling Enemy Encounters...");
+            m_runDetail->setText("Shuffling encounters within difficulty tiers…");
+            appendConsoleMessage("Shuffling enemy encounters...");
+            QApplication::processEvents();
+
+            if (!randomizer.randomizeEnemyEncounters()) {
+                appendConsoleMessage("WARNING: enemy encounter shuffle failed — "
+                                     "encounters left vanilla. See "
+                                     "encounter_randomization_debug.txt.");
+                setStage(StageEnemies, 3);
+            } else {
+                appendConsoleMessage("Enemy encounter shuffle completed");
+                setStage(StageEnemies, 2);
+                ran << "Shuffled the enemy encounters";
+            }
+        } else if (!cancelled) {
+            setStage(StageEnemies, 3);
+        }
+        m_progressBar->setValue(65);
 
         // ALWAYS run the kernel init-data pass: it also sets Cloud's starting
         // level, which must apply whether or not starting-equipment

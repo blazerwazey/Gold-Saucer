@@ -47,7 +47,8 @@ private:
     enum Step { StepGame = 0, StepSeed, StepOptions, StepOutput, StepRun, StepDone, StepCount };
     // Passes, in the order startRandomization() runs them. Crater and IRO are
     // conditional and their rows are hidden when they will not run.
-    enum Stage { StageCopy = 0, StageShops, StageFields, StageEquip, StageCrater, StageIro, StageCount };
+    enum Stage { StageCopy = 0, StageShops, StageFields, StageEnemies, StageEquip,
+                 StageCrater, StageIro, StageCount };
 
     void setupUI();
     void updateConfig();

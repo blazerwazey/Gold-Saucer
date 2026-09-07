@@ -1,4 +1,5 @@
 #include "EnemyRandomizer.h"
+#include "EnemyProtectedFormations.h"
 
 #include "Randomizer.h"
 
@@ -581,9 +582,29 @@ bool EnemyRandomizer::randomizeEncounters()
 
     const Config& config = m_parent->m_config;
 
-    bool includeBosses = config.getEncounterBossesIncluded();
+    // FORCED OFF for the first shipping pass. Tier 4 is where the story bosses
+    // live, and the tiering is a blunt average-HP heuristic - a boss landing in
+    // a random encounter slot is a run-ender, and one landing where a scripted
+    // fight expected it is worse. The Config getter is left in place for when
+    // the tier-preserving shuffle has actually been proven in play.
+    const bool includeBosses = false;
+    if (config.getEncounterBossesIncluded())
+        dbg << "NOTE: encounter boss inclusion requested but is forced OFF in "
+               "this build (unproven shuffle).\n";
+    dbg << "Include bosses in shuffle: NO (forced)\n\n";
 
-    dbg << "Include bosses in shuffle: " << (includeBosses ? "YES" : "NO") << "\n\n";
+    // ── Scenes that must never move ────────────────────────────────────────
+    // The Archipelago client identifies boss kills BY FORMATION ID, and field
+    // scripts start specific fights by id. A scene holds FOUR consecutive
+    // formations (formation id = scene * 4 + slot), so protecting one formation
+    // means holding its WHOLE SCENE still - swapping the scene would move all
+    // four. See EnemyProtectedFormations.h for where the list comes from.
+    QSet<int> protectedScenes;
+    for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i)
+        protectedScenes.insert(EnemyProtectedFormations::kProtected[i] / 4);
+    dbg << "Protected: " << EnemyProtectedFormations::kProtectedCount
+        << " formations -> " << protectedScenes.size()
+        << " scenes held out of the shuffle\n\n";
 
 
 
@@ -698,12 +719,15 @@ bool EnemyRandomizer::randomizeEncounters()
         // Collect indices for this tier
 
         QVector<int> indices;
-
+        int heldBack = 0;
         for (int i = 0; i < scenes.size(); ++i) {
-
-            if (tier[i] == t) indices.append(i);
-
+            if (tier[i] != t) continue;
+            if (protectedScenes.contains(i)) { ++heldBack; continue; }
+            indices.append(i);
         }
+        if (heldBack)
+            dbg << "Tier " << t << ": held back " << heldBack
+                << " protected scene(s)\n";
 
         if (indices.size() < 2) continue;
 

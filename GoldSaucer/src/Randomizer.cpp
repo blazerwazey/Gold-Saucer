@@ -137,6 +137,9 @@ bool Randomizer::randomizeEnemyStats()
     return m_enemyRandomizer->randomize();
 }
 
+// Shuffles whole scenes between slots of similar difficulty. Protected
+// formations (see EnemyProtectedFormations.h) are held out, because the client
+// detects boss kills by formation id.
 bool Randomizer::randomizeEnemyEncounters()
 {
     if (!validateFF7Installation()) {

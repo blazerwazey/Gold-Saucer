@@ -1987,7 +1987,11 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                 int parity = v % 2;
                 STITMInfo& info = stitmCandidates[validIndices[v]];
                 if (!bitonByParity.contains(parity)) {
-                    if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream)) {
+                    QByteArray text; int lines = 1, cols = 0;
+                    if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream,
+                                                &text, &lines, &cols)) {
+                        if (!text.isEmpty())
+                            modifications.append(OpcodeModification(info.offset, text, lines, cols));
                         ParityBiton pb;
                         pb.bankByte = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 1]));
                         pb.addr     = static_cast<quint8>(static_cast<unsigned char>(decompressed[info.offset + 2]));
@@ -2017,8 +2021,13 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             // Archipelago mode: replace each STITM with a unique BITON from the queue
             for (int idx : validIndices) {
                 STITMInfo& info = stitmCandidates[idx];
-                if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream))
+                QByteArray text; int lines = 1, cols = 0;
+                if (applySTITMAsArchipelago(info, decompressed, fieldName, debugStream,
+                                            &text, &lines, &cols)) {
+                    if (!text.isEmpty())
+                        modifications.append(OpcodeModification(info.offset, text, lines, cols));
                     totalMods++;
+                }
             }
         }
     } else {
@@ -2069,8 +2078,13 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     for (SMTRAInfo& info : smtraCandidates) {
         if (!validateSMTRA(info)) continue;
         if (apMode) {
-            if (applySMTRAAsArchipelago(info, decompressed, fieldName, debugStream))
+            QByteArray text; int lines = 1, cols = 0;
+            if (applySMTRAAsArchipelago(info, decompressed, fieldName, debugStream,
+                                        &text, &lines, &cols)) {
+                if (!text.isEmpty())
+                    modifications.append(OpcodeModification(info.offset, text, lines, cols));
                 totalMods++;
+            }
         } else {
             quint8 newMateriaID = getRandomMateria();
             if (applySMTRARandomization(info, decompressed, newMateriaID, debugStream)) {
@@ -5243,6 +5257,12 @@ bool FieldPickupRandomizer_ff7tk::loadApJson(
             static_cast<quint8>(address),
             static_cast<quint8>(bit),
         };
+        // Kept for the pickup message. "item" is the AP item name (which may be
+        // another game's item entirely), "item_owner" the player receiving it.
+        // Both are always present in the seed - see json_export._serialize_placements.
+        coord.apItem  = p["item"].toString().trimmed();
+        coord.apOwner = p["item_owner"].toString().trimmed();
+        coord.apLocal = p["item_is_local"].toBool(true);
 
         // Register the detection coord under EVERY field the location can appear
         // in, not just the single "map". A location is often reachable as several
@@ -5318,13 +5338,179 @@ static int jsonBankToNibble(quint8 jsonBank)
 //                              if no JSON entry matches.
 // ============================================================================
 
+// ============================================================================
+// composeApPickupText  -  build the message a chest shows for an AP placement
+//
+// Local item:   Received "Hi-Potion"!
+// Remote item:  Sent "Rocket Launcher"
+//               to Bob!
+//
+// FF7 field windows do NOT wrap: text runs past the frame and is clipped. The
+// window is sized by the WINDOW opcode that precedes MESSAGE, and we are
+// reusing the vanilla one, which was sized for a vanilla item name. So we break
+// the line ourselves at 0xE7 (the same newline byte the crater welcome banner
+// uses) and keep each line inside kMaxLine, truncating a very long name rather
+// than letting it spill out of the frame.
+// ============================================================================
+
+QByteArray FieldPickupRandomizer_ff7tk::composeApPickupText(
+    const ApBitonCoord& placement,
+    QTextStream& debugStream,
+    int* outLines,
+    int* outCols) const
+{
+    // Vanilla pickup windows fit roughly this much before the frame clips. Kept
+    // deliberately conservative: an over-long line is unreadable in game, while
+    // an over-short one merely wraps early.
+    constexpr int kMaxLine = 26;
+    constexpr char kNewline = static_cast<char>(0xE7);
+
+    if (placement.apItem.isEmpty())
+        return QByteArray();   // nothing to say - leave the vanilla text alone
+
+    // Greedy word wrap. Up to kMaxLines because resizeMessageWindow can grow the
+    // box to match (vanilla heights are 16 per line plus 9 of frame), so wrapping
+    // beats truncating: item names like "Huge Materia (Underwater)" do not fit
+    // two lines but read fine on three.
+    constexpr int kMaxLines = 3;
+    auto wrap = [&](const QString& sentence) {
+        QStringList out;
+        QString line;
+        for (const QString& word : sentence.split(QChar(' '), Qt::SkipEmptyParts)) {
+            const QString candidate = line.isEmpty() ? word : line + QChar(' ') + word;
+            if (candidate.size() <= kMaxLine) {
+                line = candidate;
+                continue;
+            }
+            if (!line.isEmpty()) out << line;
+            // A single word longer than a line has nowhere to break; it is the
+            // only case where we still cut, and it takes a "~" so the player can
+            // see the name was shortened rather than mis-set.
+            line = word.size() <= kMaxLine ? word
+                                           : word.left(kMaxLine - 1) + QStringLiteral("~");
+        }
+        if (!line.isEmpty()) out << line;
+        while (out.size() > kMaxLines) {
+            // Should not happen for real item/player names; fold the tail rather
+            // than silently dropping it.
+            const QString tail = out.takeLast();
+            out.last() = out.last().left(qMax(0, kMaxLine - 1)) + QStringLiteral("~");
+            Q_UNUSED(tail);
+        }
+        return out;
+    };
+
+    QStringList lines;
+    if (placement.apLocal || placement.apOwner.isEmpty()) {
+        // Your own item. Mirrors the vanilla sentence so the field reads normally.
+        lines = wrap(QStringLiteral("Received \"%1\"!").arg(placement.apItem));
+    } else {
+        // Someone else's item. Naming the player is the point: it tells you the
+        // check fired and where the item went, which a bare item name does not.
+        lines = wrap(QStringLiteral("Sent \"%1\" to %2!")
+                         .arg(placement.apItem, placement.apOwner));
+    }
+
+    QByteArray out;
+    int widest = 0;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (i) out.append(kNewline);
+        out.append(FF7Text::toFF7(lines[i]));
+        widest = qMax(widest, lines[i].size());
+    }
+    if (outLines) *outLines = lines.size();
+    if (outCols)  *outCols  = widest;
+    debugStream << "    AP_TEXT: " << lines.join(QStringLiteral(" / ")) << "\n";
+    return out;
+}
+
+// ============================================================================
+// resizeMessageWindow  -  make the vanilla WINDOW fit our replacement text
+//
+// FF7 does not wrap or auto-grow a scripted window: text past the frame is
+// simply not drawn. Vanilla pickup windows were sized for one short line, and
+// an Archipelago message is usually two ("Sent "X" / to Bob!"), so reusing the
+// vanilla box would clip half of every message.
+//
+// Sizes come from measuring all 10,107 WINDOW/MESSAGE pairs in vanilla flevel:
+// median height is 25/41/57/73 for 1/2/3/4 lines - exactly 16 per line plus 9
+// of frame. Width tracks the longest line; ~7px per character plus frame
+// matches the vanilla medians (1 line 154, 2 lines 174, 3 lines 209).
+//
+// Only ever GROWS the window, and clamps to the 320x240 screen, nudging x/y
+// back if the wider box would run off the edge.
+// ============================================================================
+
+bool FieldPickupRandomizer_ff7tk::resizeMessageWindow(
+    QByteArray& decompressed,
+    int messageOffset,
+    int scriptStart,
+    int lines,
+    int cols,
+    QTextStream& debugStream) const
+{
+    constexpr int kWindowOpcode = 0x50;
+    constexpr int kWindowSize   = 10;   // 0x50, id, x u16, y u16, w u16, h u16
+    constexpr int kScreenW      = 320;
+    constexpr int kScreenH      = 240;
+
+    if (messageOffset + 2 >= decompressed.size()) return false;
+    const quint8 winId = static_cast<quint8>(decompressed.at(messageOffset + 1));
+
+    // The WINDOW that configures this id is nearly always a few opcodes before
+    // the MESSAGE. Search back a bounded distance and take the nearest match
+    // whose fields are plausible - 0x50 also occurs as operand data.
+    const int searchStart = qMax(scriptStart, messageOffset - 300);
+    for (int pos = messageOffset - 1; pos >= searchStart; --pos) {
+        if (static_cast<quint8>(decompressed.at(pos)) != kWindowOpcode) continue;
+        if (pos + kWindowSize > decompressed.size()) continue;
+        if (static_cast<quint8>(decompressed.at(pos + 1)) != winId) continue;
+
+        quint16 x, y, w, h;
+        memcpy(&x, decompressed.constData() + pos + 2, 2);
+        memcpy(&y, decompressed.constData() + pos + 4, 2);
+        memcpy(&w, decompressed.constData() + pos + 6, 2);
+        memcpy(&h, decompressed.constData() + pos + 8, 2);
+        if (w == 0 || h == 0 || w > kScreenW || h > kScreenH) continue;  // not a WINDOW
+
+        const quint16 wantH = static_cast<quint16>(16 * lines + 9);
+        const quint16 wantW = static_cast<quint16>(qBound(60, cols * 7 + 20, kScreenW));
+        quint16 newW = qMax(w, wantW);
+        quint16 newH = qMax(h, wantH);
+        quint16 newX = x, newY = y;
+        if (newX + newW > kScreenW) newX = static_cast<quint16>(qMax(0, kScreenW - newW));
+        if (newY + newH > kScreenH) newY = static_cast<quint16>(qMax(0, kScreenH - newH));
+
+        if (newW == w && newH == h && newX == x && newY == y)
+            return false;   // already big enough
+
+        memcpy(decompressed.data() + pos + 2, &newX, 2);
+        memcpy(decompressed.data() + pos + 4, &newY, 2);
+        memcpy(decompressed.data() + pos + 6, &newW, 2);
+        memcpy(decompressed.data() + pos + 8, &newH, 2);
+        debugStream << "    AP_WINDOW @" << pos << " id=" << winId
+                    << "  " << w << "x" << h << " -> " << newW << "x" << newH
+                    << " (" << lines << " lines, " << cols << " cols)\n";
+        return true;
+    }
+
+    debugStream << "    AP_WINDOW: no WINDOW for id " << winId
+                << " before MESSAGE @" << messageOffset
+                << " - text may be clipped if it needs more than one line\n";
+    return false;
+}
+
 bool FieldPickupRandomizer_ff7tk::applySTITMAsArchipelago(
     STITMInfo& info,
     QByteArray& fieldData,
     const QString& fieldName,
-    QTextStream& debugStream)
+    QTextStream& debugStream,
+    QByteArray* outText,
+    int* outLines,
+    int* outCols)
 {
     if (info.offset + STITM_SIZE > fieldData.size()) return false;
+    int outTextLines = 1, outTextCols = 0;
 
     QString itemName = getItemName(info.originalItemID).toLower().trimmed();
     QString key      = fieldName.toLower().trimmed() + QChar('|') + itemName;
@@ -5381,6 +5567,12 @@ bool FieldPickupRandomizer_ff7tk::applySTITMAsArchipelago(
     entry.bit            = bit;
     m_apBitonEntries.append(entry);
 
+    if (outText)
+        *outText = composeApPickupText(biton, debugStream,
+                                       &outTextLines, &outTextCols);
+    if (outLines) *outLines = outTextLines;
+    if (outCols)  *outCols  = outTextCols;
+
     debugStream << "  AP_STITM @" << info.offset
                 << "  " << entry.originalName
                 << " (" << info.originalItemID << ")"
@@ -5400,9 +5592,13 @@ bool FieldPickupRandomizer_ff7tk::applySMTRAAsArchipelago(
     SMTRAInfo& info,
     QByteArray& fieldData,
     const QString& fieldName,
-    QTextStream& debugStream)
+    QTextStream& debugStream,
+    QByteArray* outText,
+    int* outLines,
+    int* outCols)
 {
     if (info.offset + SMTRA_SIZE > fieldData.size()) return false;
+    int outTextLines = 1, outTextCols = 0;
 
     QString materiaName = getMateriaName(info.originalMateriaID).toLower().trimmed();
     QString key         = fieldName.toLower().trimmed() + QChar('|') + materiaName;
@@ -5457,6 +5653,12 @@ bool FieldPickupRandomizer_ff7tk::applySMTRAAsArchipelago(
     entry.address          = addr;
     entry.bit              = bit;
     m_apBitonEntries.append(entry);
+
+    if (outText)
+        *outText = composeApPickupText(biton, debugStream,
+                                       &outTextLines, &outTextCols);
+    if (outLines) *outLines = outTextLines;
+    if (outCols)  *outCols  = outTextCols;
 
     debugStream << "  AP_SMTRA @" << info.offset
                 << "  " << entry.originalName
@@ -5897,14 +6099,21 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             continue;
         }
 
-        // Build new text string
+        // Build new text string. An Archipelago placement arrives already
+        // composed and encoded (see composeApPickupText) because its sentence
+        // depends on the receiving player, not on the vanilla opcode.
         QString newTextStr;
-        if (mod.isMateria)
-            newTextStr = QStringLiteral("Received \"%1\" Materia!").arg(mod.newName);
-        else
-            newTextStr = QStringLiteral("Received \"%1\"!").arg(mod.newName);
-
-        QByteArray newTextData = FF7Text::toFF7(newTextStr);
+        QByteArray newTextData;
+        if (!mod.encodedText.isEmpty()) {
+            newTextData = mod.encodedText;
+            newTextStr  = QStringLiteral("(archipelago)");
+        } else {
+            if (mod.isMateria)
+                newTextStr = QStringLiteral("Received \"%1\" Materia!").arg(mod.newName);
+            else
+                newTextStr = QStringLiteral("Received \"%1\"!").arg(mod.newName);
+            newTextData = FF7Text::toFF7(newTextStr);
+        }
 
         int newTextID = textCount + newTextEntries.size();
         if (newTextID > 255) {
@@ -5916,6 +6125,12 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         messagePatches.append({messageOff + 2, newTextID}); // +2 = textID byte offset
         usedMessageOffsets.insert(messageOff);
         anyChanged = true;
+
+        // Grow the window BEFORE the section is rebuilt: this edits the script
+        // region, which sits ahead of the text section and so does not move.
+        if (mod.textLines > 1)
+            resizeMessageWindow(decompressed, messageOff, sec0DataStart,
+                                mod.textLines, mod.textCols, debugStream);
 
         debugStream << "  MSG @" << messageOff << " textID "
                     << static_cast<int>(static_cast<quint8>(decompressed.at(messageOff + 2)))

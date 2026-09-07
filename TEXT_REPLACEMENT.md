@@ -113,10 +113,35 @@ AP path refuses to guess.
   prints every resize (`AP_WINDOW @off id=N WxH -> WxH`) — check it on the first
   real run.
 
-## Not done yet
+## Key items
 
-- **Key items in AP mode.** `replaceVanillaBitonsForAP()` is a separate path and
-  was not plumbed, so key-item pickups keep their vanilla text.
+Key items take a different route in AP mode: `replaceVanillaBitonsForAP()`
+rewrites the *vanilla key-item BITON* in place rather than replacing an STITM,
+so it needed its own plumbing. It now composes the same message and appends an
+`OpcodeModification` alongside the BITON rewrite, keyed on `keyItemName`.
+
+Their vanilla text has its own shape — `Received Key Item "Keycard 62"!` — which
+the names-the-item rule reads just as well. Measured over vanilla flevel:
+
+| | sites |
+|---|---|
+| gets AP text | **35** |
+| skipped, keeps vanilla | 8 |
+
+The 8 grant their item through dialogue with nothing naming it nearby
+(`blin59`'s Keycard 60 sits next to "Destroy the intruders!").
+
+Matching also tolerates the game dropping a parenthetical qualifier: `ncorel3`
+says `Received Key Item "Huge Materia"!` where the table says "Huge Materia
+(Corel)". That alone moved key-item coverage from 29 to 35. Where one field
+holds two such items (`rcktin4` has Corel and Fort Condor) the used-message
+guard stops both claiming the same text; the second is skipped, not mislabelled.
+
+Shared and sibling BITONs each get their own entry — they are separate code
+paths in the field, each with its own message — and neutralized BITONs (no AP
+placement) get no text, which is correct: nothing was placed there.
+
+## Not done yet
 - Shop text, and the `Config::TextReplacement` feature flag (currently unused by
   this path — the AP text is unconditional in AP mode).
 - The old `TextReplacementManager` is a **different, unwired** subsystem (kernel

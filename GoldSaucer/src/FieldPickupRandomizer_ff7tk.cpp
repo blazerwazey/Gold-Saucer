@@ -2102,7 +2102,8 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
 
     // --- Vanilla BITON replacement for Key Items in AP mode -----------------
     if (apMode) {
-        int vanillaMods = replaceVanillaBitonsForAP(decompressed, fieldName, debugStream);
+        int vanillaMods = replaceVanillaBitonsForAP(decompressed, fieldName, debugStream,
+                                                   &modifications);
         if (vanillaMods > 0) {
             totalMods += vanillaMods;
         }
@@ -5726,7 +5727,8 @@ static QString getCategoryItemName(const QString& itemName)
 int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
     QByteArray& decompressed,
     const QString& fieldName,
-    QTextStream& debugStream)
+    QTextStream& debugStream,
+    QVector<OpcodeModification>* mods)
 {
     int modified = 0;
     const int fileSize = decompressed.size();
@@ -5855,6 +5857,22 @@ int FieldPickupRandomizer_ff7tk::replaceVanillaBitonsForAP(
                         entry.address = apBiton.address;
                         entry.bit = apBiton.bit;
                         m_apBitonEntries.append(entry);
+
+                        // Same treatment as a STITM/SMTRA placement: the chest
+                        // should name what Archipelago put here. Vanilla key-item
+                        // text reads `Received Key Item "Keycard 62"!`, so the
+                        // keyItemName gives updateFieldTexts a reliable way to
+                        // find the right MESSAGE. Shared/sibling BITONs each get
+                        // their own entry: they are separate code paths in the
+                        // field and each has its own message.
+                        if (mods) {
+                            int lines = 1, cols = 0;
+                            const QByteArray text =
+                                composeApPickupText(apBiton, debugStream, &lines, &cols);
+                            if (!text.isEmpty())
+                                mods->append(OpcodeModification(i, text, lines, cols,
+                                                                keyItemName));
+                        }
 
                         modified++;
                     } else {
@@ -6084,6 +6102,17 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         if (a.contains(b)) return true;
         // Tolerate a one-character spelling drift on longer names.
         if (b.size() >= 6 && a.contains(b.left(b.size() - 1))) return true;
+        // The game often drops our parenthetical qualifier: ncorel3 says
+        // `Received Key Item "Huge Materia"!` where the table says
+        // "Huge Materia (Corel)". Retry on the part before the bracket. If a
+        // field holds two of them (rcktin4 has Corel and Fort Condor) the
+        // used-message guard stops both claiming the same text; the second is
+        // skipped rather than mislabelled.
+        const int bracket = wanted.indexOf(QLatin1Char('('));
+        if (bracket > 0) {
+            const QString stem = squash(wanted.left(bracket));
+            if (stem.size() >= 6 && a.contains(stem)) return true;
+        }
         return false;
     };
 

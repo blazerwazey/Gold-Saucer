@@ -264,9 +264,12 @@ private:
                                   quint8 newMateriaID, QTextStream& debugStream);
 
     // --- Vanilla BITON replacement for AP mode ---
+    // mods, when non-null, collects the pickup messages for the key items this
+    // rewrites, so they get AP text like STITM/SMTRA placements do.
     int replaceVanillaBitonsForAP(QByteArray& decompressed,
                                    const QString& fieldName,
-                                   QTextStream& debugStream);
+                                   QTextStream& debugStream,
+                                   QVector<OpcodeModification>* mods = nullptr);
 
     // --- Text section update ---
     bool updateFieldTexts(QByteArray& decompressed,

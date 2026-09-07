@@ -88,13 +88,19 @@ struct OpcodeModification {
     // second line simply renders outside the frame.
     int textLines{1};
     int textCols{0};
+    // The name the VANILLA opcode gave, e.g. "Ether". Used to pick which nearby
+    // MESSAGE actually belongs to this pickup: the vanilla text says
+    // `Received "Ether"!`, so the right message is the one that names it.
+    // Nearest-MESSAGE alone cross-assigns inside chest clusters.
+    QString vanillaName;
 
     OpcodeModification() : opcodeOffset(-1), isMateria(false) {}
     OpcodeModification(int off, const QString& name, bool mat)
         : opcodeOffset(off), newName(name), isMateria(mat) {}
-    OpcodeModification(int off, const QByteArray& encoded, int lines, int cols)
+    OpcodeModification(int off, const QByteArray& encoded, int lines, int cols,
+                       const QString& vanilla)
         : opcodeOffset(off), isMateria(false), encodedText(encoded),
-          textLines(lines), textCols(cols) {}
+          textLines(lines), textCols(cols), vanillaName(vanilla) {}
 };
 
 // Main Field Pickup Randomizer Class

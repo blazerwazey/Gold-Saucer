@@ -867,7 +867,7 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         { 13, 0x404, 3, "Costa del Sol"},  // del2 — sealed on its own key (0x185.3)
         { 17, 0x404, 1, "Gongaga"      },  // gonjun2
         { 25, 0x404, 2, "Bone Village" },  // bonevil
-        // The Corral Valley strip is the back door into the Sleeping Forest /
+        // The Corel Valley strip is the back door into the Sleeping Forest /
         // Bone Village / Forgotten Capital chain — seal all three world entries
         // on the Bone Village key so the area only opens through Bone Village.
         //
@@ -880,9 +880,9 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         //
         // The Sleeping Forest itself is deliberately NOT gated on the Harp — its
         // logic rule was dropped the same day for exactly the reason above.
-        { 26, 0x404, 2, "Corral Valley Cave", 0x43, 3 },  // sandun_2 (+ Lunar Harp)
-        { 57, 0x404, 2, "Corral Valley"     , 0x43, 3 },  // sango2   (+ Lunar Harp)
-        { 58, 0x404, 2, "Corral Valley"     , 0x43, 3 },  // lost1    (+ Lunar Harp)
+        { 26, 0x404, 2, "Corel Valley Cave", 0x43, 3 },  // sandun_2 (+ Lunar Harp)
+        { 57, 0x404, 2, "Corel Valley"     , 0x43, 3 },  // sango2   (+ Lunar Harp)
+        { 58, 0x404, 2, "Corel Valley"     , 0x43, 3 },  // lost1    (+ Lunar Harp)
     };
     const int nTowns = int(sizeof(towns) / sizeof(towns[0]));
 

@@ -660,8 +660,10 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
     // softlock. See nopFieldScriptSplits.
     // Free Roam: the Northern Crater party splits leave a partial roster with a
     // solo-Cloud party forever (the "make a new team" screen is gated on MORE than
-    // three characters going Cloud's way). NOP the party-wiping PRTYE — see
-    // nopCraterPartyWipe.
+    // three characters going Cloud's way). NOP the party-wiping PRTYE — and the
+    // seven PRTYP party ADDS, which would otherwise hand the player characters
+    // Archipelago never granted whenever their chosen direction matches Cloud's.
+    // See nopCraterPartyWipe.
     if (freeRoam && (fieldName.toLower() == "las0_8" || fieldName.toLower() == "las2_1")) {
         if (nopCraterPartyWipe(decompressed, fieldName, debugStream) > 0)
             totalMods++;
@@ -781,6 +783,163 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             debugStream << "  UJUNON2: NOP'd Priscilla drown MESSAGE @" << msg << "\n";
         } else {
             debugStream << "  UJUNON2: drown MESSAGE anchor not found/ambiguous\n";
+        }
+    }
+    if (freeRoam && fieldName.toLower() == "las4_1") {
+        // ── Point of no return: block the final descent without a full party ──
+        //
+        // las4_1 has two trigger-line entities over the SAME line, `l2` and `l3`,
+        // each armed by its own story gate in its init script:
+        //
+        //   d0 ..(13B)..                 LINE      define the line
+        //   16 20 00 00 ce 07 0X 03      IFSW      game_moment <oper> 1998
+        //   d1 00                        LINON 00  disable the line
+        //   00                           RET
+        //
+        // IF opcodes jump when the comparison is FALSE, so at Free Roam's pinned
+        // moment of 1997:
+        //   l3  oper 03 (<)   1997 <  1998 TRUE  -> LINON 00 runs -> line DEAD
+        //   l2  oper 04 (>=)  1997 >= 1998 FALSE -> jumps past it -> line LIVE
+        //
+        // So **l2 is the trigger that commits the descent in Free Roam**, and it
+        // is the one to gate. (Crossing it REQEWs `dic` script 3, which holds the
+        // MAPJUMP; l3's cross script has an identical MAPJUMP but never fires.)
+        // l3 is deliberately left alone -- its line is already off.
+        //
+        // Re-point l2's gate at OUR party byte. IFSW is 8 bytes and IFUB is 6, so
+        // IFUB + two NOPs occupies exactly the same space and the LINON does not
+        // move -- the same length-preserving discipline the crater barrier patch
+        // uses. Nothing is inserted, so no offsets or jumps elsewhere in the field
+        // need recomputing.
+        //
+        //   14 30 84 00 00 05 5f 5f
+        //   |  |  |  |  |  |
+        //   |  |  |  |  |  +-- jump 5: operand at +5, target +10 = just past LINON
+        //   |  |  |  |  +----- oper 0 (==)      [Makou: 0 == 1 != 2 > 3 < 4 >= ...]
+        //   |  |  |  +-------- value 0
+        //   |  |  +----------- addr 0x84 -> savemap 0x0CA4 + 0x84 = 0x0D28
+        //   |  +-------------- banks BANK(3,0): left bank 3, right literal
+        //   +----------------- IFUB
+        //
+        // party gate == 0 -> TRUE  -> falls through the NOPs into LINON 00, and
+        //                             the line is simply dead: the player walks
+        //                             into it and nothing happens. No message, no
+        //                             bounce, no warp -- the game's own toggle.
+        // party gate == 1 -> FALSE -> jumps past LINON -> vanilla behaviour.
+        //
+        // FF7Client drives 0x0D28 from the six canonical characters every poll.
+        //
+        // The anchor deliberately includes the 13-byte LINE that precedes the
+        // gate: the 8-byte IFSW alone appears TWICE in this field (l2 and the
+        // `modo` entity), and patching the wrong one would do nothing useful.
+        // With the LINE included it is unique here and absent from every other
+        // field in flevel.
+        const QByteArray anchor = QByteArray::fromHex(
+            "d06efd58ffacff2cfe8eff9eff" "16200000ce070403" "d100");
+        const int a = decompressed.indexOf(anchor);
+        if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
+            const QByteArray gate = QByteArray::fromHex("1430840000055f5f");
+            for (int j = 0; j < gate.size(); ++j)
+                decompressed[a + 13 + j] = gate.at(j);   // +13 = past the LINE
+            ++totalMods;
+            debugStream << "  LAS4_1: point-of-no-return line (l2) now gated on "
+                           "the party byte 0x0D28 @" << (a + 13) << "\n";
+        } else {
+            debugStream << "  LAS4_1 WARN: l2 story-gate anchor not found/ambiguous "
+                           "— the descent is NOT party-gated in this build\n";
+        }
+
+        // ── ...and tell the player why ────────────────────────────────────
+        //
+        // With l2 dead the player just walks over the spot and nothing happens,
+        // which reads as a bug. `l3` is l2's twin on IDENTICAL line geometry,
+        // already dead in Free Roam (its gate is oper 03 `<`, and 1997 < 1998 is
+        // TRUE, so its LINON 00 always runs). Re-arm it as the INVERSE of l2, so
+        // exactly one of the pair is live at any time:
+        //
+        //   l2   Var[3][132] == 0 -> disable   live when the party is COMPLETE
+        //   l3   Var[3][132] != 0 -> disable   live when the party is INCOMPLETE
+        //
+        // Same length-preserving IFUB+NOP trick, only the operator differs
+        // (1 = `!=` where l2 uses 0 = `==`).
+        {
+            const QByteArray anchor = QByteArray::fromHex(
+                "d06efd58ffacff2cfe8eff9eff" "16200000ce070303" "d100");
+            const int a = decompressed.indexOf(anchor);
+            if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
+                // 10 bytes: IFUB (6) + IDLCK (4), exactly filling the space
+                // vanilla spent on IFSW (8) + LINON (2).
+                //
+                //   14 30 84 00 00 05   if Var[3][132] == 0 -> fall through
+                //   6d 51 00 01         IDLCK triangle 81, locked
+                //
+                // Deciding this in INIT rather than on the line crossing is what
+                // makes the block reversible: the field re-runs Init on every
+                // entry, so a player who returns having recruited the missing
+                // characters finds the triangle walkable again. Locking it from
+                // the crossing script could only ever take the path away, never
+                // give it back. It also blocks BEFORE the player reaches the
+                // line, rather than letting them step over it first.
+                //
+                // The jump operand sits at +5 and targets +10, clearing the
+                // IDLCK. Note l3's LINON is gone with the IFSW, so its line is
+                // now always live; the crossing script below is what decides
+                // whether anything happens.
+                const QByteArray gate = QByteArray::fromHex("143084000005"
+                                                            "6d510001");
+                for (int j = 0; j < gate.size(); ++j)
+                    decompressed[a + 13 + j] = gate.at(j);
+                ++totalMods;
+                debugStream << "  LAS4_1: l3 Init locks walkmesh triangle 81 while the party is short @"
+                            << (a + 13) << "\n";
+            } else {
+                debugStream << "  LAS4_1 WARN: l3 story-gate anchor not found\n";
+            }
+        }
+
+        // l3's cross script (Go 1x) ends in the same descent MAPJUMP as l2's
+        // path. Swap those 10 bytes for a MESSAGE and pad the rest with NOPs, so
+        // crossing while short-handed shows a line instead of moving anywhere.
+        // The surrounding UC/menu lock is vanilla and left intact, so the player
+        // is held still for the message and released afterwards.
+        //
+        // Message 18 is VANILLA text already in this field -- "Where're <name>
+        // and the others?" -- one of the party-check lines las4_1 ships with.
+        // Reusing it keeps the text section untouched, which matters: adding an
+        // entry would move the section and force every offset in the field to be
+        // recomputed. To use a different existing line, change the LAST byte
+        // (the message id) -- 4 is "Don't leave us.", 5 is "I can't let you guys
+        // go by yourselves", 7 is "You sure are hasty."
+        //
+        // The anchor includes the two opcodes before the MAPJUMP: the MAPJUMP
+        // bytes alone appear TWICE in this field, because `dic` script 3 (l2's
+        // legitimate path) holds an identical one, and patching that would break
+        // the descent for a player who has earned it.
+        {
+            const QByteArray anchor = QByteArray::fromHex("33014a01"
+                                                          "60fb02eefdba00140000");
+            const int a = decompressed.indexOf(anchor);
+            if (a >= 0 && decompressed.indexOf(anchor, a + 1) < 0) {
+                // 10 bytes: IFUB (6) + MESSAGE (3) + NOP (1).
+                //
+                //   14 30 84 00 00 04   if Var[3][132] == 0 -> fall through
+                //   40 00 12            MESSAGE 18
+                //   5f                  NOP
+                //
+                // The message needs its own gate now that l3's line is always
+                // live: without it, a player who HAS the party would cross and
+                // be told they do not. Jump operand at +5 targets +9, clearing
+                // the MESSAGE.
+                const QByteArray say = QByteArray::fromHex("143084000004"
+                                                           "400012" "5f");
+                for (int j = 0; j < say.size(); ++j)
+                    decompressed[a + 4 + j] = say.at(j);
+                ++totalMods;
+                debugStream << "  LAS4_1: l3 cross script shows message 18 (gated) @"
+                            << (a + 4) << "\n";
+            } else {
+                debugStream << "  LAS4_1 WARN: l3 cross-script anchor not found\n";
+            }
         }
     }
     if (freeRoam && fieldName.toLower() == "fship_3") {
@@ -4338,6 +4497,35 @@ static int nopCraterPartyWipe(QByteArray& d, const QString& fieldName, QTextStre
                     ++nopped;
                     dbg << "  CRATER_SPLIT: " << fieldName
                         << " NOP'd party-wipe PRTYE 0,FE,FE @" << (pos - sd) << "\n";
+                }
+                // PRTYP (0xC8, 2 bytes) - "add <char> to the current party".
+                //
+                // The split gives every character a direction, then runs seven of
+                // these, each gated on that character having picked Cloud's way:
+                //
+                //   14 dd 55 54 00 03   if Var[13][0x55] == 84   (their direction)
+                //   c8 01               PRTYP -> add Barret
+                //
+                // In Free Roam that hands the player characters Archipelago never
+                // granted: walk into the crater short-handed, pick the matching
+                // direction, and the roster fills itself in. Worse since the
+                // endgame party gate went in, because the party is now the thing
+                // being checked. Reported from play 2026-09-08.
+                //
+                // Dropping the PRTYP leaves the IFUB in front of it evaluating
+                // harmlessly - its jump already targets the byte after the PRTYP,
+                // so the branch lands in the same place either way and the party
+                // stays exactly what the player earned.
+                //
+                // Aerith is deliberately absent from the vanilla chain, which is
+                // why only seven characters appear here.
+                else if (static_cast<quint8>(d.at(pos)) == 0xC8 && len == 2) {
+                    const int cid = static_cast<quint8>(d.at(pos + 1));
+                    for (int k = 0; k < len; ++k) d[pos + k] = static_cast<char>(0x5F);
+                    ++nopped;
+                    dbg << "  CRATER_SPLIT: " << fieldName
+                        << " NOP'd PRTYP (add char " << cid << " to party) @"
+                        << (pos - sd) << "\n";
                 }
                 pos += len;
             }

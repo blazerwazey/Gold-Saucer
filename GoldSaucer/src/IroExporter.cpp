@@ -197,23 +197,35 @@ int IroExporter::stageWorldScript(QStringList& log)
     log << "  IRO: staged world-map script override (world_us.lgp/wm0.ev)";
     int staged = 1;
 
-    // Town gating overwrites a world message in the 'mes' entry. FFNx/7H load lgp
-    // entries independently, so the wm0.ev override alone leaves message text
-    // vanilla — stage 'mes' too, but only if it actually changed vs the original
-    // lgp (otherwise we'd needlessly override another mod's world text).
+    // FFNx/7H load lgp entries independently, so each edited entry must be staged
+    // on its own. Locate the original lgp once for changed-vs-original guards
+    // (only stage entries we actually modified — don't override other mods).
+    const QStringList origCandidates = {
+        m_ff7Path + "/ff7/workingdir/data/wm/world_us.lgp",  // 2026 re-release
+        m_ff7Path + "/data/wm/world_us.lgp",                 // classic Steam/1998
+    };
+    MakouLgpManager orig;
+    bool haveOrig = false;
+    for (const QString& c : origCandidates)
+        if (QFile::exists(c) && orig.open(c)) { haveOrig = true; break; }
+
+    // Town gating / welcome banner overwrite world messages in the 'mes' entry.
     QByteArray mes = lgp.fileData("mes");
-    if (!mes.isEmpty()) {
-        const QStringList origCandidates = {
-            m_ff7Path + "/ff7/workingdir/data/wm/world_us.lgp",  // 2026 re-release
-            m_ff7Path + "/data/wm/world_us.lgp",                 // classic Steam/1998
-        };
-        QByteArray origMes;
-        for (const QString& c : origCandidates) {
-            MakouLgpManager o;
-            if (QFile::exists(c) && o.open(c)) { origMes = o.fileData("mes"); if (!origMes.isEmpty()) break; }
-        }
+    if (!mes.isEmpty() && haveOrig) {
+        const QByteArray origMes = orig.fileData("mes");
         if (!origMes.isEmpty() && mes != origMes && stageBytes("world_us.lgp/mes", mes)) {
             log << "  IRO: staged world message override (world_us.lgp/mes)";
+            ++staged;
+        }
+    }
+
+    // The Emerald WEAPON arrival gate lives in wm2.ev (underwater map script) —
+    // stage it too when modified, or the gate never reaches the game via the iro.
+    QByteArray wm2 = lgp.fileData("wm2.ev");
+    if (!wm2.isEmpty() && haveOrig) {
+        const QByteArray origWm2 = orig.fileData("wm2.ev");
+        if (!origWm2.isEmpty() && wm2 != origWm2 && stageBytes("world_us.lgp/wm2.ev", wm2)) {
+            log << "  IRO: staged underwater-map script override (world_us.lgp/wm2.ev)";
             ++staged;
         }
     }

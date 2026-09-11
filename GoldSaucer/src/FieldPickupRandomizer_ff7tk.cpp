@@ -2180,6 +2180,7 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             }
         } else {
             // Archipelago mode: replace each STITM with a unique BITON from the queue
+            QSet<int> convertedOffsets;
             for (int idx : validIndices) {
                 STITMInfo& info = stitmCandidates[idx];
                 QByteArray text; int lines = 1, cols = 0;
@@ -2189,9 +2190,17 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                     if (!text.isEmpty())
                         modifications.append(
                             OpcodeModification(info.offset, text, lines, cols, vanilla));
+                    convertedOffsets.insert(info.offset);
                     totalMods++;
                 }
             }
+            // A few chests grant a second item behind the same flag; it has no
+            // AP entry of its own, so without this the player keeps receiving it
+            // free forever. Runs after the loop because it has to know which
+            // grant actually took the check.
+            totalMods += stripSharedFlagExtras(fieldName, decompressed, stitmCandidates,
+                                               validIndices, convertedOffsets,
+                                               modifications, debugStream);
         }
     } else {
         // Normal randomization
@@ -5527,6 +5536,116 @@ static int jsonBankToNibble(quint8 jsonBank)
 }
 
 // ============================================================================
+// Chests that hand out SEVERAL items behind ONE detection flag.
+//
+// A field pickup normally grants one item and sets one BITON, and that BITON is
+// the Archipelago check. A handful of chests grant TWO, then set a single flag.
+// Only one grant can carry the check, so the other keeps handing out its
+// vanilla item forever - a free Potion on top of whatever Archipelago placed
+// there. Reported from play 2026-09-11 for Aerith's House 2f.
+//
+// Each entry names the grant that CARRIES the check (the location's item_text)
+// and the grant that has to go. Both the STITM and its `Received "X"!` message
+// are removed, because NOPping the grant alone would announce an item that
+// never arrives.
+//
+// DELIBERATELY A TABLE, NOT A RULE. The obvious generalisation - "NOP every
+// grant that shares a BITON" - is wrong. Walking vanilla flevel for grants
+// sharing a flag also catches the Battle Square prize counter (coloin1, 20
+// grants) and the Wonder Square prize scripts (games_1), which are branching
+// dialogue where only one branch ever runs. Emptying those would silently
+// delete most of their prizes. Three further sites were found and left alone:
+//   blin64   Mind Source + Speed Source - Shinra Building, not in Free Roam,
+//            and its item_text matches neither grant so nothing is converted
+//   coloin1 / games_1                   - the prize counters above
+//   utapb    the Turtle Paradise reward - 7 items for viewing all the flyers,
+//            which IS the reward, not a chest with a stowaway
+struct SharedFlagExtra {
+    const char* field;        // flevel field name, lowercase
+    const char* apItemName;   // grant carrying the AP check (location item_text)
+    quint16     extraItemId;  // grant with no AP entry of its own
+};
+
+static const SharedFlagExtra kSharedFlagExtras[] = {
+    // Aerith's House 2f: MESSAGE Potion / MESSAGE Phoenix Down / STITM 0 /
+    // STITM 7 / BITON 1.48.1. The AP location is the Phoenix Down.
+    { "ealin_2", "Phoenix Down", 0  },   // Potion
+    // Cosmo Canyon item store, the TAKARA chest: WINDOW/MESSAGE/STITM twice,
+    // then BITON 1.56.5. The AP location is the Elixir - its name even says so,
+    // "Cosmo Canyon Item Store - Elixir & Magic Source".
+    { "cosmin7", "Elixir",       73 },   // Magic Source
+};
+
+// Two grants belong to the same chest only if they sit close together. 64 bytes
+// covers the WINDOW + MESSAGE pair cosmin7 puts between its two STITMs (23 bytes)
+// with room to spare, while keeping us from reaching an unrelated pickup
+// elsewhere in the field that happens to hand out the same item.
+static const int kSharedFlagMaxSpan = 64;
+
+// Remove the extra grants for `fieldName`, given the STITMs found in it.
+int FieldPickupRandomizer_ff7tk::stripSharedFlagExtras(
+    const QString& fieldName,
+    QByteArray& decompressed,
+    const QVector<STITMInfo>& candidates,
+    const QVector<int>& validIndices,
+    const QSet<int>& convertedOffsets,
+    QVector<OpcodeModification>& modifications,
+    QTextStream& debugStream)
+{
+    int removed = 0;
+    const QString field = fieldName.toLower().trimmed();
+
+    for (const SharedFlagExtra& rule : kSharedFlagExtras) {
+        if (field != QLatin1String(rule.field)) continue;
+
+        // Only act when the grant that carries the check was ACTUALLY converted
+        // in this run. If it was not - no AP entry, a seed that excluded the
+        // location, plain randomizer mode - the chest is still vanilla and
+        // emptying half of it would just cost the player an item.
+        int anchor = -1;
+        for (int idx : validIndices) {
+            const STITMInfo& info = candidates[idx];
+            if (!convertedOffsets.contains(info.offset)) continue;
+            if (getItemName(info.originalItemID).compare(
+                    QLatin1String(rule.apItemName), Qt::CaseInsensitive) == 0) {
+                anchor = info.offset;
+                break;
+            }
+        }
+        if (anchor < 0) {
+            debugStream << "  SHARED_FLAG " << fieldName << ": " << rule.apItemName
+                        << " was not converted here, leaving the chest vanilla\n";
+            continue;
+        }
+
+        for (int idx : validIndices) {
+            const STITMInfo& info = candidates[idx];
+            if (convertedOffsets.contains(info.offset)) continue;
+            if (info.originalItemID != rule.extraItemId) continue;
+            if (qAbs(info.offset - anchor) > kSharedFlagMaxSpan) continue;
+            if (info.offset + STITM_SIZE > decompressed.size()) continue;
+
+            // Length-preserving, like every other patch in this project: five
+            // NOPs exactly fill the STITM, so nothing moves and no jump or
+            // offset anywhere in the field has to be recomputed.
+            for (int b = 0; b < STITM_SIZE; ++b)
+                decompressed[info.offset + b] = static_cast<char>(0x5F);
+
+            // And silence its message, or the chest still says it gave you one.
+            modifications.append(OpcodeModification::suppress(
+                info.offset, getItemName(info.originalItemID)));
+
+            debugStream << "  SHARED_FLAG " << fieldName << " @" << info.offset
+                        << ": removed the extra vanilla "
+                        << getItemName(info.originalItemID) << " that shared "
+                        << rule.apItemName << "'s Archipelago flag\n";
+            removed++;
+        }
+    }
+    return removed;
+}
+
+// ============================================================================
 // applySTITMAsArchipelago  –  replace STITM(5B) with BITON(4B) + NOP(1B)
 //                              using the pre-assigned address/bit from the
 //                              Archipelago JSON.  Falls back with a warning
@@ -6307,6 +6426,39 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     for (const auto& mod : modifications) {
         int backOff = -1, fwdOff = -1;
         int namedOff = -1;   // candidate whose text names the vanilla item
+
+        // A suppressed grant (see kSharedFlagExtras): its STITM is already
+        // NOPped, so all that is left is the message announcing an item that no
+        // longer arrives. Find the one that names it and NOP that too - MESSAGE
+        // is 3 bytes, so 3 NOPs, and nothing moves. The WINDOW before it is left
+        // alone: it only sets geometry, and the surviving message brings its own.
+        if (mod.suppressMessage) {
+            int found = -1;
+            const int lo = qMax(mod.opcodeOffset - 500, sec0DataStart);
+            const int hi = qMin(mod.opcodeOffset + 500, scriptAbsEnd - 2);
+            for (int pos = lo; pos < hi && found < 0; ++pos) {
+                if (static_cast<quint8>(decompressed.at(pos)) != MESSAGE_OPCODE)
+                    continue;
+                const quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
+                const quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
+                if (winID > 15 || txtID >= textCount) continue;
+                if (usedMessageOffsets.contains(pos)) continue;
+                if (messageNames(pos, mod.vanillaName)) found = pos;
+            }
+            if (found < 0) {
+                debugStream << "  SHARED_FLAG: no message names "
+                            << mod.vanillaName << " near @" << mod.opcodeOffset
+                            << " - the grant is gone, nothing announced it\n";
+                continue;
+            }
+            for (int b = 0; b < 3; ++b)
+                decompressed[found + b] = static_cast<char>(0x5F);
+            usedMessageOffsets.insert(found);
+            anyChanged = true;
+            debugStream << "  SHARED_FLAG: silenced the " << mod.vanillaName
+                        << " message @" << found << "\n";
+            continue;
+        }
 
         // Search backward first (up to 500 bytes)
         {

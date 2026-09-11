@@ -503,6 +503,23 @@ QWidget* SimpleMainWindow::buildStepGame()
     grid->setColumnStretch(3, 1);
     dl->addLayout(grid);
     body->addWidget(m_detectCard);
+
+    // Shop hook install. Lives on this step because it is an action ON the
+    // detected install, and the step above is where that install is confirmed.
+    QWidget* hookRow = new QWidget(page);
+    QHBoxLayout* hl = new QHBoxLayout(hookRow);
+    hl->setContentsMargins(0, 8, 0, 0);
+    m_installHook = new QPushButton("Install shop hook", hookRow);
+    m_installHook->setToolTip("Copies shophook.dll next to your FF7 executable, "
+                              "which is where the Archipelago client injects it "
+                              "from. Needed for Archipelago shop slots.");
+    m_installHook->setEnabled(false);
+    m_installHookNote = mkLabel("Needed for Archipelago shop slots.", "faint", hookRow);
+    m_installHookNote->setWordWrap(true);
+    hl->addWidget(m_installHook);
+    hl->addWidget(m_installHookNote, 1);
+    body->addWidget(hookRow);
+
     body->addStretch(1);
 
     footer->addStretch(1);
@@ -510,6 +527,8 @@ QWidget* SimpleMainWindow::buildStepGame()
     m_gameContinue->setObjectName("primary");
     footer->addWidget(m_gameContinue);
 
+    connect(m_installHook, &QPushButton::clicked, this,
+            &SimpleMainWindow::installShopHook);
     connect(browse, &QPushButton::clicked, this, &SimpleMainWindow::browseFF7Path);
     connect(m_ff7PathEdit, &QLineEdit::textChanged, this,
             [this](const QString&) { refreshInstallDetection(); });
@@ -1097,6 +1116,9 @@ bool SimpleMainWindow::refreshInstallDetection()
         m_detectFlevel->setText("—");
         m_detectKernel->setText("—");
         if (m_gameContinue) m_gameContinue->setEnabled(false);
+        // No install means nowhere to put the DLL, so the button would only be
+        // able to fail.
+        if (m_installHook) m_installHook->setEnabled(false);
         return false;
     };
 
@@ -1159,7 +1181,117 @@ bool SimpleMainWindow::refreshInstallDetection()
     m_detectFlevel->setText("flevel.lgp");
     m_detectKernel->setText(QFileInfo(kernelFound).fileName());
     if (m_gameContinue) m_gameContinue->setEnabled(true);
+    if (m_installHook) {
+        const QString exe = ff7ExePath();
+        m_installHook->setEnabled(!exe.isEmpty());
+        if (m_installHookNote) {
+            const QString dest = QFileInfo(exe).absolutePath();
+            const bool present = !exe.isEmpty()
+                && QFileInfo::exists(QDir(dest).filePath("shophook.dll"));
+            m_installHookNote->setStyleSheet("");
+            m_installHookNote->setText(
+                exe.isEmpty()
+                    ? QStringLiteral("No executable found, so there is nowhere to install it.")
+                    : (present ? QStringLiteral("Already present next to %1.")
+                                     .arg(QFileInfo(exe).fileName())
+                               : QStringLiteral("Not installed yet. Needed for "
+                                                "Archipelago shop slots.")));
+        }
+    }
     return true;
+}
+
+// Where the game executable lives for the path the user has entered.
+//
+// The two supported layouts put it in different places -- classic Steam has it
+// at the install root, while the 2026 re-release nests engine and data under
+// ff7/workingdir -- and shophook.dll has to sit NEXT TO THE EXECUTABLE for the
+// Archipelago client to inject it. Resolving both here means the button and the
+// detection card can never disagree about which install they are talking about.
+//
+// The language-specific names matter: a French or German install has ff7_fr.exe
+// or ff7_de.exe and no ff7_en.exe at all, and the DLL still belongs beside it.
+QString SimpleMainWindow::ff7ExePath() const
+{
+    if (!m_ff7PathEdit)
+        return QString();
+    const QString path = m_ff7PathEdit->text().trimmed();
+    if (path.isEmpty())
+        return QString();
+
+    QStringList roots;
+    roots << QDir(path).filePath("ff7/workingdir");   // 2026 re-release first
+    roots << path;                                    // classic / 2013 Steam
+    static const char* kExeNames[] = {
+        "ff7_en.exe", "ff7_fr.exe", "ff7_de.exe", "ff7_es.exe", "ff7_ja.exe",
+        "ff7.exe",
+    };
+    for (const QString& root : roots)
+        for (const char* name : kExeNames) {
+            const QString candidate = QDir(root).filePath(QString::fromLatin1(name));
+            if (QFileInfo::exists(candidate))
+                return candidate;
+        }
+    return QString();
+}
+
+// Copy the bundled shophook.dll next to the detected game executable.
+//
+// The DLL is what makes the real shop UI sell Archipelago items; the client
+// injects it into the running game, and injection needs it beside the exe. Doing
+// this by hand meant knowing which of the two layouts you had, which is exactly
+// the thing the tool already knows.
+void SimpleMainWindow::installShopHook()
+{
+    auto say = [this](const QString& text, bool ok) {
+        if (!m_installHookNote) return;
+        m_installHookNote->setText(text);
+        m_installHookNote->setStyleSheet(ok ? "color: #8fd3a6;" : "color: #e08b82;");
+        appendConsoleMessage((ok ? "[shophook] " : "[shophook] ERROR: ") + text);
+    };
+
+    const QString src = QDir(QCoreApplication::applicationDirPath())
+                            .filePath("shophook.dll");
+    if (!QFileInfo::exists(src)) {
+        say("shophook.dll is missing from the Gold Saucer folder - "
+            "re-extract the download without moving files out of it.", false);
+        return;
+    }
+
+    const QString exe = ff7ExePath();
+    if (exe.isEmpty()) {
+        say("No FF7 executable found for that folder, so there is nowhere to "
+            "put it. Check the path above.", false);
+        return;
+    }
+
+    const QString destDir = QFileInfo(exe).absolutePath();
+    const QString dest    = QDir(destDir).filePath("shophook.dll");
+
+    // Nothing to do if the same build is already there. Worth checking rather
+    // than always copying: the file is in use whenever the game is running, so a
+    // needless copy turns a no-op into a confusing failure.
+    if (QFileInfo::exists(dest)) {
+        QFile a(src), b(dest);
+        if (a.open(QIODevice::ReadOnly) && b.open(QIODevice::ReadOnly)
+            && a.readAll() == b.readAll()) {
+            say("Already installed and up to date next to "
+                + QFileInfo(exe).fileName() + ".", true);
+            return;
+        }
+    }
+
+    QString err;
+    if (QFileInfo::exists(dest) && !QFile::remove(dest))
+        err = "could not replace the existing shophook.dll - is the game running?";
+    else if (!QFile::copy(src, dest))
+        err = "the copy failed - check the folder is writable.";
+
+    if (!err.isEmpty()) {
+        say("Could not install to " + destDir + ": " + err, false);
+        return;
+    }
+    say("Installed next to " + QFileInfo(exe).fileName() + " in " + destDir, true);
 }
 
 // Repaints step 2 from the held .apff7. Every chip is read out of the file, so

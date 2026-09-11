@@ -1047,8 +1047,17 @@ void SimpleMainWindow::goToStep(int step)
         return;
     // A run in flight owns the window; and step 1 has to produce a readable
     // install before anything past it means anything.
-    if (m_currentStep == StepRun && step != StepDone)
+    if (m_running && step != StepDone)
         return;
+    // Step 5 is not somewhere you navigate TO - it is the state a run puts the
+    // window in. Clicking it in the rail used to land on the progress page with
+    // no run to finish: the stage list sat at zero, Cancel had nothing to stop
+    // (cancellation is only checked between passes), and because the old guard
+    // read m_currentStep == StepRun, every other rail row and Back stopped
+    // responding too. The window was not hung, but it was stuck for good.
+    // Send the click to step 4 instead, where the Randomize button lives.
+    if (step == StepRun && !m_running)
+        step = StepOutput;
     if (step > StepGame && !refreshInstallDetection()) {
         step = StepGame;
     }
@@ -1550,6 +1559,15 @@ void SimpleMainWindow::startRandomization()
     const bool willIro    = m_config.getExportIro();
     setStageVisible(StageCrater, willCrater);
     setStageVisible(StageIro, willIro);
+
+    // From here the run owns the window. Cleared on EVERY exit - normal
+    // finish, cancel, and the exception path below - so a failed run can never
+    // leave the wizard trapped on a page it cannot navigate off.
+    m_running = true;
+    struct RunGuard {
+        bool& flag;
+        ~RunGuard() { flag = false; }
+    } runGuard{m_running};
 
     goToStep(StepRun);
     m_currentStep = StepRun;   // goToStep may bounce on a bad path; pin it here

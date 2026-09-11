@@ -154,6 +154,10 @@ private:
     QLabel*  m_runDetail         = nullptr;
     QPushButton* m_cancelButton  = nullptr;
     bool m_cancelRequested       = false;
+    // Whether a run is actually in flight. Tracked directly rather than
+    // inferred from m_currentStep == StepRun: a rail click also lands on
+    // StepRun, and using the page as the proxy stranded the window there.
+    bool m_running               = false;
     QElapsedTimer m_runTimer;
 
     // Step 6 — done

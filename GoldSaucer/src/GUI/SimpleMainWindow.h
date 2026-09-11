@@ -74,6 +74,11 @@ private:
     // Re-reads the install path and repaints step 1's detection panel. Also the
     // gate on Continue: a path we cannot read is not a path worth walking on.
     bool refreshInstallDetection();
+    // End the run and hand the window back to `step`. EVERY mid-run bailout
+    // must go through here: goToStep refuses to move while a run is in flight,
+    // so a bailout that calls it directly is silently ignored and the player is
+    // left on the progress page of a run that already gave up.
+    void abortRunTo(int step);
     // Full path to the game executable for the CURRENTLY ENTERED install,
     // handling both layouts. Empty when none is found.
     QString ff7ExePath() const;

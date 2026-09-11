@@ -358,9 +358,17 @@ QWidget* SimpleMainWindow::buildRail()
         // bearable on a re-run: change one toggle and go, rather than Continue
         // four times. Guarded in goToStep() so it can never skip a step whose
         // prerequisite is missing.
-        row->setCursor(Qt::PointingHandCursor);
-        row->installEventFilter(this);
-        row->setProperty("stepIndex", i);
+        //
+        // Except step 5. It is not a place you go, it is what the window becomes
+        // while a run is happening, and it is reached by pressing Randomize on
+        // step 4 -- never by navigation. It still draws in the rail so the run
+        // has somewhere to show its progress, but it takes no clicks and no
+        // pointing-hand cursor, so it does not invite one that would do nothing.
+        if (i != StepRun) {
+            row->setCursor(Qt::PointingHandCursor);
+            row->installEventFilter(this);
+            row->setProperty("stepIndex", i);
+        }
 
         m_railRow[i]    = row;
         m_railBullet[i] = dot;
@@ -1041,21 +1049,34 @@ bool SimpleMainWindow::eventFilter(QObject* watched, QEvent* event)
     return QMainWindow::eventFilter(watched, event);
 }
 
+// A run that has given up no longer owns the window, so release it BEFORE
+// navigating. Doing this in one function rather than at each bailout is
+// deliberate: the freeze this fixes was caused by exactly that kind of
+// per-site bookkeeping being missed.
+void SimpleMainWindow::abortRunTo(int step)
+{
+    m_running = false;
+    goToStep(step);
+}
+
 void SimpleMainWindow::goToStep(int step)
 {
     if (step < 0 || step >= StepCount)
         return;
-    // A run in flight owns the window; and step 1 has to produce a readable
-    // install before anything past it means anything.
-    if (m_running && step != StepDone)
+    // A run in flight owns the window. It may still move to its OWN page and to
+    // the finish page -- those two are the run reporting on itself; everything
+    // else is the player trying to navigate away mid-run, which is what this
+    // stops. Leaving StepRun out of the exemption is what made the first attempt
+    // at this fix hide the whole run: startRandomization raises m_running before
+    // it shows the run page, so its own goToStep(StepRun) was refused and the
+    // pass executed invisibly behind step 4, surfacing only at the finish page.
+    if (m_running && step != StepRun && step != StepDone)
         return;
     // Step 5 is not somewhere you navigate TO - it is the state a run puts the
-    // window in. Clicking it in the rail used to land on the progress page with
-    // no run to finish: the stage list sat at zero, Cancel had nothing to stop
-    // (cancellation is only checked between passes), and because the old guard
-    // read m_currentStep == StepRun, every other rail row and Back stopped
-    // responding too. The window was not hung, but it was stuck for good.
-    // Send the click to step 4 instead, where the Randomize button lives.
+    // window in. The rail no longer offers it (see buildRail), so this is a
+    // backstop for any other caller: with no run going, send it to step 4 where
+    // the Randomize button is, rather than to a dead progress page whose stages
+    // sit at zero and whose Cancel has nothing to stop.
     if (step == StepRun && !m_running)
         step = StepOutput;
     if (step > StepGame && !refreshInstallDetection()) {
@@ -1643,7 +1664,7 @@ void SimpleMainWindow::startRandomization()
                                              "Check the output folder is writable and has room for a "
                                              "full copy of the game data.")
                                   .arg(randomizer.getOutputPath()));
-            goToStep(StepOutput);
+            abortRunTo(StepOutput);
             return;
         }
         appendConsoleMessage("Original files copied successfully");
@@ -1672,7 +1693,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeShops()) {
                 reportPassFailure("Shop randomization", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage("Shop pass completed successfully");
@@ -1692,7 +1713,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeFieldPickups()) {
                 reportPassFailure("Field pickup randomization", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage("Field pickup randomization completed successfully");
@@ -1722,7 +1743,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeStartingEquipment(shuffleEquipment)) {
                 reportPassFailure("Starting equipment/level pass", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage(shuffleEquipment

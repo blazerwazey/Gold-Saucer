@@ -74,6 +74,11 @@ private:
     // Re-reads the install path and repaints step 1's detection panel. Also the
     // gate on Continue: a path we cannot read is not a path worth walking on.
     bool refreshInstallDetection();
+    // Full path to the game executable for the CURRENTLY ENTERED install,
+    // handling both layouts. Empty when none is found.
+    QString ff7ExePath() const;
+    // Copy the bundled shophook.dll next to that executable.
+    void installShopHook();
     // Repaints step 2's summary from the held .apff7, and step 3/4 from the lock.
     void refreshSeedSummary();
     void refreshOptionsLockUi();
@@ -119,6 +124,8 @@ private:
     QLabel*  m_detectFlevel      = nullptr;
     QLabel*  m_detectKernel      = nullptr;
     QPushButton* m_gameContinue  = nullptr;
+    QPushButton* m_installHook   = nullptr;
+    QLabel*      m_installHookNote = nullptr;
 
     // Step 2 — seed
     QWidget* m_seedCard          = nullptr;

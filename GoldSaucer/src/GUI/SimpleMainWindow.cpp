@@ -2155,16 +2155,43 @@ void SimpleMainWindow::importArchipelagoJSON()
                 // AP seeds can be very large (>64-bit). Read as string and fold
                 // into the seed-spin range to keep determinism.
                 QString seedStr = seedRoot["seed"].toVariant().toString();
+
+                // MIX IN THE PLAYER SLOT. "seed" is the MULTIWORLD seed and is
+                // byte-identical in every player's .apff7 - it identifies the
+                // game, not the player. Hashing it alone handed every player in
+                // a multiworld the same RNG stream, so they all got the same
+                // randomized shop stock, the same starting equipment and the
+                // same enemy tables. Reported against v0.0.5; all three passes
+                // share Randomizer::m_rng, which is seeded from this value.
+                //
+                // The slot is what makes this player distinct, it is already in
+                // the payload, and it is stable, so the result stays fully
+                // deterministic and reproducible from the .apff7 alone - no
+                // regeneration needed for a multiworld already in progress.
+                // Slot 0 means no player block (a hand-made or pre-slot seed);
+                // fall back to the old bare-seed hash rather than inventing one.
+                const int slot = seedRoot["player"].toObject().value("slot").toInt(0);
+                QString hashInput = seedStr;
+                if (slot > 0)
+                    hashInput += QLatin1Char('#') + QString::number(slot);
+
                 quint64 seedHash = 1469598103934665603ULL; // FNV-1a 64-bit offset
-                for (QChar c : seedStr) {
+                for (QChar c : hashInput) {
                     seedHash ^= static_cast<quint64>(c.unicode());
                     seedHash *= 1099511628211ULL;
                 }
                 unsigned int apSeed = static_cast<unsigned int>(seedHash % 1000000ULL);
                 m_seedSpin->setValue(static_cast<int>(apSeed));
                 m_config.setSeed(apSeed);
-                appendConsoleMessage(QString("Seed synced from Archipelago JSON: %1 (raw: %2)")
-                    .arg(apSeed).arg(seedStr));
+                appendConsoleMessage(
+                    slot > 0
+                        ? QString("Seed synced from Archipelago JSON: %1 "
+                                  "(multiworld %2, player slot %3)")
+                              .arg(apSeed).arg(seedStr).arg(slot)
+                        : QString("Seed synced from Archipelago JSON: %1 (raw: %2) "
+                                  "- no player slot in this seed, so it is NOT "
+                                  "per-player")
+                              .arg(apSeed).arg(seedStr));
             }
 
             // The .apff7 has NO top-level "options" object. Everything the seed

@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>   // strtoul / atoi (shop_ap.txt parsing)
 #include <map>
 #include <set>
 #include <string>
@@ -296,14 +297,36 @@ static void RemoveSoldFromShop(uint32_t shop) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// Format version of shop_ap.txt that THIS DLL understands.
+//
+//   v1 (<= apworld v0.0.4)  "<section>:<index>=<name>"
+//   v2 (>= apworld v0.0.5)  "<shop>:<section>:<index>=<name>[|<desc>]"
+//
+// v2 exists because a token id can be real stock in one shop and an AP slot in
+// another; without the shop id the override leaked across shops. The client
+// stamps the version in a comment (see _write_shop_ap_txt) -- a comment so that
+// an OLDER DLL simply ignores it rather than choking.
+static const int kShopApFormat = 2;
+
 static void LoadConfig(const std::string& dir) {
     std::ifstream f(dir + "shop_ap.txt");
     if (!f) { LogLine("no shop_ap.txt (display passthrough)\n"); return; }
     std::string line;
+    int declaredFormat = 0;   // 0 = the file never said
+    size_t skipped = 0;       // lines we could not use at all
+    size_t oldFormatKeys = 0; // ...that look like v1 "<section>:<index>"
     while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        while (!line.empty() && (line.back()=='\r' || line.back()=='\n')) line.pop_back();
+        if (line.empty()) continue;
+        if (line[0] == '#') {
+            // "#!format=N" — machine-readable, and invisible to older builds.
+            const size_t fm = line.find("format=");
+            if (fm != std::string::npos)
+                declaredFormat = atoi(line.c_str() + fm + 7);
+            continue;
+        }
         size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos) { ++skipped; continue; }
         std::string key  = line.substr(0, eq);
         std::string value = line.substr(eq + 1);
         while (!value.empty() && (value.back()=='\r' || value.back()=='\n')) value.pop_back();
@@ -316,9 +339,16 @@ static void LoadConfig(const std::string& dir) {
         }
         // Key = "<shop>:<section>:<index>".
         size_t c1 = key.find(':');
-        if (c1 == std::string::npos) continue;
+        if (c1 == std::string::npos) { ++skipped; continue; }
         size_t c2 = key.find(':', c1 + 1);
-        if (c2 == std::string::npos) continue;
+        if (c2 == std::string::npos) {
+            // One colon only: this is a v1 key from a pre-v0.0.5 client. Counted
+            // separately so the summary can name the real problem instead of
+            // reporting an empty load and leaving the player to guess.
+            ++oldFormatKeys;
+            ++skipped;
+            continue;
+        }
         uint32_t shop    = strtoul(key.substr(0, c1).c_str(), nullptr, 0);
         uint32_t section = strtoul(key.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 0);
         uint32_t index   = strtoul(key.substr(c2 + 1).c_str(), nullptr, 0);
@@ -329,6 +359,27 @@ static void LoadConfig(const std::string& dir) {
     }
     LogLine("loaded %zu name + %zu description override(s); %zu AP shop slot(s)\n",
             g_names.size(), g_descs.size(), g_apSlots.size());
+    if (skipped)
+        LogLine("  skipped %zu unusable line(s) in shop_ap.txt\n", skipped);
+
+    // The whole point of this block: never let "0 slots" be the only clue.
+    if (oldFormatKeys) {
+        LogLine("  *** shop_ap.txt is in the OLD v1 key format "
+                "(<section>:<index>), this DLL needs v%d "
+                "(<shop>:<section>:<index>).\n", kShopApFormat);
+        LogLine("  *** %zu line(s) were dropped for this reason. Your ff7.apworld "
+                "is OLDER than shophook.dll -- it predates v0.0.5. Update the "
+                "apworld (and check for a stale copy shadowing it: an extracted "
+                "worlds/ff7 folder, or a second .apworld, wins over "
+                "custom_worlds).\n", oldFormatKeys);
+    } else if (declaredFormat && declaredFormat != kShopApFormat) {
+        LogLine("  *** shop_ap.txt declares format v%d but this DLL speaks v%d "
+                "-- update whichever of ff7.apworld / shophook.dll is older.\n",
+                declaredFormat, kShopApFormat);
+    } else if (g_apSlots.empty() && !skipped) {
+        LogLine("  shop_ap.txt held no slots at all: the seed defined no "
+                "Archipelago shop stock, or the client had none to write.\n");
+    }
 }
 
 // ── get_kernel_text hook: override item names in the shop grid ────────────────

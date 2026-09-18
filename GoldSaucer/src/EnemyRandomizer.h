@@ -52,6 +52,17 @@ private:
     // 6 (enemy IDs) + 2 (pad) + 80 (setup) + 192 (camera) + 384 (formations) = 0x0298
     static const int ENEMY_DATA_BASE   = 0x0298;
 
+    // Battle setup: 4 records (one per formation), 20 bytes each, from 0x0008.
+    // The u16 at +0 is the BATTLE LOCATION - the arena background. Verified on
+    // the shipped scene.bin: with this stride the field takes a clean, gapless
+    // 0..89 across all 256 scenes (plus 0xFFFF on empty ones), and 71 scenes
+    // give their four formations DIFFERENT locations, so it is per formation
+    // rather than per scene.
+    static const int SETUP_BASE        = 0x0008;
+    static const int SETUP_STRIDE      = 20;
+    static const int SETUP_COUNT       = 4;
+    static const int SETUP_LOCATION    = 0x00;   // u16, battle background id
+
     // ── offsets within a 184-byte enemy record ───────────────────────────
     static const int ENM_NAME     = 0x00;  // 32 bytes (FF7 text)
     static const int ENM_LEVEL    = 0x20;  // u8

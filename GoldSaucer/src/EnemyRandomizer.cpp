@@ -834,6 +834,62 @@ bool EnemyRandomizer::randomizeEncounters()
 
     for (int i = 0; i < scenes.size(); ++i) srcOf[i] = i;
 
+
+
+    // The battle BACKGROUND belongs to the place, not to the monsters.
+
+    //
+
+    // Each scene holds SETUP_COUNT battle-setup records and the u16 at
+
+    // SETUP_LOCATION in each is the arena art. Swapping whole scene blobs drags
+
+    // that field along with the enemies, so after the first working shuffle
+
+    // every fight still used the background of wherever those monsters
+
+    // originally lived - Midgar sewer walls in the middle of a forest.
+
+    // Reported from play 2026-09-18.
+
+    //
+
+    // Snapshot each scene's own locations now and stamp them back after the
+
+    // shuffle, so the enemies travel and the scenery stays put.
+
+    QVector<QVector<quint16>> origLoc(scenes.size());
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        origLoc[i].resize(SETUP_COUNT);
+
+        if (scenes[i].decompressed.size() != SCENE_SIZE) continue;
+
+        for (int f = 0; f < SETUP_COUNT; ++f) {
+
+            quint16 v = 0;
+
+            memcpy(&v, scenes[i].decompressed.constData()
+
+                       + SETUP_BASE + f * SETUP_STRIDE + SETUP_LOCATION, 2);
+
+            origLoc[i][f] = v;
+
+        }
+
+    }
+
+    // Pristine copies, so a scene can be put back if the restore tips its block
+
+    // over. Reverting is always safe: the unshuffled file fits by definition.
+
+    QVector<QByteArray> pristine(scenes.size());
+
+    for (int i = 0; i < scenes.size(); ++i)
+
+        pristine[i] = scenes[i].decompressed;
+
     // Swap attempts per scene in a tier. 40 reaches ~94% displacement on the
 
     // shipped file; past that the curve is flat and it only burns RNG.
@@ -981,8 +1037,6 @@ bool EnemyRandomizer::randomizeEncounters()
 
     dbg << "\nTotal scenes swapped: " << totalSwaps << "\n";
 
-
-
     if (totalSwaps == 0) {
 
         dbg << "No encounters shuffled.\n";
@@ -990,6 +1044,150 @@ bool EnemyRandomizer::randomizeEncounters()
         return true;
 
     }
+
+
+
+    // ── Put the scenery back ───────────────────────────────────────────────
+
+    // Re-stamp every scene's OWN battle locations over whatever arrived with
+
+    // the swapped-in monsters.
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        if (scenes[i].decompressed.size() != SCENE_SIZE) continue;
+
+        for (int f = 0; f < SETUP_COUNT; ++f) {
+
+            const quint16 v = origLoc[i][f];
+
+            memcpy(scenes[i].decompressed.data()
+
+                   + SETUP_BASE + f * SETUP_STRIDE + SETUP_LOCATION, &v, 2);
+
+        }
+
+    }
+
+
+
+    // Those bytes changed, so every size the budget was tracking is now stale:
+
+    // measured, a location rewrite moves a scene by -8 to +16 bytes, and about
+
+    // one seed in ten ends up a few bytes past a block ceiling. Recount, then
+
+    // revert scenes in any block that no longer fits. Reverting restores the
+
+    // scene that started there, locations included, and the unshuffled file
+
+    // fits by definition, so the repair always terminates.
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        if (scenes[i].decompressed.size() != SCENE_SIZE) continue;
+
+        QByteArray c = gzipCompress(scenes[i].decompressed);
+
+        if (c.isEmpty()) {
+
+            dbg << "ERROR: cannot compress scene " << i << " after restoring "
+
+                   "its battle locations\n";
+
+            return false;
+
+        }
+
+        const int n = c.size();
+
+        compSize[i] = n + ((4 - (n % 4)) % 4);
+
+    }
+
+    blockUsed.clear();
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        const int b = scenes[i].blockIndex;
+
+        blockUsed[b] = blockUsed.value(b, BLOCK_HEADER_SIZE) + compSize[i];
+
+    }
+
+    int reverted = 0;
+
+    for (auto it = blockUsed.begin(); it != blockUsed.end(); ++it) {
+
+        while (it.value() > BLOCK_SIZE) {
+
+            // Revert the largest displaced scene in this block first: it frees
+
+            // the most and is the likeliest culprit.
+
+            int victim = -1, victimSize = -1;
+
+            for (int i = 0; i < scenes.size(); ++i) {
+
+                if (scenes[i].blockIndex != it.key()) continue;
+
+                if (srcOf[i] == i) continue;             // already original
+
+                if (compSize[i] > victimSize) { victim = i; victimSize = compSize[i]; }
+
+            }
+
+            if (victim < 0) {
+
+                dbg << "ERROR: block " << it.key() << " is " << it.value()
+
+                    << " / " << BLOCK_SIZE << " with nothing left to revert\n";
+
+                return false;
+
+            }
+
+            scenes[victim].decompressed = pristine[victim];
+
+            QByteArray c = gzipCompress(scenes[victim].decompressed);
+
+            if (c.isEmpty()) {
+
+                dbg << "ERROR: cannot compress reverted scene " << victim << "\n";
+
+                return false;
+
+            }
+
+            const int n = c.size();
+
+            const int newSize = n + ((4 - (n % 4)) % 4);
+
+            it.value() += newSize - compSize[victim];
+
+            compSize[victim] = newSize;
+
+            srcOf[victim] = victim;
+
+            --totalSwaps;
+
+            ++reverted;
+
+            dbg << "  REPAIR: reverted scene " << victim << " in block "
+
+                << it.key() << " to fit after the location restore\n";
+
+        }
+
+    }
+
+    dbg << "Battle locations restored to their own scenes"
+
+        << (reverted ? QString(" (%1 scene(s) reverted to fit)").arg(reverted)
+
+                     : QString(""))
+
+        << "; " << totalSwaps << " scenes still shuffled\n";
 
 
 

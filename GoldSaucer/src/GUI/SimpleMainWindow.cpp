@@ -358,9 +358,17 @@ QWidget* SimpleMainWindow::buildRail()
         // bearable on a re-run: change one toggle and go, rather than Continue
         // four times. Guarded in goToStep() so it can never skip a step whose
         // prerequisite is missing.
-        row->setCursor(Qt::PointingHandCursor);
-        row->installEventFilter(this);
-        row->setProperty("stepIndex", i);
+        //
+        // Except step 5. It is not a place you go, it is what the window becomes
+        // while a run is happening, and it is reached by pressing Randomize on
+        // step 4 -- never by navigation. It still draws in the rail so the run
+        // has somewhere to show its progress, but it takes no clicks and no
+        // pointing-hand cursor, so it does not invite one that would do nothing.
+        if (i != StepRun) {
+            row->setCursor(Qt::PointingHandCursor);
+            row->installEventFilter(this);
+            row->setProperty("stepIndex", i);
+        }
 
         m_railRow[i]    = row;
         m_railBullet[i] = dot;
@@ -503,6 +511,23 @@ QWidget* SimpleMainWindow::buildStepGame()
     grid->setColumnStretch(3, 1);
     dl->addLayout(grid);
     body->addWidget(m_detectCard);
+
+    // Shop hook install. Lives on this step because it is an action ON the
+    // detected install, and the step above is where that install is confirmed.
+    QWidget* hookRow = new QWidget(page);
+    QHBoxLayout* hl = new QHBoxLayout(hookRow);
+    hl->setContentsMargins(0, 8, 0, 0);
+    m_installHook = new QPushButton("Install shop hook", hookRow);
+    m_installHook->setToolTip("Copies shophook.dll next to your FF7 executable, "
+                              "which is where the Archipelago client injects it "
+                              "from. Needed for Archipelago shop slots.");
+    m_installHook->setEnabled(false);
+    m_installHookNote = mkLabel("Needed for Archipelago shop slots.", "faint", hookRow);
+    m_installHookNote->setWordWrap(true);
+    hl->addWidget(m_installHook);
+    hl->addWidget(m_installHookNote, 1);
+    body->addWidget(hookRow);
+
     body->addStretch(1);
 
     footer->addStretch(1);
@@ -510,6 +535,8 @@ QWidget* SimpleMainWindow::buildStepGame()
     m_gameContinue->setObjectName("primary");
     footer->addWidget(m_gameContinue);
 
+    connect(m_installHook, &QPushButton::clicked, this,
+            &SimpleMainWindow::installShopHook);
     connect(browse, &QPushButton::clicked, this, &SimpleMainWindow::browseFF7Path);
     connect(m_ff7PathEdit, &QLineEdit::textChanged, this,
             [this](const QString&) { refreshInstallDetection(); });
@@ -1023,14 +1050,36 @@ bool SimpleMainWindow::eventFilter(QObject* watched, QEvent* event)
     return QMainWindow::eventFilter(watched, event);
 }
 
+// A run that has given up no longer owns the window, so release it BEFORE
+// navigating. Doing this in one function rather than at each bailout is
+// deliberate: the freeze this fixes was caused by exactly that kind of
+// per-site bookkeeping being missed.
+void SimpleMainWindow::abortRunTo(int step)
+{
+    m_running = false;
+    goToStep(step);
+}
+
 void SimpleMainWindow::goToStep(int step)
 {
     if (step < 0 || step >= StepCount)
         return;
-    // A run in flight owns the window; and step 1 has to produce a readable
-    // install before anything past it means anything.
-    if (m_currentStep == StepRun && step != StepDone)
+    // A run in flight owns the window. It may still move to its OWN page and to
+    // the finish page -- those two are the run reporting on itself; everything
+    // else is the player trying to navigate away mid-run, which is what this
+    // stops. Leaving StepRun out of the exemption is what made the first attempt
+    // at this fix hide the whole run: startRandomization raises m_running before
+    // it shows the run page, so its own goToStep(StepRun) was refused and the
+    // pass executed invisibly behind step 4, surfacing only at the finish page.
+    if (m_running && step != StepRun && step != StepDone)
         return;
+    // Step 5 is not somewhere you navigate TO - it is the state a run puts the
+    // window in. The rail no longer offers it (see buildRail), so this is a
+    // backstop for any other caller: with no run going, send it to step 4 where
+    // the Randomize button is, rather than to a dead progress page whose stages
+    // sit at zero and whose Cancel has nothing to stop.
+    if (step == StepRun && !m_running)
+        step = StepOutput;
     if (step > StepGame && !refreshInstallDetection()) {
         step = StepGame;
     }
@@ -1098,6 +1147,9 @@ bool SimpleMainWindow::refreshInstallDetection()
         m_detectFlevel->setText("—");
         m_detectKernel->setText("—");
         if (m_gameContinue) m_gameContinue->setEnabled(false);
+        // No install means nowhere to put the DLL, so the button would only be
+        // able to fail.
+        if (m_installHook) m_installHook->setEnabled(false);
         return false;
     };
 
@@ -1160,7 +1212,117 @@ bool SimpleMainWindow::refreshInstallDetection()
     m_detectFlevel->setText("flevel.lgp");
     m_detectKernel->setText(QFileInfo(kernelFound).fileName());
     if (m_gameContinue) m_gameContinue->setEnabled(true);
+    if (m_installHook) {
+        const QString exe = ff7ExePath();
+        m_installHook->setEnabled(!exe.isEmpty());
+        if (m_installHookNote) {
+            const QString dest = QFileInfo(exe).absolutePath();
+            const bool present = !exe.isEmpty()
+                && QFileInfo::exists(QDir(dest).filePath("shophook.dll"));
+            m_installHookNote->setStyleSheet("");
+            m_installHookNote->setText(
+                exe.isEmpty()
+                    ? QStringLiteral("No executable found, so there is nowhere to install it.")
+                    : (present ? QStringLiteral("Already present next to %1.")
+                                     .arg(QFileInfo(exe).fileName())
+                               : QStringLiteral("Not installed yet. Needed for "
+                                                "Archipelago shop slots.")));
+        }
+    }
     return true;
+}
+
+// Where the game executable lives for the path the user has entered.
+//
+// The two supported layouts put it in different places -- classic Steam has it
+// at the install root, while the 2026 re-release nests engine and data under
+// ff7/workingdir -- and shophook.dll has to sit NEXT TO THE EXECUTABLE for the
+// Archipelago client to inject it. Resolving both here means the button and the
+// detection card can never disagree about which install they are talking about.
+//
+// The language-specific names matter: a French or German install has ff7_fr.exe
+// or ff7_de.exe and no ff7_en.exe at all, and the DLL still belongs beside it.
+QString SimpleMainWindow::ff7ExePath() const
+{
+    if (!m_ff7PathEdit)
+        return QString();
+    const QString path = m_ff7PathEdit->text().trimmed();
+    if (path.isEmpty())
+        return QString();
+
+    QStringList roots;
+    roots << QDir(path).filePath("ff7/workingdir");   // 2026 re-release first
+    roots << path;                                    // classic / 2013 Steam
+    static const char* kExeNames[] = {
+        "ff7_en.exe", "ff7_fr.exe", "ff7_de.exe", "ff7_es.exe", "ff7_ja.exe",
+        "ff7.exe",
+    };
+    for (const QString& root : roots)
+        for (const char* name : kExeNames) {
+            const QString candidate = QDir(root).filePath(QString::fromLatin1(name));
+            if (QFileInfo::exists(candidate))
+                return candidate;
+        }
+    return QString();
+}
+
+// Copy the bundled shophook.dll next to the detected game executable.
+//
+// The DLL is what makes the real shop UI sell Archipelago items; the client
+// injects it into the running game, and injection needs it beside the exe. Doing
+// this by hand meant knowing which of the two layouts you had, which is exactly
+// the thing the tool already knows.
+void SimpleMainWindow::installShopHook()
+{
+    auto say = [this](const QString& text, bool ok) {
+        if (!m_installHookNote) return;
+        m_installHookNote->setText(text);
+        m_installHookNote->setStyleSheet(ok ? "color: #8fd3a6;" : "color: #e08b82;");
+        appendConsoleMessage((ok ? "[shophook] " : "[shophook] ERROR: ") + text);
+    };
+
+    const QString src = QDir(QCoreApplication::applicationDirPath())
+                            .filePath("shophook.dll");
+    if (!QFileInfo::exists(src)) {
+        say("shophook.dll is missing from the Gold Saucer folder - "
+            "re-extract the download without moving files out of it.", false);
+        return;
+    }
+
+    const QString exe = ff7ExePath();
+    if (exe.isEmpty()) {
+        say("No FF7 executable found for that folder, so there is nowhere to "
+            "put it. Check the path above.", false);
+        return;
+    }
+
+    const QString destDir = QFileInfo(exe).absolutePath();
+    const QString dest    = QDir(destDir).filePath("shophook.dll");
+
+    // Nothing to do if the same build is already there. Worth checking rather
+    // than always copying: the file is in use whenever the game is running, so a
+    // needless copy turns a no-op into a confusing failure.
+    if (QFileInfo::exists(dest)) {
+        QFile a(src), b(dest);
+        if (a.open(QIODevice::ReadOnly) && b.open(QIODevice::ReadOnly)
+            && a.readAll() == b.readAll()) {
+            say("Already installed and up to date next to "
+                + QFileInfo(exe).fileName() + ".", true);
+            return;
+        }
+    }
+
+    QString err;
+    if (QFileInfo::exists(dest) && !QFile::remove(dest))
+        err = "could not replace the existing shophook.dll - is the game running?";
+    else if (!QFile::copy(src, dest))
+        err = "the copy failed - check the folder is writable.";
+
+    if (!err.isEmpty()) {
+        say("Could not install to " + destDir + ": " + err, false);
+        return;
+    }
+    say("Installed next to " + QFileInfo(exe).fileName() + " in " + destDir, true);
 }
 
 // Repaints step 2 from the held .apff7. Every chip is read out of the file, so
@@ -1422,6 +1584,15 @@ void SimpleMainWindow::startRandomization()
     setStageVisible(StageCrater, willCrater);
     setStageVisible(StageIro, willIro);
 
+    // From here the run owns the window. Cleared on EVERY exit - normal
+    // finish, cancel, and the exception path below - so a failed run can never
+    // leave the wizard trapped on a page it cannot navigate off.
+    m_running = true;
+    struct RunGuard {
+        bool& flag;
+        ~RunGuard() { flag = false; }
+    } runGuard{m_running};
+
     goToStep(StepRun);
     m_currentStep = StepRun;   // goToStep may bounce on a bad path; pin it here
     m_progressBar->setValue(0);
@@ -1496,7 +1667,7 @@ void SimpleMainWindow::startRandomization()
                                              "Check the output folder is writable and has room for a "
                                              "full copy of the game data.")
                                   .arg(randomizer.getOutputPath()));
-            goToStep(StepOutput);
+            abortRunTo(StepOutput);
             return;
         }
         appendConsoleMessage("Original files copied successfully");
@@ -1525,7 +1696,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeShops()) {
                 reportPassFailure("Shop randomization", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage("Shop pass completed successfully");
@@ -1545,7 +1716,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeFieldPickups()) {
                 reportPassFailure("Field pickup randomization", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage("Field pickup randomization completed successfully");
@@ -1602,7 +1773,7 @@ void SimpleMainWindow::startRandomization()
 
             if (!randomizer.randomizeStartingEquipment(shuffleEquipment)) {
                 reportPassFailure("Starting equipment/level pass", randomizer.lastError());
-                goToStep(StepOptions);
+                abortRunTo(StepOptions);
                 return;
             }
             appendConsoleMessage(shuffleEquipment
@@ -2014,16 +2185,43 @@ void SimpleMainWindow::importArchipelagoJSON()
                 // AP seeds can be very large (>64-bit). Read as string and fold
                 // into the seed-spin range to keep determinism.
                 QString seedStr = seedRoot["seed"].toVariant().toString();
+
+                // MIX IN THE PLAYER SLOT. "seed" is the MULTIWORLD seed and is
+                // byte-identical in every player's .apff7 - it identifies the
+                // game, not the player. Hashing it alone handed every player in
+                // a multiworld the same RNG stream, so they all got the same
+                // randomized shop stock, the same starting equipment and the
+                // same enemy tables. Reported against v0.0.5; all three passes
+                // share Randomizer::m_rng, which is seeded from this value.
+                //
+                // The slot is what makes this player distinct, it is already in
+                // the payload, and it is stable, so the result stays fully
+                // deterministic and reproducible from the .apff7 alone - no
+                // regeneration needed for a multiworld already in progress.
+                // Slot 0 means no player block (a hand-made or pre-slot seed);
+                // fall back to the old bare-seed hash rather than inventing one.
+                const int slot = seedRoot["player"].toObject().value("slot").toInt(0);
+                QString hashInput = seedStr;
+                if (slot > 0)
+                    hashInput += QLatin1Char('#') + QString::number(slot);
+
                 quint64 seedHash = 1469598103934665603ULL; // FNV-1a 64-bit offset
-                for (QChar c : seedStr) {
+                for (QChar c : hashInput) {
                     seedHash ^= static_cast<quint64>(c.unicode());
                     seedHash *= 1099511628211ULL;
                 }
                 unsigned int apSeed = static_cast<unsigned int>(seedHash % 1000000ULL);
                 m_seedSpin->setValue(static_cast<int>(apSeed));
                 m_config.setSeed(apSeed);
-                appendConsoleMessage(QString("Seed synced from Archipelago JSON: %1 (raw: %2)")
-                    .arg(apSeed).arg(seedStr));
+                appendConsoleMessage(
+                    slot > 0
+                        ? QString("Seed synced from Archipelago JSON: %1 "
+                                  "(multiworld %2, player slot %3)")
+                              .arg(apSeed).arg(seedStr).arg(slot)
+                        : QString("Seed synced from Archipelago JSON: %1 (raw: %2) "
+                                  "- no player slot in this seed, so it is NOT "
+                                  "per-player")
+                              .arg(apSeed).arg(seedStr));
             }
 
             // The .apff7 has NO top-level "options" object. Everything the seed

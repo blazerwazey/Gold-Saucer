@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
 
     app.setApplicationName("Gold Saucer");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationVersion("0.0.6");
     app.setOrganizationName("Gold Saucer Team");
 
     // Before anything else: this build is WIN32 (no console), so without a

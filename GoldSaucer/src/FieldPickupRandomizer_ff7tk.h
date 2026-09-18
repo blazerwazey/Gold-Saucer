@@ -93,6 +93,15 @@ struct OpcodeModification {
     // `Received "Ether"!`, so the right message is the one that names it.
     // Nearest-MESSAGE alone cross-assigns inside chest clusters.
     QString vanillaName;
+    // Suppress this pickup's message instead of rewriting it: find the MESSAGE
+    // naming vanillaName and NOP it.
+    //
+    // For chests that hand out SEVERAL items behind ONE detection flag. Only
+    // one grant can carry the Archipelago check, so the others are NOPped and
+    // the player no longer receives them -- but their `Received "Potion"!`
+    // message would still play, announcing an item that never arrives. See
+    // kSharedFlagExtras.
+    bool suppressMessage{false};
 
     OpcodeModification() : opcodeOffset(-1), isMateria(false) {}
     OpcodeModification(int off, const QString& name, bool mat)
@@ -101,6 +110,15 @@ struct OpcodeModification {
                        const QString& vanilla)
         : opcodeOffset(off), isMateria(false), encodedText(encoded),
           textLines(lines), textCols(cols), vanillaName(vanilla) {}
+    // Suppression: no replacement text, just the name to find the message by.
+    static OpcodeModification suppress(int off, const QString& vanilla)
+    {
+        OpcodeModification m;
+        m.opcodeOffset = off;
+        m.vanillaName  = vanilla;
+        m.suppressMessage = true;
+        return m;
+    }
 };
 
 // Main Field Pickup Randomizer Class
@@ -196,15 +214,32 @@ private:
                                  const QString& fieldName, QTextStream& debugStream,
                                  QByteArray* outText = nullptr,
                                  int* outLines = nullptr, int* outCols = nullptr);
+    // A few chests grant TWO items behind ONE detection flag. Only one grant can
+    // carry the Archipelago check; this removes the other, which would otherwise
+    // keep handing out its vanilla item on top of the AP one. Returns how many
+    // grants it removed. Table-driven on purpose - see kSharedFlagExtras.
+    int stripSharedFlagExtras(const QString& fieldName, QByteArray& decompressed,
+                              const QVector<STITMInfo>& candidates,
+                              const QVector<int>& validIndices,
+                              const QSet<int>& convertedOffsets,
+                              QVector<OpcodeModification>& modifications,
+                              QTextStream& debugStream);
     // Compose the in-game message for an Archipelago placement.
     QByteArray composeApPickupText(const ApBitonCoord& placement,
                                    QTextStream& debugStream,
                                    int* outLines = nullptr,
                                    int* outCols = nullptr) const;
     // Grow the WINDOW that shows a patched MESSAGE so multi-line text fits.
+    // Absolute offsets of every REAL opcode start in a field's script region,
+    // found by walking from each entity/script entry point. A candidate that is
+    // not in here is operand data wearing an opcode's byte value.
+    static QSet<int> collectOpcodeStarts(const QByteArray& decompressed,
+                                         int sec0DataStart, int posTexts,
+                                         int nbScripts, int nbAKAO);
     bool resizeMessageWindow(QByteArray& decompressed, int messageOffset,
                              int scriptStart, int lines, int cols,
-                             QTextStream& debugStream) const;
+                             QTextStream& debugStream,
+                             const QSet<int>& opcodeStarts) const;
     void writeArchipelagoSidecar(const QString& outputPath, QTextStream& debugStream) const;
 
     // --- Key item structs (must be declared before processFieldFile) ---

@@ -75,6 +75,16 @@ private:
     // Re-reads the install path and repaints step 1's detection panel. Also the
     // gate on Continue: a path we cannot read is not a path worth walking on.
     bool refreshInstallDetection();
+    // End the run and hand the window back to `step`. EVERY mid-run bailout
+    // must go through here: goToStep refuses to move while a run is in flight,
+    // so a bailout that calls it directly is silently ignored and the player is
+    // left on the progress page of a run that already gave up.
+    void abortRunTo(int step);
+    // Full path to the game executable for the CURRENTLY ENTERED install,
+    // handling both layouts. Empty when none is found.
+    QString ff7ExePath() const;
+    // Copy the bundled shophook.dll next to that executable.
+    void installShopHook();
     // Repaints step 2's summary from the held .apff7, and step 3/4 from the lock.
     void refreshSeedSummary();
     void refreshOptionsLockUi();
@@ -120,6 +130,8 @@ private:
     QLabel*  m_detectFlevel      = nullptr;
     QLabel*  m_detectKernel      = nullptr;
     QPushButton* m_gameContinue  = nullptr;
+    QPushButton* m_installHook   = nullptr;
+    QLabel*      m_installHookNote = nullptr;
 
     // Step 2 — seed
     QWidget* m_seedCard          = nullptr;
@@ -148,6 +160,10 @@ private:
     QLabel*  m_runDetail         = nullptr;
     QPushButton* m_cancelButton  = nullptr;
     bool m_cancelRequested       = false;
+    // Whether a run is actually in flight. Tracked directly rather than
+    // inferred from m_currentStep == StepRun: a rail click also lands on
+    // StepRun, and using the page as the proxy stranded the window there.
+    bool m_running               = false;
     QElapsedTimer m_runTimer;
 
     // Step 6 — done

@@ -33,8 +33,11 @@ class EnemyRandomizer
 {
 public:
     explicit EnemyRandomizer(Randomizer* parent);
-    bool randomize();           // stats randomization
-    bool randomizeEncounters(); // encounter shuffling
+    // Shuffle whole encounters between slots of similar difficulty, then scale
+    // the arrivals to the difficulty of where they landed. The only entry point:
+    // the stats-variance pass was removed 2026-09-18, having sat unreachable
+    // since the Initial Commit.
+    bool randomizeEncounters();
 
 private:
     Randomizer*    m_parent;
@@ -79,13 +82,15 @@ private:
     static const int ENM_GIL      = 0xAC;  // u32
 
     // Boss detection by HP (no reliable global ID in scene.bin)
+    // The tier split for the encounter shuffle: tier 4 never moves, tier 3
+    // only among itself. These were duplicated as bare literals in the tier
+    // classification until the stats pass was removed.
     static const quint32 BOSS_HP_THRESHOLD     = 10000;
     static const quint32 MINIBOSS_HP_THRESHOLD = 4000;
 
     // ── internal types ───────────────────────────────────────────────────
     struct SceneEntry {
         int  blockIndex;      // which 0x2000 block this came from
-        int  slotInBlock;     // header slot index (0-15)
         QByteArray compressed;
         QByteArray decompressed;  // 7808 bytes if valid
     };
@@ -97,16 +102,11 @@ private:
     QByteArray rebuildSceneBin(const QVector<SceneEntry>& scenes,
                                QTextStream& log);
 
-    // ── per-scene randomization ──────────────────────────────────────────
-    void randomizeScene(SceneEntry& scene, int sceneIndex, QTextStream& log);
 
-    // ── stat helpers ─────────────────────────────────────────────────────
+    // ── difficulty scaling ─────────────────────────────────────────────────────
     // Rescale one scene's enemies toward the difficulty of the slot they now
     // occupy. `ratio` is (average HP the slot originally had) / (average HP the
     // incoming enemies natively have). See kStatScaling.
     void       scaleSceneStats(QByteArray& scene, double ratio);
 
-    quint8  randU8 (quint8  base, double variance);
-    quint16 randU16(quint16 base, double variance);
-    quint32 randU32(quint32 base, double variance);
 };

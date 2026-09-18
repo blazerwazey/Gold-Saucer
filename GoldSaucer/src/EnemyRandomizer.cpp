@@ -167,365 +167,6 @@ EnemyRandomizer::EnemyRandomizer(Randomizer* parent)
 
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// randomize — main entry point
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
-
-bool EnemyRandomizer::randomize()
-
-{
-
-    // Paths
-
-    QString ff7Path    = m_parent->getFF7Path();
-
-    QString outputPath = m_parent->getOutputPath();
-
-
-
-    // Debug log
-
-    QString logPath = outputPath + "/enemy_randomization_debug.txt";
-
-    QFile logFile(logPath);
-
-    bool logOk = logFile.open(QIODevice::WriteOnly | QIODevice::Text);
-
-    Q_UNUSED(logOk);
-
-    QTextStream dbg(&logFile);
-
-    dbg << "=== Enemy Randomization (scene.bin) ===\n"
-
-        << QDateTime::currentDateTime().toString() << "\n\n";
-
-
-
-    QString srcScene   = QDir(ff7Path).filePath("data/lang-en/battle/scene.bin");
-
-    QString dstScene   = QDir(outputPath).filePath("data/lang-en/battle/scene.bin");
-
-
-
-    dbg << "Source: " << srcScene << "\n"
-
-        << "Output: " << dstScene << "\n\n";
-
-
-
-    // Load original scene.bin
-
-    QFile srcFile(srcScene);
-
-    if (!srcFile.open(QIODevice::ReadOnly)) {
-
-        dbg << "ERROR: Cannot open source scene.bin\n";
-
-        qDebug() << "EnemyRandomizer: cannot open" << srcScene;
-
-        return false;
-
-    }
-
-    QByteArray sceneBin = srcFile.readAll();
-
-    srcFile.close();
-
-    dbg << "Loaded scene.bin: " << sceneBin.size() << " bytes ("
-
-        << (sceneBin.size() / BLOCK_SIZE) << " blocks)\n";
-
-
-
-    // Extract all scenes
-
-    QVector<SceneEntry> scenes;
-
-    if (!extractScenes(sceneBin, scenes, dbg)) {
-
-        dbg << "ERROR: Failed to extract scenes\n";
-
-        return false;
-
-    }
-
-    dbg << "Extracted " << scenes.size() << " scenes\n\n";
-
-
-
-    // Config
-
-    const Config& config = m_parent->m_config;
-
-    double variance   = config.getEnemyStatsVariance();
-
-    bool bossProtect  = config.getBossProtectionEnabled();
-
-    int  bossIntensity = config.getBossRandomizationIntensity();
-
-    dbg << "Stats variance : " << variance << "\n"
-
-        << "Boss protection: " << (bossProtect ? "ON" : "OFF") << "\n"
-
-        << "Boss intensity : " << bossIntensity << "%\n\n";
-
-
-
-    // Keep a copy of original decompressed data for verification
-
-    QVector<QByteArray> originalDecompressed;
-
-    for (const auto& s : scenes)
-
-        originalDecompressed.append(s.decompressed);
-
-
-
-    // Randomize each scene
-
-    int modified = 0;
-
-    for (int i = 0; i < scenes.size(); ++i) {
-
-        if (scenes[i].decompressed.size() != SCENE_SIZE) continue;
-
-        randomizeScene(scenes[i], i, dbg);
-
-        ++modified;
-
-    }
-
-    dbg << "\nScenes randomized: " << modified << " / " << scenes.size() << "\n";
-
-
-
-    // Verify that randomization actually changed the data
-
-    int dataChanged = 0;
-
-    for (int i = 0; i < scenes.size(); ++i) {
-
-        if (scenes[i].decompressed != originalDecompressed[i])
-
-            ++dataChanged;
-
-    }
-
-    dbg << "Scenes with changed data: " << dataChanged << " / " << scenes.size() << "\n";
-
-
-
-    // Quick gzip compress test on first valid scene
-
-    for (int i = 0; i < scenes.size(); ++i) {
-
-        if (scenes[i].decompressed.size() == SCENE_SIZE) {
-
-            QByteArray testComp = gzipCompress(scenes[i].decompressed);
-
-            dbg << "Compress test: scene " << i << " -> " << testComp.size()
-
-                << " bytes (original compressed: " << scenes[i].compressed.size() << ")\n";
-
-            if (testComp.isEmpty())
-
-                dbg << "  ERROR: gzipCompress returned empty!\n";
-
-            else if (testComp.size() >= 2)
-
-                dbg << "  Header: 0x" << QString::number(static_cast<quint8>(testComp[0]), 16)
-
-                    << " 0x" << QString::number(static_cast<quint8>(testComp[1]), 16) << "\n";
-
-            break;
-
-        }
-
-    }
-
-    dbg << "\n";
-
-
-
-    // Rebuild scene.bin (preserves original block-to-scene mapping)
-
-    QByteArray newSceneBin = rebuildSceneBin(scenes, dbg);
-
-    if (newSceneBin.isEmpty()) {
-
-        dbg << "ERROR: Failed to rebuild scene.bin\n";
-
-        return false;
-
-    }
-
-    dbg << "Rebuilt scene.bin: " << newSceneBin.size() << " bytes\n";
-
-
-
-    // Verify rebuilt data differs from original
-
-    int rebuildDiffs = 0;
-
-    for (int i = 0; i < qMin(sceneBin.size(), newSceneBin.size()); ++i) {
-
-        if (sceneBin[i] != newSceneBin[i]) ++rebuildDiffs;
-
-    }
-
-    dbg << "Rebuilt vs original: " << rebuildDiffs << " bytes differ\n";
-
-    if (rebuildDiffs == 0) {
-
-        dbg << "  *** BUG: Rebuilt scene.bin is IDENTICAL to original! ***\n";
-
-        // Check first block in detail
-
-        for (int b = 0; b < qMin(1, newSceneBin.size() / BLOCK_SIZE); ++b) {
-
-            int base = b * BLOCK_SIZE;
-
-            int blockDiffs = 0;
-
-            for (int i = 0; i < BLOCK_SIZE && base + i < newSceneBin.size(); ++i) {
-
-                if (sceneBin[base + i] != newSceneBin[base + i]) ++blockDiffs;
-
-            }
-
-            // Read pointer 0 from original and rebuilt
-
-            quint32 origPtr, newPtr;
-
-            memcpy(&origPtr, sceneBin.constData() + base, 4);
-
-            memcpy(&newPtr, newSceneBin.constData() + base, 4);
-
-            dbg << "  Block " << b << ": " << blockDiffs << " diffs, ptr0 orig="
-
-                << origPtr << " new=" << newPtr << "\n";
-
-        }
-
-        // Test: manually compress scene 0 decompressed and compare with what's in rebuilt block 0
-
-        if (!scenes.isEmpty() && scenes[0].decompressed.size() == SCENE_SIZE) {
-
-            QByteArray testComp = gzipCompress(scenes[0].decompressed);
-
-            QByteArray origComp = gzipCompress(originalDecompressed[0]);
-
-            dbg << "  Scene0 modified compress: " << testComp.size() << " bytes\n";
-
-            dbg << "  Scene0 original compress: " << origComp.size() << " bytes\n";
-
-            dbg << "  Scene0 decompressed same as original? "
-
-                << (scenes[0].decompressed == originalDecompressed[0] ? "YES" : "NO") << "\n";
-
-            // Check what's actually at the scene data offset in the rebuilt block
-
-            quint32 ptr0;
-
-            memcpy(&ptr0, newSceneBin.constData(), 4);
-
-            int dataOff = static_cast<int>(ptr0) * 4;
-
-            if (dataOff + 4 <= newSceneBin.size()) {
-
-                dbg << "  Block0 data @" << dataOff << ": "
-
-                    << QString::number(static_cast<quint8>(newSceneBin[dataOff]), 16) << " "
-
-                    << QString::number(static_cast<quint8>(newSceneBin[dataOff+1]), 16) << " "
-
-                    << QString::number(static_cast<quint8>(newSceneBin[dataOff+2]), 16) << " "
-
-                    << QString::number(static_cast<quint8>(newSceneBin[dataOff+3]), 16) << "\n";
-
-            }
-
-        }
-
-    }
-
-
-
-    // Write output
-
-    QDir().mkpath(QFileInfo(dstScene).path());
-
-    if (QFile::exists(dstScene))
-
-        QFile::remove(dstScene);
-
-    QFile outFile(dstScene);
-
-    if (!outFile.open(QIODevice::WriteOnly)) {
-
-        dbg << "ERROR: Cannot write output scene.bin\n";
-
-        return false;
-
-    }
-
-    qint64 written = outFile.write(newSceneBin);
-
-    outFile.flush();
-
-    outFile.close();
-
-
-
-    dbg << "Write result: " << written << " of " << newSceneBin.size() << " bytes\n";
-
-
-
-    // Verify the written file
-
-    QFile verifyFile(dstScene);
-
-    if (verifyFile.open(QIODevice::ReadOnly)) {
-
-        QByteArray verifyData = verifyFile.readAll();
-
-        verifyFile.close();
-
-        int verifyDiffs = 0;
-
-        for (int i = 0; i < qMin(sceneBin.size(), verifyData.size()); ++i) {
-
-            if (sceneBin[i] != verifyData[i]) ++verifyDiffs;
-
-        }
-
-        dbg << "Verify: file on disk has " << verifyDiffs
-
-            << " bytes different from original (size=" << verifyData.size() << ")\n";
-
-    }
-
-
-
-    dbg << "SUCCESS: Written to " << dstScene << "\n";
-
-    qDebug() << "Enemy randomization complete." << modified << "scenes modified.";
-
-    return true;
-
-}
-
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// randomizeEncounters — shuffle entire scenes between slots of similar difficulty
-
-// ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -577,39 +218,43 @@ struct StatScale {
 
 
 
-static const StatScale kStatScaling[] = {
-
-    { 0x20, 1, 0.30, "level"    },   // measured 0.301
-
-    { 0x21, 1, 0.18, "speed"    },   // measured 0.183  (weak, r=0.60)
-
-    { 0x22, 1, 0.15, "luck"     },   // measured 0.154  (loose, r=0.33)
-
-    { 0x23, 1, 0.15, "evade"    },   // CHOSEN: vanilla shows none, matched to luck
-
-    { 0x24, 1, 0.34, "strength" },   // measured 0.344  (tightest, r=0.80)
-
-    { 0x25, 1, 0.34, "defense"  },   // measured 0.338
-
-    { 0x26, 1, 0.38, "magic"    },   // measured 0.383
-
-    { 0x27, 1, 0.34, "m.defense"},   // measured 0.338
-
-    { 0x9C, 2, 0.38, "mp"       },   // measured 0.381
-
-    { 0xA4, 4, 1.00, "hp"       },   // the reference the ratio is built from
-
-    { 0xA8, 4, 0.69, "exp"      },   // measured 0.690 - reward tracks the fight
-
-    { 0xAC, 4, 0.70, "gil"      },   // measured 0.700
-
-};
-
-
-
 void EnemyRandomizer::scaleSceneStats(QByteArray& scene, double ratio)
 
 {
+
+    // A static local rather than a file-scope table: the ENM_* offsets are
+    // private members, so only a member function can name them, and naming them
+    // beats repeating the same hex in a second place.
+
+    static const StatScale kStatScaling[] = {
+
+        { ENM_LEVEL, 1, 0.30, "level"    },   // measured 0.301
+
+        { ENM_SPEED, 1, 0.18, "speed"    },   // measured 0.183  (weak, r=0.60)
+
+        { ENM_LUCK, 1, 0.15, "luck"     },   // measured 0.154  (loose, r=0.33)
+
+        { ENM_EVADE, 1, 0.15, "evade"    },   // CHOSEN: vanilla shows none, matched to luck
+
+        { ENM_STR, 1, 0.34, "strength" },   // measured 0.344  (tightest, r=0.80)
+
+        { ENM_DEF, 1, 0.34, "defense"  },   // measured 0.338
+
+        { ENM_MAG, 1, 0.38, "magic"    },   // measured 0.383
+
+        { ENM_MDEF, 1, 0.34, "m.defense"},   // measured 0.338
+
+        { ENM_MP, 2, 0.38, "mp"       },   // measured 0.381
+
+        { ENM_HP, 4, 1.00, "hp"       },   // the reference the ratio is built from
+
+        { ENM_EXP, 4, 0.69, "exp"      },   // measured 0.690 - reward tracks the fight
+
+        { ENM_GIL, 4, 0.70, "gil"      },   // measured 0.700
+
+    };
+
+
 
     if (scene.size() != SCENE_SIZE) return;
 
@@ -682,6 +327,12 @@ void EnemyRandomizer::scaleSceneStats(QByteArray& scene, double ratio)
 }
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// randomizeEncounters — shuffle entire scenes between slots of similar difficulty
+
+// ═══════════════════════════════════════════════════════════════════════════════
 
 bool EnemyRandomizer::randomizeEncounters()
 
@@ -846,9 +497,9 @@ bool EnemyRandomizer::randomizeEncounters()
 
         quint32 avgHP = static_cast<quint32>(totalHP / enemyCount);
 
-        if      (avgHP >= 10000) tier[i] = 4;
+        if      (avgHP >= BOSS_HP_THRESHOLD)     tier[i] = 4;
 
-        else if (avgHP >= 4000)  tier[i] = 3;
+        else if (avgHP >= MINIBOSS_HP_THRESHOLD) tier[i] = 3;
 
         else if (avgHP >= 1000)  tier[i] = 2;
 
@@ -1557,8 +1208,6 @@ bool EnemyRandomizer::extractScenes(const QByteArray& sceneBin,
 
             entry.blockIndex  = b;
 
-            entry.slotInBlock = p;
-
             entry.compressed  = sceneBin.mid(sceneOff, sceneEnd - sceneOff);
 
 
@@ -1804,240 +1453,4 @@ QByteArray EnemyRandomizer::rebuildSceneBin(const QVector<SceneEntry>& scenes,
 }
 
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// randomizeScene — modify enemy stats within one decompressed 7808-byte scene
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
-
-void EnemyRandomizer::randomizeScene(SceneEntry& scene, int sceneIndex,
-
-                                      QTextStream& log)
-
-{
-
-    const Config& config = m_parent->m_config;
-
-    double baseVariance  = config.getEnemyStatsVariance();
-
-    bool   bossProtect   = config.getBossProtectionEnabled();
-
-    int    bossIntensity = config.getBossRandomizationIntensity();
-
-
-
-    for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
-
-        int off = ENEMY_DATA_BASE + e * ENEMY_RECORD_SIZE;
-
-
-
-        // Skip empty enemy slots (name is all 0xFF)
-
-        bool empty = true;
-
-        for (int n = 0; n < 32; ++n) {
-
-            if (static_cast<quint8>(scene.decompressed.at(off + ENM_NAME + n)) != 0xFF) {
-
-                empty = false;
-
-                break;
-
-            }
-
-        }
-
-        if (empty) continue;
-
-
-
-        // Read current HP to classify enemy
-
-        quint32 hp;
-
-        memcpy(&hp, scene.decompressed.constData() + off + ENM_HP, 4);
-
-
-
-        // Determine variance (boss protection based on HP)
-
-        double variance = baseVariance;
-
-        QString typeStr = "Normal";
-
-        if (bossProtect && hp >= BOSS_HP_THRESHOLD) {
-
-            variance = baseVariance * 0.15 * (bossIntensity / 100.0);
-
-            typeStr  = "Boss";
-
-        } else if (bossProtect && hp >= MINIBOSS_HP_THRESHOLD) {
-
-            variance = baseVariance * 0.35 * (bossIntensity / 100.0);
-
-            typeStr  = "MiniBoss";
-
-        }
-
-
-
-        // Read original stats
-
-        quint8  origLv  = static_cast<quint8>(scene.decompressed.at(off + ENM_LEVEL));
-
-        quint8  origStr = static_cast<quint8>(scene.decompressed.at(off + ENM_STR));
-
-        quint8  origDef = static_cast<quint8>(scene.decompressed.at(off + ENM_DEF));
-
-        quint8  origMag = static_cast<quint8>(scene.decompressed.at(off + ENM_MAG));
-
-        quint8  origMD  = static_cast<quint8>(scene.decompressed.at(off + ENM_MDEF));
-
-        quint16 origMP;
-
-        memcpy(&origMP, scene.decompressed.constData() + off + ENM_MP, 2);
-
-        quint32 origEXP, origGil;
-
-        memcpy(&origEXP, scene.decompressed.constData() + off + ENM_EXP, 4);
-
-        memcpy(&origGil, scene.decompressed.constData() + off + ENM_GIL, 4);
-
-
-
-        // Randomize
-
-        char* d = scene.decompressed.data() + off;
-
-        quint8 newLv = randU8(origLv, variance);
-
-        d[ENM_LEVEL] = static_cast<char>(newLv);
-
-        d[ENM_SPEED] = static_cast<char>(randU8(static_cast<quint8>(d[ENM_SPEED]), variance));
-
-        d[ENM_LUCK]  = static_cast<char>(randU8(static_cast<quint8>(d[ENM_LUCK]),  variance));
-
-        d[ENM_EVADE] = static_cast<char>(randU8(static_cast<quint8>(d[ENM_EVADE]), variance));
-
-        quint8 newStr = randU8(origStr, variance);  d[ENM_STR]  = static_cast<char>(newStr);
-
-        quint8 newDef = randU8(origDef, variance);  d[ENM_DEF]  = static_cast<char>(newDef);
-
-        quint8 newMag = randU8(origMag, variance);  d[ENM_MAG]  = static_cast<char>(newMag);
-
-        quint8 newMD  = randU8(origMD,  variance);  d[ENM_MDEF] = static_cast<char>(newMD);
-
-
-
-        quint16 newMP  = randU16(origMP, variance);
-
-        memcpy(d + ENM_MP, &newMP, 2);
-
-        quint32 newHP  = randU32(hp,      variance);
-
-        memcpy(d + ENM_HP, &newHP, 4);
-
-        quint32 newEXP = randU32(origEXP, variance);
-
-        memcpy(d + ENM_EXP, &newEXP, 4);
-
-        quint32 newGil = randU32(origGil, variance);
-
-        memcpy(d + ENM_GIL, &newGil, 4);
-
-
-
-        // Decode FF7-encoded enemy name for log
-
-        QByteArray nameRaw = scene.decompressed.mid(off + ENM_NAME, 32);
-
-        QString name = FF7Text::toPC(nameRaw);
-
-
-
-        log << "S" << sceneIndex << " E" << e
-
-            << " [" << typeStr << "] \"" << name << "\""
-
-            << " Lv:" << origLv << "->" << newLv
-
-            << " HP:" << hp << "->" << newHP
-
-            << " STR:" << origStr << "->" << newStr
-
-            << " DEF:" << origDef << "->" << newDef
-
-            << " MAG:" << origMag << "->" << newMag
-
-            << " MDEF:" << origMD << "->" << newMD
-
-            << " MP:" << origMP << "->" << newMP
-
-            << "\n";
-
-    }
-
-}
-
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Stat randomization helpers
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
-
-quint8 EnemyRandomizer::randU8(quint8 base, double variance)
-
-{
-
-    if (base == 0) return 0;
-
-    std::uniform_real_distribution<double> dist(-variance, variance);
-
-    double result = base * (1.0 + dist(m_rng));
-
-    return static_cast<quint8>(std::clamp(static_cast<int>(result), 1, 255));
-
-}
-
-
-
-quint16 EnemyRandomizer::randU16(quint16 base, double variance)
-
-{
-
-    if (base == 0) return 0;
-
-    std::uniform_real_distribution<double> dist(-variance, variance);
-
-    double result = base * (1.0 + dist(m_rng));
-
-    return static_cast<quint16>(std::clamp(static_cast<int>(result), 1, 65535));
-
-}
-
-
-
-quint32 EnemyRandomizer::randU32(quint32 base, double variance)
-
-{
-
-    if (base == 0) return 0;
-
-    std::uniform_real_distribution<double> dist(-variance, variance);
-
-    double result = base * (1.0 + dist(m_rng));
-
-    return static_cast<quint32>(std::clamp(
-
-        static_cast<qint64>(result), 1LL, 999999LL));
-
-}
 

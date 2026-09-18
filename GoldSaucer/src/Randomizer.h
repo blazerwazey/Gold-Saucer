@@ -27,7 +27,6 @@ public:
     Randomizer(const QString& ff7Path, const Config& config);
     ~Randomizer();
     
-    bool randomizeEnemyStats();
     bool randomizeEnemyEncounters();
     bool randomizeShops();
     bool randomizeFieldPickups();

@@ -2304,7 +2304,9 @@ void SimpleMainWindow::importArchipelagoJSON()
             if (seedRoot.contains("features")) {
                 QJsonArray features = seedRoot["features"].toArray();
                 if (features.size() >= 4) {
-                    m_config.setFeatureEnabled(Config::EnemyStatsRandomization, features[0].toBool(false));
+                    // features[0] is the removed stats-variance pass. The slot
+                    // is reserved so the other indices keep their meaning for
+                    // seeds already generated; nothing reads it.
                     m_config.setFeatureEnabled(Config::ShopRandomization, features[1].toBool(false));
                     m_config.setFeatureEnabled(Config::FieldPickupRandomization, features[2].toBool(false));
                     m_config.setFeatureEnabled(Config::StartingEquipmentRandomization, features[3].toBool(false));

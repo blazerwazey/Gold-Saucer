@@ -10,7 +10,12 @@ class Config
 {
 public:
     enum Feature {
-        EnemyStatsRandomization = 0,
+        // RESERVED. The stats-variance pass this named was removed on
+        // 2026-09-18, having never been called since the Initial Commit. The
+        // slot stays because these values index the .apff7 "features" array --
+        // renumbering would silently shift every other feature for every seed
+        // already generated.
+        EnemyStatsRandomization = 0,   // reserved, unused
         ShopRandomization,
         FieldPickupRandomization,
         StartingEquipmentRandomization,
@@ -39,8 +44,6 @@ public:
     void setEnemyLevelVariance(int variance);
     int getEnemyLevelVariance() const;
     
-    void setEnemyStatsVariance(double variance);
-    double getEnemyStatsVariance() const;
     
     // Enemy encounter settings
     void setEncounterBossesIncluded(bool enabled);
@@ -108,7 +111,6 @@ private:
     
     // Enemy settings
     int m_enemyLevelVariance;
-    double m_enemyStatsVariance;
     bool m_bossProtectionEnabled;
     int m_bossRandomizationIntensity;
     bool m_encounterBossesIncluded;

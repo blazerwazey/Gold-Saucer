@@ -23,7 +23,6 @@ void Config::setDefaults()
     
     // Enemy settings
     m_enemyLevelVariance = 10; // ±10 levels
-    m_enemyStatsVariance = 0.3; // ±30% stats
     m_bossProtectionEnabled = true; // Enable boss protection by default
     m_bossRandomizationIntensity = 10; // 10% intensity for boss randomization
     m_encounterBossesIncluded = false; // Don't shuffle bosses by default
@@ -84,9 +83,6 @@ bool Config::loadFromFile(const QString& filename)
     QJsonObject enemySettings = root["enemyRandomization"].toObject();
     if (enemySettings.contains("levelVariance")) {
         m_enemyLevelVariance = enemySettings["levelVariance"].toInt(m_enemyLevelVariance);
-    }
-    if (enemySettings.contains("statsVariance")) {
-        m_enemyStatsVariance = enemySettings["statsVariance"].toDouble(m_enemyStatsVariance);
     }
     if (enemySettings.contains("bossProtectionEnabled")) {
         m_bossProtectionEnabled = enemySettings["bossProtectionEnabled"].toBool(m_bossProtectionEnabled);
@@ -174,7 +170,6 @@ bool Config::saveToFile(const QString& filename, bool includeApJsonPath) const
     // Save enemy settings
     QJsonObject enemySettings;
     enemySettings["levelVariance"] = m_enemyLevelVariance;
-    enemySettings["statsVariance"] = m_enemyStatsVariance;
     enemySettings["bossProtectionEnabled"] = m_bossProtectionEnabled;
     enemySettings["bossRandomizationIntensity"] = m_bossRandomizationIntensity;
     enemySettings["encounterBossesIncluded"] = m_encounterBossesIncluded;
@@ -263,16 +258,6 @@ void Config::setEnemyLevelVariance(int variance)
 int Config::getEnemyLevelVariance() const
 {
     return m_enemyLevelVariance;
-}
-
-void Config::setEnemyStatsVariance(double variance)
-{
-    m_enemyStatsVariance = variance;
-}
-
-double Config::getEnemyStatsVariance() const
-{
-    return m_enemyStatsVariance;
 }
 
 void Config::setEncounterBossesIncluded(bool enabled)

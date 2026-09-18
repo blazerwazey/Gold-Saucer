@@ -123,20 +123,6 @@ bool Randomizer::createBackup(const QString& filePath)
     return originalFile.copy(backupPath);
 }
 
-bool Randomizer::randomizeEnemyStats()
-{
-    if (!validateFF7Installation()) {
-        return false;
-    }
-    
-    if (!m_enemyRandomizer) {
-        qDebug() << "Error: Enemy randomizer not initialized";
-        return false;
-    }
-    
-    return m_enemyRandomizer->randomize();
-}
-
 // Shuffles whole scenes between slots of similar difficulty. Protected
 // formations (see EnemyProtectedFormations.h) are held out, because the client
 // detects boss kills by formation id.

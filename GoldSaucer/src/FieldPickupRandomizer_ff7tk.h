@@ -230,9 +230,16 @@ private:
                                    int* outLines = nullptr,
                                    int* outCols = nullptr) const;
     // Grow the WINDOW that shows a patched MESSAGE so multi-line text fits.
+    // Absolute offsets of every REAL opcode start in a field's script region,
+    // found by walking from each entity/script entry point. A candidate that is
+    // not in here is operand data wearing an opcode's byte value.
+    static QSet<int> collectOpcodeStarts(const QByteArray& decompressed,
+                                         int sec0DataStart, int posTexts,
+                                         int nbScripts, int nbAKAO);
     bool resizeMessageWindow(QByteArray& decompressed, int messageOffset,
                              int scriptStart, int lines, int cols,
-                             QTextStream& debugStream) const;
+                             QTextStream& debugStream,
+                             const QSet<int>& opcodeStarts) const;
     void writeArchipelagoSidecar(const QString& outputPath, QTextStream& debugStream) const;
 
     // --- Key item structs (must be declared before processFieldFile) ---

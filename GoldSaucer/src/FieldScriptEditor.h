@@ -96,6 +96,13 @@ public:
     // parse(field) then assemble() == field. Sets err with the first divergence.
     static bool selfTestRoundTrip(const QByteArray &field, QString &err);
 
+    // Byte length of the opcode at `pos`, or -1 if it cannot be decoded.
+    // Public because anything that PATCHES a script has to be able to tell a
+    // real opcode from operand data that merely looks like one -- scanning for
+    // a bare opcode byte is how the field text pass came to rewrite the middle
+    // of an AKAO2 call and of several other live instructions.
+    static int opcodeLength(const QByteArray &d, int pos);
+
 private:
     struct Instr {
         QByteArray bytes;   // opcode id + operands (current)
@@ -107,7 +114,7 @@ private:
     };
 
     // opcode metadata helpers (self-contained; mirror Makou Reactor)
-    static int  opcodeLength(const QByteArray &d, int pos);
+    // opcodeLength is public, above.
     static bool opIsJump(quint8 id);
     static bool opIsBackJump(quint8 id);
     static bool opIsLongJump(quint8 id);

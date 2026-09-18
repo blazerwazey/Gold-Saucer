@@ -5743,6 +5743,69 @@ QByteArray FieldPickupRandomizer_ff7tk::composeApPickupText(
 }
 
 // ============================================================================
+// collectOpcodeStarts  -  every real opcode boundary in the script region
+//
+// The field text pass used to find its MESSAGE and WINDOW by scanning for a bare
+// 0x40 / 0x50 byte and sanity-checking the two bytes after it. Script operands
+// satisfy those checks routinely, and the consequences were not cosmetic:
+//
+//   mtcrl_4  an AKAO2 call contains the bytes ... 28 40 00 01 ..., which reads
+//            as MESSAGE window 0 text 1. Text 1 is `Received "W Machine Gun"!`,
+//            so it even passed the name check. The Archipelago text id was
+//            written INTO the AKAO2 call and the real message 78 bytes later
+//            kept its vanilla wording - reported from play as "the text does
+//            not match what I picked up".
+//   convil_2 / junpb_2 / kuro_1
+//            the window search landed on data inside a SETBYTE and wrote eight
+//            bytes of x/y/w/h over live instructions.
+//
+// Walking from the entry points costs one pass over the field and removes the
+// whole class. Anything not on a real boundary is data, whatever it looks like.
+// ============================================================================
+
+QSet<int> FieldPickupRandomizer_ff7tk::collectOpcodeStarts(
+    const QByteArray& decompressed, int sec0DataStart, int posTexts,
+    int nbScripts, int nbAKAO)
+{
+    QSet<int> starts;
+    if (nbScripts <= 0) return starts;
+
+    // [32 header][nbScripts * 8 name][nbAKAO * 4][nbScripts * 32 * u16 entry]
+    const int entryOff = sec0DataStart + 32 + 8 * nbScripts + 4 * nbAKAO;
+    const int scriptEnd = sec0DataStart + posTexts;
+
+    QList<int> entries;
+    for (int e = 0; e < nbScripts; ++e) {
+        for (int sc = 0; sc < 32; ++sc) {
+            const int o = entryOff + (e * 32 + sc) * 2;
+            if (o + 2 > decompressed.size()) continue;
+            quint16 ep;
+            memcpy(&ep, decompressed.constData() + o, 2);
+            if (ep < posTexts && !entries.contains(ep))
+                entries.append(static_cast<int>(ep));
+        }
+    }
+    std::sort(entries.begin(), entries.end());
+
+    // Walk each script from its entry point to the NEXT entry point, never
+    // stopping at a RET: slot 0 holds Init AND Main separated by one, so
+    // stopping there would leave most of the field unwalked.
+    for (int i = 0; i < entries.size(); ++i) {
+        int pos = sec0DataStart + entries[i];
+        const int limit = (i + 1 < entries.size())
+                              ? sec0DataStart + entries[i + 1]
+                              : scriptEnd;
+        while (pos < limit) {
+            const int len = FieldScriptEditor::opcodeLength(decompressed, pos);
+            if (len <= 0) break;         // undecodable: stop this script only
+            starts.insert(pos);
+            pos += len;
+        }
+    }
+    return starts;
+}
+
+// ============================================================================
 // resizeMessageWindow  -  make the vanilla WINDOW fit our replacement text
 //
 // FF7 does not wrap or auto-grow a scripted window: text past the frame is
@@ -5765,10 +5828,19 @@ bool FieldPickupRandomizer_ff7tk::resizeMessageWindow(
     int scriptStart,
     int lines,
     int cols,
-    QTextStream& debugStream) const
+    QTextStream& debugStream,
+    const QSet<int>& opcodeStarts) const
 {
+    // Two opcodes size a window, and they take identical operands:
+    //   WINDOW 0x50  create/position window <id>
+    //   WSIZW  0x2F  resize window <id>
+    // Only 0x50 was recognised, so the 27 Archipelago pickups whose field sizes
+    // its box with WSIZW kept a one-line vanilla window and clipped their
+    // two-line text -- reported from play on Mt. Corel, where takara1/2/3 all
+    // use WSIZW.
     constexpr int kWindowOpcode = 0x50;
-    constexpr int kWindowSize   = 10;   // 0x50, id, x u16, y u16, w u16, h u16
+    constexpr int kWsizwOpcode  = 0x2F;
+    constexpr int kWindowSize   = 10;   // op, id, x u16, y u16, w u16, h u16
     constexpr int kScreenW      = 320;
     constexpr int kScreenH      = 240;
 
@@ -5785,7 +5857,12 @@ bool FieldPickupRandomizer_ff7tk::resizeMessageWindow(
     // auto-sizes those.
     const int searchStart = scriptStart;
     for (int pos = messageOffset - 1; pos >= searchStart; --pos) {
-        if (static_cast<quint8>(decompressed.at(pos)) != kWindowOpcode) continue;
+        const quint8 op = static_cast<quint8>(decompressed.at(pos));
+        if (op != kWindowOpcode && op != kWsizwOpcode) continue;
+        // Must be a REAL opcode. Both values occur constantly as operand data,
+        // and writing the new geometry over data corrupts whatever instruction
+        // contains it -- measured at 5 of 256 pickups before this check.
+        if (!opcodeStarts.contains(pos)) continue;
         if (pos + kWindowSize > decompressed.size()) continue;
         if (static_cast<quint8>(decompressed.at(pos + 1)) != winId) continue;
 
@@ -5811,13 +5888,15 @@ bool FieldPickupRandomizer_ff7tk::resizeMessageWindow(
         memcpy(decompressed.data() + pos + 4, &newY, 2);
         memcpy(decompressed.data() + pos + 6, &newW, 2);
         memcpy(decompressed.data() + pos + 8, &newH, 2);
-        debugStream << "    AP_WINDOW @" << pos << " id=" << winId
+        debugStream << "    AP_WINDOW @" << pos
+                    << (op == kWsizwOpcode ? " (WSIZW)" : " (WINDOW)")
+                    << " id=" << winId
                     << "  " << w << "x" << h << " -> " << newW << "x" << newH
                     << " (" << lines << " lines, " << cols << " cols)\n";
         return true;
     }
 
-    debugStream << "    AP_WINDOW: no WINDOW for id " << winId
+    debugStream << "    AP_WINDOW: no WINDOW or WSIZW for id " << winId
                 << " before MESSAGE @" << messageOffset
                 << " - text may be clipped if it needs more than one line\n";
     return false;
@@ -6329,6 +6408,14 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     // Script section absolute bounds (for MESSAGE search)
     int scriptAbsEnd = sec0DataStart + posTexts;
 
+    // Every REAL opcode boundary in this field. Both searches below look for a
+    // bare opcode byte, and script operands hit those values constantly; without
+    // this an AKAO2 call in mtcrl_4 was read as a MESSAGE announcing
+    // `W Machine Gun`, so the Archipelago text id was written into the middle of
+    // the call and the real message kept its vanilla wording.
+    const QSet<int> opcodeStarts =
+        collectOpcodeStarts(decompressed, sec0DataStart, posTexts, nbScripts, nbAKAO);
+
     // Determine where AKAO data starts (end of text section)
     quint32 posAKAO;
     if (nbAKAO > 0) {
@@ -6439,6 +6526,7 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             for (int pos = lo; pos < hi && found < 0; ++pos) {
                 if (static_cast<quint8>(decompressed.at(pos)) != MESSAGE_OPCODE)
                     continue;
+                if (!opcodeStarts.contains(pos)) continue;   // operand data, not a MESSAGE
                 const quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                 const quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                 if (winID > 15 || txtID >= textCount) continue;
@@ -6465,7 +6553,8 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             int searchStart = qMax(mod.opcodeOffset - 500, sec0DataStart);
             for (int pos = mod.opcodeOffset - 1; pos >= searchStart; --pos) {
                 if (static_cast<quint8>(decompressed.at(pos)) == MESSAGE_OPCODE
-                    && pos + 2 < scriptAbsEnd) {
+                    && pos + 2 < scriptAbsEnd
+                    && opcodeStarts.contains(pos)) {
                     quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
@@ -6487,7 +6576,8 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             const int skipPlacementBytes = 5; // covers 4-byte BITON or 5-byte STITM slot
             int searchEnd = qMin(mod.opcodeOffset + 500, scriptAbsEnd - 2);
             for (int pos = mod.opcodeOffset + skipPlacementBytes; pos < searchEnd; ++pos) {
-                if (static_cast<quint8>(decompressed.at(pos)) == MESSAGE_OPCODE) {
+                if (static_cast<quint8>(decompressed.at(pos)) == MESSAGE_OPCODE
+                    && opcodeStarts.contains(pos)) {
                     quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
@@ -6570,7 +6660,8 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         // the width the new text needs.
         if (!mod.encodedText.isEmpty() || mod.textLines > 1)
             resizeMessageWindow(decompressed, messageOff, sec0DataStart,
-                                mod.textLines, mod.textCols, debugStream);
+                                mod.textLines, mod.textCols, debugStream,
+                                opcodeStarts);
 
         debugStream << "  MSG @" << messageOff << " textID "
                     << static_cast<int>(static_cast<quint8>(decompressed.at(messageOff + 2)))

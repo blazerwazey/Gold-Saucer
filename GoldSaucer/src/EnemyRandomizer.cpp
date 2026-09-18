@@ -19,6 +19,8 @@
 
 #include <algorithm>
 
+#include <cmath>
+
 #include <zlib.h>
 
 
@@ -527,6 +529,160 @@ bool EnemyRandomizer::randomize()
 
 
 
+// ============================================================================
+
+// Difficulty scaling for a shuffled encounter
+
+//
+
+// A shuffled scene keeps the PLACE's difficulty, not the monsters'. The ratio is
+
+//     (average HP the slot originally had) / (average HP the arrivals have)
+
+// and each stat moves by ratio raised to its own exponent.
+
+//
+
+// The exponents are FITTED from the shipped scene.bin, not chosen: ordinary
+
+// least squares of log(stat) on log(HP) across all 615 enemies. FF7 carries
+
+// difficulty almost entirely in HP - a monster with 100x the HP has only about
+
+// 4.6x the Strength (100^0.34) and 27x the EXP. Scaling everything linearly
+
+// would turn a modest correction into a difficulty and economy break.
+
+//
+
+// Speed, Luck and Evade are included by request. The fit barely supports it -
+
+// Speed r=0.60, Luck r=0.33, and Evade is flat (b=-0.008, r=-0.02, i.e. vanilla
+
+// relates it to HP not at all) - so Evade borrows Luck's gentle exponent rather
+
+// than a measured one. They are deliberately the softest movers in the table.
+
+struct StatScale {
+
+    int    offset;     // byte offset inside the 184-byte enemy record
+
+    int    width;      // 1, 2 or 4
+
+    double exponent;   // stat *= pow(ratio, exponent)
+
+    const char* name;
+
+};
+
+
+
+static const StatScale kStatScaling[] = {
+
+    { 0x20, 1, 0.30, "level"    },   // measured 0.301
+
+    { 0x21, 1, 0.18, "speed"    },   // measured 0.183  (weak, r=0.60)
+
+    { 0x22, 1, 0.15, "luck"     },   // measured 0.154  (loose, r=0.33)
+
+    { 0x23, 1, 0.15, "evade"    },   // CHOSEN: vanilla shows none, matched to luck
+
+    { 0x24, 1, 0.34, "strength" },   // measured 0.344  (tightest, r=0.80)
+
+    { 0x25, 1, 0.34, "defense"  },   // measured 0.338
+
+    { 0x26, 1, 0.38, "magic"    },   // measured 0.383
+
+    { 0x27, 1, 0.34, "m.defense"},   // measured 0.338
+
+    { 0x9C, 2, 0.38, "mp"       },   // measured 0.381
+
+    { 0xA4, 4, 1.00, "hp"       },   // the reference the ratio is built from
+
+    { 0xA8, 4, 0.69, "exp"      },   // measured 0.690 - reward tracks the fight
+
+    { 0xAC, 4, 0.70, "gil"      },   // measured 0.700
+
+};
+
+
+
+void EnemyRandomizer::scaleSceneStats(QByteArray& scene, double ratio)
+
+{
+
+    if (scene.size() != SCENE_SIZE) return;
+
+    if (!(ratio > 0.0) || qFuzzyCompare(ratio, 1.0)) return;
+
+
+
+    char* base = scene.data();
+
+    for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
+
+        const int off = ENEMY_DATA_BASE + e * ENEMY_RECORD_SIZE;
+
+        bool empty = true;
+
+        for (int n = 0; n < 32; ++n)
+
+            if (static_cast<quint8>(scene.at(off + n)) != 0xFF) { empty = false; break; }
+
+        if (empty) continue;
+
+
+
+        for (const StatScale& st : kStatScaling) {
+
+            const int p = off + st.offset;
+
+            quint32 cur = 0;
+
+            if      (st.width == 1) cur = static_cast<quint8>(scene.at(p));
+
+            else if (st.width == 2) { quint16 v; memcpy(&v, base + p, 2); cur = v; }
+
+            else                    { quint32 v; memcpy(&v, base + p, 4); cur = v; }
+
+
+
+            // 0 means "this enemy has none of it" - scaling it would invent a
+
+            // stat the designers deliberately left empty.
+
+            if (cur == 0) continue;
+
+
+
+            double scaled = static_cast<double>(cur) * std::pow(ratio, st.exponent);
+
+            const double cap = (st.width == 1) ? 255.0
+
+                             : (st.width == 2) ? 65535.0 : 4294967295.0;
+
+            if (scaled < 1.0)  scaled = 1.0;      // never scale a stat out of existence
+
+            if (scaled > cap)  scaled = cap;
+
+            const quint32 out = static_cast<quint32>(scaled + 0.5);
+
+
+
+            if      (st.width == 1) base[p] = static_cast<char>(static_cast<quint8>(out));
+
+            else if (st.width == 2) { quint16 v = static_cast<quint16>(out); memcpy(base + p, &v, 2); }
+
+            else                    { quint32 v = out;                       memcpy(base + p, &v, 4); }
+
+        }
+
+    }
+
+}
+
+
+
 bool EnemyRandomizer::randomizeEncounters()
 
 {
@@ -890,6 +1046,44 @@ bool EnemyRandomizer::randomizeEncounters()
 
         pristine[i] = scenes[i].decompressed;
 
+
+
+    // Each scene's own average enemy HP, which is what "the difficulty that
+
+    // belongs here" means once its monsters have been replaced.
+
+    QVector<double> origAvgHP(scenes.size(), 0.0);
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        if (scenes[i].decompressed.size() != SCENE_SIZE) continue;
+
+        const char* d = scenes[i].decompressed.constData();
+
+        quint64 total = 0; int n = 0;
+
+        for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
+
+            const int off = ENEMY_DATA_BASE + e * ENEMY_RECORD_SIZE;
+
+            bool empty = true;
+
+            for (int k = 0; k < 32; ++k)
+
+                if (static_cast<quint8>(d[off + k]) != 0xFF) { empty = false; break; }
+
+            if (empty) continue;
+
+            quint32 hp; memcpy(&hp, d + off + ENM_HP, 4);
+
+            total += hp; ++n;
+
+        }
+
+        if (n) origAvgHP[i] = static_cast<double>(total) / n;
+
+    }
+
     // Swap attempts per scene in a tier. 40 reaches ~94% displacement on the
 
     // shipped file; past that the curve is flat and it only burns RNG.
@@ -1042,6 +1236,48 @@ bool EnemyRandomizer::randomizeEncounters()
         dbg << "No encounters shuffled.\n";
 
         return true;
+
+    }
+
+
+
+    // ── Match the arrivals to the neighbourhood ───────────────────────────
+
+    // Tiering only guarantees a swap stayed inside a broad HP band, and the
+
+    // bands are wide: each spans 2.5x to 5.7x, and measured over real shuffles
+
+    // 30% of encounters land more than 2x off what belonged in that slot.
+
+    {
+
+        int scaled = 0; double worst = 1.0;
+
+        for (int i = 0; i < scenes.size(); ++i) {
+
+            if (srcOf[i] == i) continue;                 // never moved
+
+            const double here = origAvgHP[i];
+
+            const double came = origAvgHP[srcOf[i]];
+
+            if (here <= 0.0 || came <= 0.0) continue;    // empty scene
+
+            const double ratio = here / came;
+
+            scaleSceneStats(scenes[i].decompressed, ratio);
+
+            worst = qMax(worst, qMax(ratio, 1.0 / ratio));
+
+            ++scaled;
+
+        }
+
+        dbg << "Scaled " << scaled << " shuffled scene(s) to the difficulty of "
+
+            << "where they landed (largest correction " << QString::number(worst, 'f', 2)
+
+            << "x)\n";
 
     }
 

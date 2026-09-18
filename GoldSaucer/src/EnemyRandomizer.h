@@ -101,6 +101,11 @@ private:
     void randomizeScene(SceneEntry& scene, int sceneIndex, QTextStream& log);
 
     // ── stat helpers ─────────────────────────────────────────────────────
+    // Rescale one scene's enemies toward the difficulty of the slot they now
+    // occupy. `ratio` is (average HP the slot originally had) / (average HP the
+    // incoming enemies natively have). See kStatScaling.
+    void       scaleSceneStats(QByteArray& scene, double ratio);
+
     quint8  randU8 (quint8  base, double variance);
     quint16 randU16(quint16 base, double variance);
     quint32 randU32(quint32 base, double variance);

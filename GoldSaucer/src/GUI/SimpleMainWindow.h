@@ -100,6 +100,7 @@ private:
     QCheckBox* m_keyItemCheckBox;      // never shown: see setupUI
     QCheckBox* m_equipmentCheckBox;
     QCheckBox* m_enemyCheckBox;        // the encounter shuffle (step 3)
+    QCheckBox* m_encounterBossCheckBox; // sub-option of the above
     QCheckBox* m_archipelagoCheckBox;  // never shown: an indicator, replaced by the rail
     QCheckBox* m_freeRoamCheckBox;     // never shown: dictated by the seed
     QCheckBox* m_iroCheckBox;

@@ -72,6 +72,11 @@ QLabel#muted   { color: #7d8592; }
 QLabel#faint   { color: #6f7783; font-size: 12px; }
 QLabel#fainter { color: #5c6470; font-size: 11px; }
 QLabel#mono    { color: #cfd4db; font-family: "%MONO%"; font-size: 12px; }
+/* A label inside a DISABLED container. Only the Include-bosses row is one
+   today: the seed lock disables individual controls, never whole cards. The
+   #faint rule needs its own entry because an id selector outranks :disabled. */
+QLabel:disabled       { color: #5c6470; }
+QLabel#faint:disabled { color: #4d545e; }
 
 QWidget#card       { background-color: #1c1f25; border: 1px solid #2e333c; border-radius: 6px; }
 QWidget#cardGold   { background-color: #1c1f25; border: 1px solid #4a3f1e; border-radius: 6px; }
@@ -739,10 +744,41 @@ QWidget* SimpleMainWindow::buildStepOptions()
     enTitle->setStyleSheet("font-size: 14px; font-weight: 600;");
     encl->addWidget(enTitle);
     encl->addWidget(mkLabel("Shuffle which monsters you run into, within tiers of "
-                            "similar difficulty. Story bosses, scripted fights and "
-                            "chocobo formations never move.", "muted", enc));
+                            "similar difficulty. Scripted story fights, the Weapons, "
+                            "chocobo formations and the Battle Arena never move.",
+                            "muted", enc));
     encl->addWidget(mkLabel("Experimental — this has not been proven in a full "
                             "playthrough yet.", "faint", enc));
+
+    // Sub-option, indented under its parent. Off by default and deliberately
+    // blunt about why: the shuffle stays within a tier, so this does not put a
+    // boss in a random encounter, but the boss tier is an average-HP guess and
+    // the later phases of a multi-phase fight are not covered by the protected
+    // list. See the comment on includeBosses in EnemyRandomizer::randomizeEncounters.
+    QWidget* bossRow = new QWidget(enc);
+    QHBoxLayout* brl = new QHBoxLayout(bossRow);
+    brl->setContentsMargins(0, 4, 0, 0);
+    brl->setSpacing(9);
+    m_encounterBossCheckBox = new QCheckBox(bossRow);
+    brl->addWidget(m_encounterBossCheckBox, 0, Qt::AlignTop);
+    QWidget* bossText = new QWidget(bossRow);
+    QVBoxLayout* btl = new QVBoxLayout(bossText);
+    btl->setContentsMargins(0, 0, 0, 0);
+    btl->setSpacing(3);
+    QLabel* bossTitle = mkLabel("Include bosses", nullptr, bossText);
+    bossTitle->setStyleSheet("font-size: 13px; font-weight: 600;");
+    btl->addWidget(bossTitle);
+    btl->addWidget(mkLabel("Bosses shuffle too, only ever with other bosses. Riskier: the "
+                           "tier is an HP guess, and a multi-phase boss is only held back "
+                           "at its first phase.", "faint", bossText));
+    brl->addWidget(bossText, 1);
+    encl->addWidget(bossRow);
+
+    // Greyed out, not hidden, when the shuffle is off: the player should be able
+    // to see the option exists and why it is unavailable.
+    connect(m_enemyCheckBox, &QCheckBox::toggled, bossRow, &QWidget::setEnabled);
+    bossRow->setEnabled(m_enemyCheckBox->isChecked());
+
     enl->addWidget(enc, 1);
     body->addWidget(enemyCard);
 
@@ -1970,6 +2006,8 @@ void SimpleMainWindow::updateConfig()
     m_config.setFeatureEnabled(Config::StartingEquipmentRandomization, m_equipmentCheckBox->isChecked());
     m_config.setFeatureEnabled(Config::EnemyEncounterRandomization,
                                m_enemyCheckBox && m_enemyCheckBox->isChecked());
+    m_config.setEncounterBossesIncluded(m_encounterBossCheckBox
+                                        && m_encounterBossCheckBox->isChecked());
 
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
     m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
@@ -2080,6 +2118,14 @@ void SimpleMainWindow::applyConfigToUI()
     m_equipmentCheckBox->setChecked(m_config.isFeatureEnabled(Config::StartingEquipmentRandomization));
     if (m_enemyCheckBox)
         m_enemyCheckBox->setChecked(m_config.isFeatureEnabled(Config::EnemyEncounterRandomization));
+    if (m_encounterBossCheckBox) {
+        m_encounterBossCheckBox->setChecked(m_config.getEncounterBossesIncluded());
+        // toggled() only fires on a CHANGE, so the row's enabled state has to be
+        // pushed here too - otherwise loading a config with the shuffle already
+        // off leaves the sub-option live.
+        if (QWidget* row = m_encounterBossCheckBox->parentWidget())
+            row->setEnabled(m_enemyCheckBox && m_enemyCheckBox->isChecked());
+    }
 
     // Archipelago mode (only enable if JSON was imported)
     bool archipelagoConfigEnabled = m_config.isFeatureEnabled(Config::ArchipelagoIntegration);
@@ -2310,9 +2356,11 @@ void SimpleMainWindow::importArchipelagoJSON()
                     m_config.setFeatureEnabled(Config::ShopRandomization, features[1].toBool(false));
                     m_config.setFeatureEnabled(Config::FieldPickupRandomization, features[2].toBool(false));
                     m_config.setFeatureEnabled(Config::StartingEquipmentRandomization, features[3].toBool(false));
-                    if (features.size() >= 7) {
-                        m_config.setFeatureEnabled(Config::BossProtection, features[6].toBool(false));
-                    }
+                    // features[6] is boss protection. Nothing reads it: the
+                    // protected-formation list is unconditional, and the tier
+                    // ceiling is the player's own "Include bosses" box. The
+                    // apworld still sends it, and the slot stays reserved so the
+                    // other indices keep their meaning.
                     // features[7] = the encounter shuffle. It was never decoded,
                     // so the seed's randomize_encounters could not reach Gold
                     // Saucer at all -- and because Config defaults EVERY feature

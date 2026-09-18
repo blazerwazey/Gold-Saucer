@@ -22,9 +22,6 @@ void Config::setDefaults()
     m_seed = rd();
     
     // Enemy settings
-    m_enemyLevelVariance = 10; // ±10 levels
-    m_bossProtectionEnabled = true; // Enable boss protection by default
-    m_bossRandomizationIntensity = 10; // 10% intensity for boss randomization
     m_encounterBossesIncluded = false; // Don't shuffle bosses by default
     
     // Shop settings
@@ -80,16 +77,11 @@ bool Config::loadFromFile(const QString& filename)
     }
     
     // Load enemy settings
+    // levelVariance, bossProtectionEnabled and bossRandomizationIntensity are
+    // deliberately not read back: they belonged to the removed stats pass. An
+    // older randomizer_config.json carrying them still loads, they are just
+    // ignored, and they stop being written on the next save.
     QJsonObject enemySettings = root["enemyRandomization"].toObject();
-    if (enemySettings.contains("levelVariance")) {
-        m_enemyLevelVariance = enemySettings["levelVariance"].toInt(m_enemyLevelVariance);
-    }
-    if (enemySettings.contains("bossProtectionEnabled")) {
-        m_bossProtectionEnabled = enemySettings["bossProtectionEnabled"].toBool(m_bossProtectionEnabled);
-    }
-    if (enemySettings.contains("bossRandomizationIntensity")) {
-        m_bossRandomizationIntensity = enemySettings["bossRandomizationIntensity"].toInt(m_bossRandomizationIntensity);
-    }
     if (enemySettings.contains("encounterBossesIncluded")) {
         m_encounterBossesIncluded = enemySettings["encounterBossesIncluded"].toBool(m_encounterBossesIncluded);
     }
@@ -169,9 +161,6 @@ bool Config::saveToFile(const QString& filename, bool includeApJsonPath) const
     
     // Save enemy settings
     QJsonObject enemySettings;
-    enemySettings["levelVariance"] = m_enemyLevelVariance;
-    enemySettings["bossProtectionEnabled"] = m_bossProtectionEnabled;
-    enemySettings["bossRandomizationIntensity"] = m_bossRandomizationIntensity;
     enemySettings["encounterBossesIncluded"] = m_encounterBossesIncluded;
     root["enemyRandomization"] = enemySettings;
     
@@ -250,15 +239,6 @@ unsigned int Config::getSeed() const
     return m_seed;
 }
 
-void Config::setEnemyLevelVariance(int variance)
-{
-    m_enemyLevelVariance = variance;
-}
-
-int Config::getEnemyLevelVariance() const
-{
-    return m_enemyLevelVariance;
-}
 
 void Config::setEncounterBossesIncluded(bool enabled)
 {
@@ -270,25 +250,6 @@ bool Config::getEncounterBossesIncluded() const
     return m_encounterBossesIncluded;
 }
 
-void Config::setBossProtectionEnabled(bool enabled)
-{
-    m_bossProtectionEnabled = enabled;
-}
-
-bool Config::getBossProtectionEnabled() const
-{
-    return m_bossProtectionEnabled;
-}
-
-void Config::setBossRandomizationIntensity(int intensity)
-{
-    m_bossRandomizationIntensity = qBound(0, intensity, 100);
-}
-
-int Config::getBossRandomizationIntensity() const
-{
-    return m_bossRandomizationIntensity;
-}
 
 void Config::setShopItemPoolSize(int size)
 {

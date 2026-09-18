@@ -21,7 +21,13 @@ public:
         StartingEquipmentRandomization,
         ArchipelagoIntegration,
         TextReplacement,
-        BossProtection,
+        // RESERVED. Nothing reads this. Bosses are held out of the shuffle
+        // by EnemyProtectedFormations (a CORRECTNESS guarantee -- the client
+        // identifies boss kills by formation id, so that list can never be
+        // optional) and by the tier ceiling, which the player controls through
+        // setEncounterBossesIncluded instead. The slot stays for .apff7
+        // features[] index stability; the apworld still sends features[6].
+        BossProtection,                // reserved, unused
         EnemyEncounterRandomization,
         FeatureCount
     };
@@ -40,21 +46,9 @@ public:
     void setSeed(unsigned int seed);
     unsigned int getSeed() const;
     
-    // Enemy randomization settings
-    void setEnemyLevelVariance(int variance);
-    int getEnemyLevelVariance() const;
-    
-    
     // Enemy encounter settings
     void setEncounterBossesIncluded(bool enabled);
     bool getEncounterBossesIncluded() const;
-    
-    // Boss protection settings
-    void setBossProtectionEnabled(bool enabled);
-    bool getBossProtectionEnabled() const;
-    
-    void setBossRandomizationIntensity(int intensity);
-    int getBossRandomizationIntensity() const;
     
     // Shop randomization settings
     void setShopItemPoolSize(int size);
@@ -110,9 +104,6 @@ private:
     unsigned int m_seed;
     
     // Enemy settings
-    int m_enemyLevelVariance;
-    bool m_bossProtectionEnabled;
-    int m_bossRandomizationIntensity;
     bool m_encounterBossesIncluded;
     
     // Shop settings

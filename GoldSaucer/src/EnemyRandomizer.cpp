@@ -403,16 +403,45 @@ bool EnemyRandomizer::randomizeEncounters()
 
     const Config& config = m_parent->m_config;
 
-    // FORCED OFF for the first shipping pass. Tier 4 is where the story bosses
-    // live, and the tiering is a blunt average-HP heuristic - a boss landing in
-    // a random encounter slot is a run-ender, and one landing where a scripted
-    // fight expected it is worse. The Config getter is left in place for when
-    // the tier-preserving shuffle has actually been proven in play.
-    const bool includeBosses = false;
-    if (config.getEncounterBossesIncluded())
-        dbg << "NOTE: encounter boss inclusion requested but is forced OFF in "
-               "this build (unproven shuffle).\n";
-    dbg << "Include bosses in shuffle: NO (forced)\n\n";
+    // Tier 4 - the top of the HP heuristic - is the one tier the player can
+
+    // open up, and it stays CLOSED by default.
+
+    //
+
+    // What it does NOT do: drop a boss into a random encounter. The shuffle runs
+
+    // within a tier, so opening tier 4 lets tier-4 scenes swap with each OTHER.
+
+    //
+
+    // Why it is still off by default: after the protected list takes its cut,
+
+    // 16 tier-4 scenes remain, and they are not all what the name suggests. Some
+
+    // are ordinary high-HP randoms (Master Tonberry, Vlakorados, King Behemoth).
+
+    // Others are story bosses the protected list genuinely misses, because that
+
+    // list holds the formation a field script NAMES - and a multi-phase fight is
+
+    // named only at its entry. Hojo is listed at formation 856; Helletic Hojo
+
+    // and Lifeform-Hojo N are the phases the engine walks into by itself, in
+
+    // scenes nothing names. So the tier ceiling is the only thing holding them.
+
+    //
+
+    // EnemyProtectedFormations is unaffected by this either way. That list is a
+
+    // correctness guarantee - the client identifies boss kills by formation id -
+
+    // and is applied whatever this is set to.
+
+    const bool includeBosses = config.getEncounterBossesIncluded();
+
+    dbg << "Include bosses in shuffle: " << (includeBosses ? "YES" : "no") << "\n\n";
 
     // ── Scenes that must never move ────────────────────────────────────────
     // The Archipelago client identifies boss kills BY FORMATION ID, and field
@@ -761,8 +790,24 @@ bool EnemyRandomizer::randomizeEncounters()
             indices.append(i);
         }
         if (heldBack)
+
             dbg << "Tier " << t << ": held back " << heldBack
+
                 << " protected scene(s)\n";
+
+        // Name the boss-tier scenes the toggle put into play. With it on, a bug
+
+        // report about a fight going wrong needs this line to be answerable.
+
+        if (t == 4 && !indices.isEmpty()) {
+
+            dbg << "Tier 4 IN PLAY (" << indices.size() << " scenes):";
+
+            for (int i : indices) dbg << ' ' << i;
+
+            dbg << "\n";
+
+        }
 
         if (indices.size() < 2) continue;
 

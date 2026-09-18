@@ -718,6 +718,34 @@ QWidget* SimpleMainWindow::buildStepOptions()
     el->addWidget(ec, 1);
     body->addWidget(eqCard);
 
+    // ── Enemy encounters ──────────────────────────────────────────────────
+    // Deliberately NOT in lockedWidgets(): shuffling which monsters appear
+    // moves no Archipelago check. Boss kills are identified by FORMATION ID and
+    // every formation a script or the client names is held out of the shuffle,
+    // so this is the same class of setting as the shop-stock box - the seed
+    // SETS it from features[7] on import, and the player may still change it.
+    QWidget* enemyCard = new QWidget(page);
+    enemyCard->setObjectName("card");
+    QHBoxLayout* enl = new QHBoxLayout(enemyCard);
+    enl->setContentsMargins(16, 14, 16, 14);
+    enl->setSpacing(12);
+    m_enemyCheckBox = new QCheckBox(enemyCard);
+    enl->addWidget(m_enemyCheckBox, 0, Qt::AlignTop);
+    QWidget* enc = new QWidget(enemyCard);
+    QVBoxLayout* encl = new QVBoxLayout(enc);
+    encl->setContentsMargins(0, 0, 0, 0);
+    encl->setSpacing(7);
+    QLabel* enTitle = mkLabel("Enemy encounters", nullptr, enc);
+    enTitle->setStyleSheet("font-size: 14px; font-weight: 600;");
+    encl->addWidget(enTitle);
+    encl->addWidget(mkLabel("Shuffle which monsters you run into, within tiers of "
+                            "similar difficulty. Story bosses, scripted fights and "
+                            "chocobo formations never move.", "muted", enc));
+    encl->addWidget(mkLabel("Experimental — this has not been proven in a full "
+                            "playthrough yet.", "faint", enc));
+    enl->addWidget(enc, 1);
+    body->addWidget(enemyCard);
+
     body->addStretch(1);
     m_lockedFootnote = mkLabel("Locked settings come from the .apff7 and have to match the "
                                "multiworld. Randomizing without a seed makes all of them yours.",
@@ -1120,8 +1148,9 @@ void SimpleMainWindow::refreshRail()
                : QFileInfo(m_archipelagoJsonPath).completeBaseName());
     int on = (m_shopCheckBox && m_shopCheckBox->isChecked() ? 1 : 0)
            + (m_fieldCheckBox && m_fieldCheckBox->isChecked() ? 1 : 0)
-           + (m_equipmentCheckBox && m_equipmentCheckBox->isChecked() ? 1 : 0);
-    setSub(m_railSub[StepOptions], QString("%1 of 3 on").arg(on));
+           + (m_equipmentCheckBox && m_equipmentCheckBox->isChecked() ? 1 : 0)
+           + (m_enemyCheckBox && m_enemyCheckBox->isChecked() ? 1 : 0);
+    setSub(m_railSub[StepOptions], QString("%1 of 4 on").arg(on));
     setSub(m_railSub[StepOutput], m_outputFolderEdit && !m_outputFolderEdit->text().isEmpty()
                ? QFileInfo(m_outputFolderEdit->text()).fileName()
                : QString());
@@ -1939,6 +1968,8 @@ void SimpleMainWindow::updateConfig()
     m_config.setFeatureEnabled(Config::FieldPickupRandomization, m_fieldCheckBox->isChecked());
     m_config.setKeyItemRandomization(m_keyItemCheckBox->isChecked());
     m_config.setFeatureEnabled(Config::StartingEquipmentRandomization, m_equipmentCheckBox->isChecked());
+    m_config.setFeatureEnabled(Config::EnemyEncounterRandomization,
+                               m_enemyCheckBox && m_enemyCheckBox->isChecked());
 
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
     m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
@@ -2047,6 +2078,8 @@ void SimpleMainWindow::applyConfigToUI()
     // Key item randomization is hidden and forced off; see setupUI.
     m_keyItemCheckBox->setChecked(false);
     m_equipmentCheckBox->setChecked(m_config.isFeatureEnabled(Config::StartingEquipmentRandomization));
+    if (m_enemyCheckBox)
+        m_enemyCheckBox->setChecked(m_config.isFeatureEnabled(Config::EnemyEncounterRandomization));
 
     // Archipelago mode (only enable if JSON was imported)
     bool archipelagoConfigEnabled = m_config.isFeatureEnabled(Config::ArchipelagoIntegration);

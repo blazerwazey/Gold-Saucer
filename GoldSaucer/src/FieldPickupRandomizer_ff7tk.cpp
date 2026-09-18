@@ -6512,6 +6512,10 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
 
     for (const auto& mod : modifications) {
         int backOff = -1, fwdOff = -1;
+        // Nearest naming candidate in EACH direction, kept apart so the closer
+        // of the two can win. One combined "first named wins" let a backward
+        // match beat a forward one that was three times closer -- see below.
+        int namedBack = -1, namedFwd = -1;
         int namedOff = -1;   // candidate whose text names the vanilla item
 
         // A suppressed grant (see kSharedFlagExtras): its STITM is already
@@ -6559,9 +6563,10 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
                         if (backOff < 0) backOff = pos;
-                        if (namedOff < 0 && messageNames(pos, mod.vanillaName))
-                            namedOff = pos;
-                        if (backOff >= 0 && namedOff >= 0) break;
+                        // Scanning outward, so the first hit IS the nearest.
+                        if (namedBack < 0 && messageNames(pos, mod.vanillaName))
+                            namedBack = pos;
+                        if (backOff >= 0 && namedBack >= 0) break;
                     }
                 }
             }
@@ -6582,16 +6587,31 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
                     quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
                     if (winID <= 15 && txtID < textCount && !usedMessageOffsets.contains(pos)) {
                         if (fwdOff < 0) fwdOff = pos;
-                        if (namedOff < 0 && messageNames(pos, mod.vanillaName))
-                            namedOff = pos;
-                        if (fwdOff >= 0 && namedOff >= 0) break;
+                        if (namedFwd < 0 && messageNames(pos, mod.vanillaName))
+                            namedFwd = pos;
+                        if (fwdOff >= 0 && namedFwd >= 0) break;
                     }
                 }
             }
         }
 
-        // A message that names the item wins outright; proximity is only the
-        // tie-breaker when nothing names it.
+        // Naming the item still beats not naming it. Between two candidates
+        // that BOTH name it, take the nearer: a field can mention an item in
+        // ordinary dialogue as well as in its pickup message, and the dialogue
+        // is often further away in the other direction.
+        //
+        // subin_1b is the case that forced this. Its second Huge Materia BITON
+        // has an NPC line, "...Huge Materia recovered...", 49 bytes back and the
+        // real `Received Key Item "Huge Materia"!` 14 bytes forward. First-named-
+        // wins took the NPC line, so the Archipelago text landed on dialogue and
+        // the pickup kept vanilla wording - reported from play on v0.0.6.
+        if (namedBack >= 0 && namedFwd >= 0) {
+            namedOff = (mod.opcodeOffset - namedBack) <= (namedFwd - mod.opcodeOffset)
+                           ? namedBack : namedFwd;
+        } else {
+            namedOff = (namedBack >= 0) ? namedBack : namedFwd;
+        }
+
         int messageOff = namedOff;
         if (messageOff < 0) {
             if (backOff >= 0 && fwdOff >= 0) {

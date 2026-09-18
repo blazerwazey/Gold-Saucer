@@ -39,11 +39,25 @@ static QByteArray gzipCompress(const QByteArray& data)
 
     memset(&strm, 0, sizeof(strm));
 
-    // 15 + 16 = gzip wrapper
+    // 15 + 16 = gzip wrapper. Level 9 and memLevel 9, NOT the defaults.
 
-    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+    //
 
-                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+    // scene.bin is a fixed grid of 0x2000 blocks and Square packed it tight -
+
+    // one block sits within 4 bytes of full. At Z_DEFAULT_COMPRESSION/memLevel 8
+
+    // our deflate is slightly worse than theirs on 148 of the 256 scenes, so
+
+    // merely recompressing the UNCHANGED file put two blocks over the ceiling
+
+    // before any scene moved. At 9/9 the untouched file fits, fullest block
+
+    // 8188/8192 - which is what gives the shuffle a valid state to preserve.
+
+    if (deflateInit2(&strm, 9, Z_DEFLATED,
+
+                     15 + 16, 9, Z_DEFAULT_STRATEGY) != Z_OK)
 
         return QByteArray();
 
@@ -706,6 +720,126 @@ bool EnemyRandomizer::randomizeEncounters()
 
 
 
+    // ── Size budget ───────────────────────────────────────────────────────
+
+    //
+
+    // scene.bin pins every scene to a fixed (block, slot): the scene INDEX is
+
+    // block * 16 + slot, so a scene can never move to another block. Only its
+
+    // DATA moves. The invariant that must hold for every block is therefore
+
+    //
+
+    //     64 (pointer header) + sum(compressed size of its scenes) <= 0x2000
+
+    //
+
+    // The old free shuffle ignored this and dropped a large scene's data into a
+
+    // small scene's slot. Measured on the shipped file that overflowed about 8
+
+    // of the 33 blocks on EVERY seed, worst 3784 bytes past the ceiling - and
+
+    // rebuildSceneBin's fallback then either reverted a slot to vanilla
+
+    // (breaking the permutation) or wrote an end marker into the middle of a
+
+    // block header (truncating that block's scene list).
+
+    //
+
+    // So: cost every scene up front, track each block's running total, and only
+
+    // commit a swap that keeps both blocks inside the ceiling.
+
+    QVector<int> compSize(scenes.size(), 0);
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        QByteArray c;
+
+        if (scenes[i].decompressed.size() == SCENE_SIZE) {
+
+            c = gzipCompress(scenes[i].decompressed);
+
+            if (c.isEmpty()) {
+
+                dbg << "ERROR: cannot compress scene " << i
+
+                    << " while costing the size budget\n";
+
+                return false;
+
+            }
+
+        } else {
+
+            c = scenes[i].compressed;
+
+        }
+
+        const int n = c.size();
+
+        compSize[i] = n + ((4 - (n % 4)) % 4);   // 4-byte aligned, as packed
+
+    }
+
+    QMap<int, int> blockUsed;
+
+    for (int i = 0; i < scenes.size(); ++i) {
+
+        const int b = scenes[i].blockIndex;
+
+        blockUsed[b] = blockUsed.value(b, BLOCK_HEADER_SIZE) + compSize[i];
+
+    }
+
+    for (auto it = blockUsed.constBegin(); it != blockUsed.constEnd(); ++it) {
+
+        if (it.value() > BLOCK_SIZE) {
+
+            dbg << "ERROR: block " << it.key() << " is already " << it.value()
+
+                << " / " << BLOCK_SIZE << " bytes BEFORE shuffling - refusing, "
+
+                   "as there is no valid arrangement to preserve.\n";
+
+            return false;
+
+        }
+
+    }
+
+    {
+
+        int fullest = 0, fullestBlock = -1;
+
+        for (auto it = blockUsed.constBegin(); it != blockUsed.constEnd(); ++it)
+
+            if (it.value() > fullest) { fullest = it.value(); fullestBlock = it.key(); }
+
+        dbg << "Size budget OK: fullest block is " << fullestBlock << " at "
+
+            << fullest << " / " << BLOCK_SIZE << "\n\n";
+
+    }
+
+    // Which scene's data currently sits at each index, so the log reports real
+
+    // displacement rather than the number of accepted swaps.
+
+    QVector<int> srcOf(scenes.size());
+
+    for (int i = 0; i < scenes.size(); ++i) srcOf[i] = i;
+
+    // Swap attempts per scene in a tier. 40 reaches ~94% displacement on the
+
+    // shipped file; past that the curve is flat and it only burns RNG.
+
+    const int kSwapRoundsPerScene = 40;
+
     // ── Shuffle within each tier ──
 
     int maxTier = includeBosses ? 4 : 3;
@@ -733,77 +867,111 @@ bool EnemyRandomizer::randomizeEncounters()
 
 
 
-        // Fisher-Yates shuffle of the decompressed data among these indices
+        // Random pairwise swaps, each committed only if it still fits.
 
-        // Save a copy of all decompressed data for the tier
+        //
 
-        QVector<QByteArray> origData;
+        // NOT a Fisher-Yates permutation: that decides the whole arrangement
 
-        for (int idx : indices)
+        // before checking anything, so a single impossible pairing invalidates
 
-            origData.append(scenes[idx].decompressed);
+        // the result and there is nothing to do but throw it away. Swapping one
 
+        // pair at a time keeps the invariant true at every step, so whatever
 
+        // the loop has done so far is always a valid arrangement.
 
-        // Shuffle the index mapping
+        //
 
-        QVector<int> shuffled(indices.size());
+        // Two cases need no check and are taken for free:
 
-        for (int i = 0; i < shuffled.size(); ++i) shuffled[i] = i;
+        //   - both scenes in the SAME block: that block's total cannot change
 
-        for (int i = shuffled.size() - 1; i > 0; --i) {
+        //   - equal compressed size: no block total moves
 
-            std::uniform_int_distribution<int> dist(0, i);
+        // Those are about a tenth of accepted swaps on the shipped file.
 
-            int j = dist(m_rng);
+        std::uniform_int_distribution<int> pick(0, indices.size() - 1);
 
-            std::swap(shuffled[i], shuffled[j]);
+        int attempts = 0, accepted = 0, freebies = 0;
+
+        const int rounds = indices.size() * kSwapRoundsPerScene;
+
+        for (int r = 0; r < rounds; ++r) {
+
+            const int a = pick(m_rng), b2 = pick(m_rng);
+
+            if (a == b2) continue;
+
+            const int i = indices[a], j = indices[b2];
+
+            ++attempts;
+
+            const int bi = scenes[i].blockIndex, bj = scenes[j].blockIndex;
+
+            const int si = compSize[i],          sj = compSize[j];
+
+            const bool freeSwap = (bi == bj) || (si == sj);
+
+            if (!freeSwap) {
+
+                if (blockUsed[bi] - si + sj > BLOCK_SIZE) continue;
+
+                if (blockUsed[bj] - sj + si > BLOCK_SIZE) continue;
+
+                blockUsed[bi] += sj - si;
+
+                blockUsed[bj] += si - sj;
+
+            } else {
+
+                ++freebies;
+
+            }
+
+            scenes[i].decompressed.swap(scenes[j].decompressed);
+
+            std::swap(compSize[i], compSize[j]);
+
+            std::swap(srcOf[i],    srcOf[j]);
+
+            ++accepted;
 
         }
-
-
-
-        // Apply the shuffle
 
         int swaps = 0;
 
-        for (int i = 0; i < indices.size(); ++i) {
+        for (int idx : indices)
 
-            scenes[indices[i]].decompressed = origData[shuffled[i]];
+            if (srcOf[idx] != idx) ++swaps;
 
-            if (shuffled[i] != i) ++swaps;
+        dbg << "Tier " << t << ": " << attempts << " attempts, " << accepted
 
-        }
+            << " accepted (" << freebies << " needed no budget check), "
+
+            << swaps << " of " << indices.size() << " scenes displaced\n";
 
         totalSwaps += swaps;
 
+        // Log the first few moves, naming what now lives there.
 
+        int shown = 0;
 
-        dbg << "Tier " << t << ": " << indices.size() << " scenes, "
+        for (int idx : indices) {
 
-            << swaps << " swapped\n";
+            if (srcOf[idx] == idx || shown >= 5) continue;
 
+            QByteArray nameRaw = scenes[idx].decompressed.mid(
 
+                ENEMY_DATA_BASE + ENM_NAME, 32);
 
-        // Log first few swaps
+            QString name = FF7Text::toPC(nameRaw);
 
-        for (int i = 0; i < qMin(5, indices.size()); ++i) {
+            dbg << "  Scene " << idx << " <- was scene " << srcOf[idx]
 
-            if (shuffled[i] != i) {
+                << " (\"" << name << "\")\n";
 
-                // Read enemy name from newly assigned data
-
-                QByteArray nameRaw = scenes[indices[i]].decompressed.mid(
-
-                    ENEMY_DATA_BASE + ENM_NAME, 32);
-
-                QString name = FF7Text::toPC(nameRaw);
-
-                dbg << "  Scene " << indices[i] << " <- was scene "
-
-                    << indices[shuffled[i]] << " (\"" << name << "\")\n";
-
-            }
+            ++shown;
 
         }
 
@@ -1113,31 +1281,43 @@ QByteArray EnemyRandomizer::rebuildSceneBin(const QVector<SceneEntry>& scenes,
 
 
 
-            // Overflow check
+            // Overflow is now a HARD FAILURE, not something to work around.
+
+            //
+
+            // The shuffle holds a per-block size budget, so reaching here means
+
+            // that budget disagrees with what was actually produced, and the
+
+            // only safe thing is to emit nothing. The two old recoveries were
+
+            // both worse than failing:
+
+            //   - falling back to scenes[si].compressed writes the slot's
+
+            //     ORIGINAL scene, not the shuffled one, so one scene's data
+
+            //     appears twice and another's disappears - no longer a
+
+            //     permutation, and the player silently loses an encounter.
+
+            //   - skipping the slot left the pre-filled 0xFFFFFFFF in its header
+
+            //     entry, which reads as an END MARKER in the middle of the
+
+            //     block and truncates its scene list.
 
             if (dataOffset + comp.size() > BLOCK_SIZE) {
 
-                log << "  WARNING: block " << b << " overflow for scene " << si << "\n";
+                log << "  ERROR: block " << b << " overflowed at scene " << si
 
-                comp = scenes[si].compressed;
+                    << " (" << dataOffset << " + " << comp.size() << " > "
 
-                while (comp.size() % 4 != 0)
+                    << BLOCK_SIZE << "). The size budget should have prevented "
 
-                    comp.append(static_cast<char>(0xFF));
+                       "this; refusing to write a corrupt scene.bin.\n";
 
-                // Double-check: if STILL doesn't fit, skip
-
-                if (dataOffset + comp.size() > BLOCK_SIZE) {
-
-                    log << "  ERROR: block " << b << " scene " << si
-
-                        << " cannot fit even with original data\n";
-
-                    ++slot;
-
-                    continue;
-
-                }
+                return QByteArray();
 
             }
 

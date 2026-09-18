@@ -17,16 +17,34 @@ class Randomizer;
 //   - Each pointer references a gzip-compressed scene
 //   - 256 total scenes, each decompresses to 7808 bytes
 //
-// Decompressed scene (7808 bytes):
-//   0x0000  Battle Setup   (4 × 20 = 80 bytes)
-//   0x0050  Camera Data    (4 × 48 = 192 bytes)
-//   0x0110  Formations     (4 × 96 = 384 bytes)
-//   0x0290  Enemy 1        (184 bytes)
-//   0x0348  Enemy 2        (184 bytes)
-//   0x0400  Enemy 3        (184 bytes)
-//   0x04B8  Attack Data    (32 × 28 = 896 bytes)
-//   0x0838  Attack Names   (32 × 32 = 1024 bytes)
-//   0x0C38  AI Data        (variable, to end)
+// Decompressed scene (7808 bytes). VERIFIED 2026-09-18 against FF7 Scarlet's
+// SceneEditor and by re-emitting all 256 scenes byte-for-byte from these parts
+// (scratchpad/scene_model.py). The earlier version of this banner was 8 bytes
+// low from the enemy records down (it omitted the model-id array at the top),
+// left out the 64-byte attack ID table entirely, and called the tail one
+// undifferentiated "AI Data" when it is four separate things:
+//   0x0000  Enemy model IDs   (3 × 2 = 6 bytes)
+//   0x0006  padding           (2 bytes)
+//   0x0008  Battle Setup      (4 × 20 = 80 bytes)
+//   0x0058  Camera Data       (4 × 48 = 192 bytes)
+//   0x0118  Formations        (4 × 96 = 384 bytes; 6 placements × 16 each)
+//   0x0298  Enemy 1           (184 bytes = 32 name + 152 data)
+//   0x0350  Enemy 2           (184 bytes)
+//   0x0408  Enemy 3           (184 bytes)
+//   0x04C0  Attack Data       (32 × 28 = 896 bytes)
+//   0x0840  Attack IDs        (32 × 2 = 64 bytes)
+//   0x0880  Attack Names      (32 × 32 = 1024 bytes)
+//   0x0C80  Formation AI offs (4 × 2 = 8 bytes, relative to 0x0C80)
+//   0x0C88  Formation AI      (504 bytes)
+//   0x0E80  Enemy AI offsets  (3 × 2 = 6 bytes, relative to 0x0E80)
+//   0x0E86  Enemy AI          (4090 bytes, to 0x1E80 = 7808)
+//
+// An enemy names its attacks by GLOBAL attack id, not by a slot in this scene's
+// table (all 2502 ids in the shipped file resolve), and each AI container is
+// self-contained - it opens with its own offset table and nothing inside the
+// bytecode points outside it. Both facts matter: they are why an enemy can be
+// moved to another scene by copying its record and its AI and rewriting one
+// u16 offset, with no bytecode fixups.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class EnemyRandomizer

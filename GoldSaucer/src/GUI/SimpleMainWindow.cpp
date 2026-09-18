@@ -2278,6 +2278,16 @@ void SimpleMainWindow::importArchipelagoJSON()
                     if (features.size() >= 7) {
                         m_config.setFeatureEnabled(Config::BossProtection, features[6].toBool(false));
                     }
+                    // features[7] = the encounter shuffle. It was never decoded,
+                    // so the seed's randomize_encounters could not reach Gold
+                    // Saucer at all -- and because Config defaults EVERY feature
+                    // to true, the shuffle then ran on every run regardless of
+                    // what the player asked for. A seed older than the option
+                    // cannot have requested it, so absence means OFF rather than
+                    // whatever randomizer_config.json happens to hold.
+                    m_config.setFeatureEnabled(
+                        Config::EnemyEncounterRandomization,
+                        features.size() >= 8 ? features[7].toBool(false) : false);
                     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, true);
                     m_config.setFeatureEnabled(Config::TextReplacement, true);
                     appendConsoleMessage("Feature flags synced from Archipelago JSON");

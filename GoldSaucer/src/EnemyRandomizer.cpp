@@ -1,4 +1,6 @@
 #include "EnemyRandomizer.h"
+
+#include "SceneComposer.h"
 #include "EnemyProtectedFormations.h"
 
 #include "Randomizer.h"
@@ -1166,6 +1168,182 @@ bool EnemyRandomizer::randomizeEncounters()
 }
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// composeEncounters — rebuild each battle's CAST from enemies drawn game-wide
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//
+
+// The sibling of randomizeEncounters, and the opposite trade. The shuffle moves
+
+// whole scenes between slots: every fight it produces is one FF7 already ships,
+
+// but the fight that answers to a formation id changes. Composition leaves every
+
+// scene where it is and swaps the three enemies inside it, so formation ids never
+
+// move - a script that runs BATTLE 468 still starts the fight the chest
+
+// advertises - at the cost of producing casts that have never existed.
+
+//
+
+// See SceneComposer.h for what travels with an enemy and why multi-part sets
+
+// cannot be separated.
+
+bool EnemyRandomizer::composeEncounters()
+
+{
+
+    QString outputPath = m_parent->getOutputPath();
+
+    QString logPath = outputPath + "/encounter_composition_debug.txt";
+
+    QFile logFile(logPath);
+
+    bool logOk = logFile.open(QIODevice::WriteOnly | QIODevice::Text);
+
+    QTextStream dbg(&logFile);
+
+    Q_UNUSED(logOk);
+
+    dbg << "=== Encounter Composition (scene.bin) ===\n\n";
+
+    QString scenePath = QDir(outputPath).filePath("data/lang-en/battle/scene.bin");
+
+    QFile sceneFile(scenePath);
+
+    if (!sceneFile.open(QIODevice::ReadOnly)) {
+
+        scenePath = QDir(m_parent->getFF7Path()).filePath("data/lang-en/battle/scene.bin");
+
+        sceneFile.setFileName(scenePath);
+
+        if (!sceneFile.open(QIODevice::ReadOnly)) {
+
+            dbg << "ERROR: Cannot open scene.bin\n";
+
+            return false;
+
+        }
+
+    }
+
+    QByteArray sceneBin = sceneFile.readAll();
+
+    sceneFile.close();
+
+    dbg << "Loaded scene.bin: " << sceneBin.size() << " bytes\n";
+
+    QVector<SceneEntry> scenes;
+
+    if (!extractScenes(sceneBin, scenes, dbg)) {
+
+        dbg << "ERROR: extractScenes failed\n";
+
+        return false;
+
+    }
+
+    // Held out for exactly the reason the shuffle holds them: the client
+
+    // identifies boss kills by formation id. Composition does not move formation
+
+    // ids, so this is belt and braces rather than strictly required - but a
+
+    // scripted fight whose cast is replaced is still a scripted fight the script
+
+    // did not plan for, so they stay vanilla until that has been played.
+
+    QSet<int> held;
+
+    for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i)
+
+        held.insert(EnemyProtectedFormations::kProtected[i] / 4);
+
+    dbg << "Protected: " << EnemyProtectedFormations::kProtectedCount
+
+        << " formations -> " << held.size() << " scenes held back\n\n";
+
+    QVector<QByteArray> buf;
+
+    QVector<int> blockOf;
+
+    for (const SceneEntry& e : scenes) {
+
+        buf.append(e.decompressed);
+
+        blockOf.append(e.blockIndex);
+
+    }
+
+    // The size the REBUILD will charge for this scene, including the 4-byte
+
+    // alignment it pads to. Measuring the raw gzip length instead would quietly
+
+    // under-count by up to 3 bytes per scene and hand back blocks that overflow.
+
+    SceneComposer composer(m_rng, [](const QByteArray& scene) {
+
+        const int n = gzipCompress(scene).size();
+
+        return n + ((4 - (n % 4)) % 4);
+
+    });
+
+    SceneComposer::Result res;
+
+    if (!composer.compose(buf, blockOf, held, dbg, &res)) {
+
+        dbg << "ERROR: composition failed\n";
+
+        return false;
+
+    }
+
+    for (int i = 0; i < scenes.size() && i < buf.size(); ++i)
+
+        scenes[i].decompressed = buf[i];
+
+    QByteArray newSceneBin = rebuildSceneBin(scenes, dbg);
+
+    if (newSceneBin.isEmpty()) {
+
+        dbg << "ERROR: rebuildSceneBin failed\n";
+
+        return false;
+
+    }
+
+    QString dstScene = QDir(outputPath).filePath("data/lang-en/battle/scene.bin");
+
+    QDir().mkpath(QFileInfo(dstScene).path());
+
+    QFile outFile(dstScene);
+
+    if (!outFile.open(QIODevice::WriteOnly)) {
+
+        dbg << "ERROR: Cannot write " << dstScene << "\n";
+
+        return false;
+
+    }
+
+    outFile.write(newSceneBin);
+
+    outFile.close();
+
+    dbg << "SUCCESS: Written " << newSceneBin.size() << " bytes to " << dstScene << "\n";
+
+    qDebug() << "Encounter composition complete." << res.composed << "casts rebuilt.";
+
+    return true;
+
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 

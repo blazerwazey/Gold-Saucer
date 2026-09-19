@@ -58,6 +58,7 @@ add_executable(GoldSaucer_GUI WIN32
     src/GsLog.cpp
     src/Randomizer.cpp
     src/EnemyRandomizer.cpp
+    src/SceneComposer.cpp
     src/EnemyDatabase.cpp
     src/ShopRandomizer.cpp
     src/KernelBinParser.cpp

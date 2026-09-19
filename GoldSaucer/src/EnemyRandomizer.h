@@ -57,6 +57,12 @@ public:
     // since the Initial Commit.
     bool randomizeEncounters();
 
+    // The sibling pass: leave every scene where it is and rebuild the three
+    // enemies inside it from donors drawn game-wide. Formation ids never move,
+    // so this is the variant that can touch a scripted fight without moving the
+    // fight a check is watching. See SceneComposer.h.
+    bool composeEncounters();
+
 private:
     Randomizer*    m_parent;
     std::mt19937&  m_rng;

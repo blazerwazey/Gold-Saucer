@@ -49,6 +49,13 @@ public:
     // Enemy encounter settings
     void setEncounterBossesIncluded(bool enabled);
     bool getEncounterBossesIncluded() const;
+
+    // The composer: rebuild each fight's cast from enemies drawn game-wide,
+    // instead of moving whole fights around. Gold Saucer's own option - it is
+    // deliberately NOT a .apff7 feature, because composition never moves a
+    // formation id, so the multiworld cannot tell the difference.
+    void setEncounterComposition(bool enabled);
+    bool getEncounterComposition() const;
     
     // Shop randomization settings
     void setShopItemPoolSize(int size);
@@ -105,6 +112,7 @@ private:
     
     // Enemy settings
     bool m_encounterBossesIncluded;
+    bool m_encounterComposition;
     
     // Shop settings
     int m_shopItemPoolSize;

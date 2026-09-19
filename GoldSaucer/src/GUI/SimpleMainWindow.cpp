@@ -18,6 +18,7 @@
 #include <QDebug>
 #include <QRandomGenerator>
 #include <QTextEdit>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -638,6 +639,23 @@ QWidget* SimpleMainWindow::buildStepOptions()
     sub->setText("Most of this is set by your seed and has to stay that way. Shop stock is "
                  "yours — it only changes what sits around your checks.");
 
+    // Step 3 is the only page with enough in it to overflow, and it does: five
+    // cards, the seed-section header and the footnote exceed the window height,
+    // at which point Qt compresses the cards and their text clips rather than
+    // the page scrolling. Everything below goes into a scrolled column.
+    QWidget* scrollInner = new QWidget(page);
+    QVBoxLayout* cards = new QVBoxLayout(scrollInner);
+    cards->setContentsMargins(0, 0, 0, 0);
+    cards->setSpacing(10);
+    QScrollArea* scroller = new QScrollArea(page);
+    scroller->setWidget(scrollInner);
+    scroller->setWidgetResizable(true);
+    scroller->setFrameShape(QFrame::NoFrame);
+    scroller->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroller->setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget "
+                            "{ background: transparent; }");
+    body->addWidget(scroller, 1);
+
     // --- the one control the multiworld has no stake in ----------------------
     QWidget* shopCard = new QWidget(page);
     shopCard->setObjectName("cardGold");
@@ -660,7 +678,36 @@ QWidget* SimpleMainWindow::buildStepOptions()
                              "no shop checks at all, whatever this is set to.", "faint", shc);
     shcl->addWidget(m_shopYamlNote);
     shl->addWidget(shc, 1);
-    body->addWidget(shopCard);
+    cards->addWidget(shopCard);
+
+    // Also the player's, for the same reason the shop box is: composition never
+    // moves a formation id, so every check and the goal land exactly where they
+    // would have. No .apff7 field sets this one at all.
+    QWidget* compCard = new QWidget(page);
+    compCard->setObjectName("cardGold");
+    QHBoxLayout* cml = new QHBoxLayout(compCard);
+    cml->setContentsMargins(16, 14, 16, 14);
+    cml->setSpacing(12);
+    m_compositionCheckBox = new QCheckBox(compCard);
+    cml->addWidget(m_compositionCheckBox, 0, Qt::AlignTop);
+    QWidget* cmc = new QWidget(compCard);
+    QVBoxLayout* cmcl = new QVBoxLayout(cmc);
+    cmcl->setContentsMargins(0, 0, 0, 0);
+    cmcl->setSpacing(3);
+    QLabel* compTitle = mkLabel("Mixed enemy casts", nullptr, cmc);
+    compTitle->setStyleSheet("font-size: 14px; font-weight: 600;");
+    cmcl->addWidget(compTitle);
+    cmcl->addWidget(mkLabel("Rebuild who is in each fight from monsters drawn across the "
+                            "whole game, so a battle can hold three that never met — a "
+                            "Tonberry, a Materia Keeper and a wolf. Where each fight "
+                            "happens never changes, only who is in it.", "muted", cmc));
+    cmcl->addWidget(mkLabel("Replaces the encounter shuffle below — the two rearrange the "
+                            "same data and cannot both run. Multi-part bosses keep their "
+                            "own limbs.", "faint", cmc));
+    cmcl->addWidget(mkLabel("Experimental — this has never been played through.",
+                            "faint", cmc));
+    cml->addWidget(cmc, 1);
+    cards->addWidget(compCard);
 
     // --- everything the seed dictates ----------------------------------------
     m_lockedSectionHeader = new QWidget(page);
@@ -670,7 +717,7 @@ QWidget* SimpleMainWindow::buildStepOptions()
     lhl->addWidget(mkLabel("SET BY YOUR SEED", "eyebrow", m_lockedSectionHeader));
     lhl->addWidget(mkLabel("these change what the multiworld expects, so they follow your YAML",
                            "fainter", m_lockedSectionHeader), 1);
-    body->addWidget(m_lockedSectionHeader);
+    cards->addWidget(m_lockedSectionHeader);
 
     QWidget* fieldCard = new QWidget(page);
     fieldCard->setObjectName("card");
@@ -689,7 +736,7 @@ QWidget* SimpleMainWindow::buildStepOptions()
     fcl->addWidget(mkLabel("Chests and field rewards. This is where most of your checks live.",
                            "muted", fc));
     fl->addWidget(fc, 1);
-    body->addWidget(fieldCard);
+    cards->addWidget(fieldCard);
 
     QWidget* eqCard = new QWidget(page);
     eqCard->setObjectName("card");
@@ -721,7 +768,7 @@ QWidget* SimpleMainWindow::buildStepOptions()
     trl->addStretch(1);
     ecl->addWidget(tierRow);
     el->addWidget(ec, 1);
-    body->addWidget(eqCard);
+    cards->addWidget(eqCard);
 
     // ── Enemy encounters ──────────────────────────────────────────────────
     // Deliberately NOT in lockedWidgets(): shuffling which monsters appear
@@ -780,13 +827,13 @@ QWidget* SimpleMainWindow::buildStepOptions()
     bossRow->setEnabled(m_enemyCheckBox->isChecked());
 
     enl->addWidget(enc, 1);
-    body->addWidget(enemyCard);
+    cards->addWidget(enemyCard);
 
-    body->addStretch(1);
+    cards->addStretch(1);
     m_lockedFootnote = mkLabel("Locked settings come from the .apff7 and have to match the "
                                "multiworld. Randomizing without a seed makes all of them yours.",
                                "faint", page);
-    body->addWidget(m_lockedFootnote);
+    cards->addWidget(m_lockedFootnote);
 
     QPushButton* back = new QPushButton("Back", page);
     back->setObjectName("ghost");
@@ -1185,8 +1232,9 @@ void SimpleMainWindow::refreshRail()
     int on = (m_shopCheckBox && m_shopCheckBox->isChecked() ? 1 : 0)
            + (m_fieldCheckBox && m_fieldCheckBox->isChecked() ? 1 : 0)
            + (m_equipmentCheckBox && m_equipmentCheckBox->isChecked() ? 1 : 0)
-           + (m_enemyCheckBox && m_enemyCheckBox->isChecked() ? 1 : 0);
-    setSub(m_railSub[StepOptions], QString("%1 of 4 on").arg(on));
+           + (m_enemyCheckBox && m_enemyCheckBox->isChecked() ? 1 : 0)
+           + (m_compositionCheckBox && m_compositionCheckBox->isChecked() ? 1 : 0);
+    setSub(m_railSub[StepOptions], QString("%1 of 5 on").arg(on));
     setSub(m_railSub[StepOutput], m_outputFolderEdit && !m_outputFolderEdit->text().isEmpty()
                ? QFileInfo(m_outputFolderEdit->text()).fileName()
                : QString());
@@ -2008,6 +2056,8 @@ void SimpleMainWindow::updateConfig()
                                m_enemyCheckBox && m_enemyCheckBox->isChecked());
     m_config.setEncounterBossesIncluded(m_encounterBossCheckBox
                                         && m_encounterBossCheckBox->isChecked());
+    m_config.setEncounterComposition(m_compositionCheckBox
+                                     && m_compositionCheckBox->isChecked());
 
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
     m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
@@ -2118,6 +2168,8 @@ void SimpleMainWindow::applyConfigToUI()
     m_equipmentCheckBox->setChecked(m_config.isFeatureEnabled(Config::StartingEquipmentRandomization));
     if (m_enemyCheckBox)
         m_enemyCheckBox->setChecked(m_config.isFeatureEnabled(Config::EnemyEncounterRandomization));
+    if (m_compositionCheckBox)
+        m_compositionCheckBox->setChecked(m_config.getEncounterComposition());
     if (m_encounterBossCheckBox) {
         m_encounterBossCheckBox->setChecked(m_config.getEncounterBossesIncluded());
         // toggled() only fires on a CHANGE, so the row's enabled state has to be

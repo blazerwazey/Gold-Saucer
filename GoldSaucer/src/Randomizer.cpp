@@ -123,9 +123,21 @@ bool Randomizer::createBackup(const QString& filePath)
     return originalFile.copy(backupPath);
 }
 
-// Shuffles whole scenes between slots of similar difficulty. Protected
-// formations (see EnemyProtectedFormations.h) are held out, because the client
-// detects boss kills by formation id.
+// Two passes live behind this, and only one may run.
+//
+// The SHUFFLE moves whole scenes between slots of similar difficulty and then
+// rescales them to where they landed. Every fight it makes is one FF7 ships,
+// but the fight answering to a formation id changes, so protected formations
+// (EnemyProtectedFormations.h) are held out - the client detects boss kills by
+// formation id.
+//
+// The COMPOSER leaves every scene where it is and rebuilds the three enemies
+// inside it from donors drawn game-wide. Formation ids never move, so nothing
+// the client watches is disturbed; the cost is casts that have never existed.
+//
+// They are mutually exclusive in substance, not by decree: the composer would
+// overwrite the shuffle's placement and rescaling wholesale. So the composer
+// replaces it when the player asks for it.
 bool Randomizer::randomizeEnemyEncounters()
 {
     if (!validateFF7Installation()) {
@@ -137,6 +149,10 @@ bool Randomizer::randomizeEnemyEncounters()
         return false;
     }
     
+    if (m_config.getEncounterComposition()) {
+        qDebug() << "Enemy encounters: composing casts (replaces the shuffle)";
+        return m_enemyRandomizer->composeEncounters();
+    }
     return m_enemyRandomizer->randomizeEncounters();
 }
 

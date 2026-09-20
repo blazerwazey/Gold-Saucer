@@ -111,6 +111,46 @@ bool FieldPickupRandomizer_ff7tk::fail(const QString& reason)
     return false;
 }
 
+// Reward announcements that no pickup opcode will ever claim.
+//
+// A Kalm Traveler trade is detected by its own BITON - the client watches those
+// bits - and the location's item_text is a TRIGGER LABEL ("Show Guidebook"),
+// not the name of anything granted, so the generic pass cannot reach it. The
+// grants are suppressed elsewhere (KALM_MATERIA, GOLD_CHOCO) but the messages
+// stay, announcing an item the player no longer receives.
+//
+// Needles are whole phrases. "Underwater" alone names THREE messages in
+// elmin4_2 - the offer, the NPC's "it's yours" line and the announcement - and
+// rewriting an NPC's dialogue is the failure this pass exists to avoid.
+//
+// The Earth Harp's three are ONE trade: bits 1-3 of the same byte, all set at
+// once, so the three messages each name a different item. Mapped by SCRIPT
+// ORDER, the only non-arbitrary bijection - the grants run Command (@3208),
+// Summon (@3358), Magic (@3511), whose messages are text 16, 17 and 15.
+struct TradeRewardText {
+    const char* field;
+    const char* apKey;    // location item_text, lowercased
+    const char* needle;   // names exactly one message in that field
+};
+static const TradeRewardText kTradeRewards[] = {
+    { "elmin4_2", "show guidebook",    "Received Underwater"     },
+    { "elmin4_2", "show desert rose",  "It's a Chocobo"          },
+    { "elmin4_2", "show earth harp 1", "Received Master Command" },
+    { "elmin4_2", "show earth harp 2", "Received Master Summon"  },
+    { "elmin4_2", "show earth harp 3", "Received Master Magic"   },
+};
+
+// Whether a field has announcements to rewrite even when NO pickup opcode was
+// converted in it. elmin4_2 is exactly that case, and assuming otherwise is why
+// the first attempt at this silently did nothing.
+static bool fieldHasTradeText(const QString& fieldName)
+{
+    for (const auto& t : kTradeRewards)
+        if (fieldName.compare(QLatin1String(t.field), Qt::CaseInsensitive) == 0)
+            return true;
+    return false;
+}
+
 bool FieldPickupRandomizer_ff7tk::randomize()
 {
     qDebug() << "FieldPickupRandomizer_ff7tk::randomize() called";
@@ -2379,12 +2419,17 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
 
     // --- update dialog texts to reflect randomized pickups ------------------
     // Sort by offset so the closest-MESSAGE search assigns correctly
-    if (!modifications.isEmpty()) {
+    // A field with trade announcements has text to rewrite even when no pickup
+    // opcode was converted in it - elmin4_2's four SMTRA candidates are all
+    // NOPped by KALM_MATERIA, so it arrives here with an empty list.
+    if (!modifications.isEmpty() || fieldHasTradeText(fieldName)) {
         std::sort(modifications.begin(), modifications.end(),
                   [](const OpcodeModification& a, const OpcodeModification& b) {
                       return a.opcodeOffset < b.opcodeOffset;
                   });
-        updateFieldTexts(decompressed, modifications, fieldName, debugStream);
+        // Count it, so a field whose ONLY change is its text still recompresses.
+        if (updateFieldTexts(decompressed, modifications, fieldName, debugStream))
+            totalMods++;
     }
 
     // --- recompress if anything changed -------------------------------------
@@ -6428,7 +6473,9 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     const QString& fieldName,
     QTextStream& debugStream)
 {
-    if (modifications.isEmpty()) return false;
+    // NOT just "no modifications": a field can have text to rewrite without a
+    // single converted opcode. See fieldHasTradeText.
+    if (modifications.isEmpty() && !fieldHasTradeText(fieldName)) return false;
 
     const int fileSize = decompressed.size();
     const int FIELD_HEADER_SIZE = 6 + 9 * 4; // 42 bytes
@@ -6601,23 +6648,6 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     // this pass refuses to risk.
     QVector<OpcodeModification> mods = modifications;
     {
-        static const struct {
-            const char* field;
-            const char* apKey;    // location item_text, lowercased
-            const char* needle;   // names exactly one message in that field
-        } kTradeRewards[] = {
-            { "elmin4_2", "show guidebook",   "Received Underwater" },
-            { "elmin4_2", "show desert rose", "It's a Chocobo"      },
-            // One trade, three checks: bits 1-3 of the same byte, all set when
-            // the Earth Harp is shown. Mapped by SCRIPT ORDER, which is the
-            // only non-arbitrary bijection available - the grants run
-            // Command (@3208), Summon (@3358), Magic (@3511), and their
-            // messages are text 16, 17 and 15 respectively. Reading the text
-            // table by id instead would have swapped two of the three.
-            { "elmin4_2", "show earth harp 1", "Received Master Command" },
-            { "elmin4_2", "show earth harp 2", "Received Master Summon"  },
-            { "elmin4_2", "show earth harp 3", "Received Master Magic"   },
-        };
         for (const auto& t : kTradeRewards) {
             if (fieldName.compare(QLatin1String(t.field), Qt::CaseInsensitive) != 0)
                 continue;

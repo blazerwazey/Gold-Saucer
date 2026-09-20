@@ -6559,6 +6559,21 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             const QString stem = squash(wanted.left(bracket));
             if (stem.size() >= 6 && a.contains(stem)) return true;
         }
+        // A few items are printed under a different NAME, not a different
+        // spelling, and no amount of squashing bridges a reordering: the item
+        // table says "Basement Key" while sinin2_1 says `Received Key Item
+        // "Key to the Basement"!`. Listed explicitly rather than matched more
+        // loosely - loosening is how an NPC's dialogue gets overwritten, which
+        // is the exact failure this pass already refuses to risk.
+        static const struct { const char* table; const char* printed; }
+        kAlsoKnownAs[] = {
+            { "Basement Key", "Key to the Basement" },   // sinin2_1
+        };
+        for (const auto& alias : kAlsoKnownAs) {
+            if (b == squash(QString::fromLatin1(alias.table))
+                && a.contains(squash(QString::fromLatin1(alias.printed))))
+                return true;
+        }
         return false;
     };
 

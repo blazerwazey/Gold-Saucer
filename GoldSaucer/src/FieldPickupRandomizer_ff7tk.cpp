@@ -2384,7 +2384,7 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
                   [](const OpcodeModification& a, const OpcodeModification& b) {
                       return a.opcodeOffset < b.opcodeOffset;
                   });
-        updateFieldTexts(decompressed, modifications, debugStream);
+        updateFieldTexts(decompressed, modifications, fieldName, debugStream);
     }
 
     // --- recompress if anything changed -------------------------------------
@@ -6425,6 +6425,7 @@ void FieldPickupRandomizer_ff7tk::writeArchipelagoSidecar(
 bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
     QByteArray& decompressed,
     const QVector<OpcodeModification>& modifications,
+    const QString& fieldName,
     QTextStream& debugStream)
 {
     if (modifications.isEmpty()) return false;
@@ -6577,7 +6578,76 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         return false;
     };
 
-    for (const auto& mod : modifications) {
+    // ── Kalm Traveler trades ─────────────────────────────────────────────
+    // These are AP checks the field pass cannot see: a trade is detected by its
+    // own BITON, and the location's item_text is a TRIGGER LABEL ("Show
+    // Guidebook"), not the name of anything granted. The generic pass keys on
+    // the granted item's name, so nothing connects them and the reward
+    // announcement keeps its vanilla wording even though the grant itself is
+    // suppressed (KALM_MATERIA NOPs the SMTRA, GOLD_CHOCO jumps the chocobo
+    // block) and the player receives an Archipelago item instead.
+    //
+    // Each entry retargets ONE message. No opcode changes; the mod exists only
+    // to carry text, and the machinery below finds the message by name as usual.
+    //
+    // The needles are deliberately whole phrases. "Underwater" alone names
+    // THREE messages here - the offer, the NPC's "it's yours" line and the
+    // announcement - and rewriting an NPC's dialogue is the precise failure
+    // this pass refuses to risk.
+    QVector<OpcodeModification> mods = modifications;
+    {
+        static const struct {
+            const char* field;
+            const char* apKey;    // location item_text, lowercased
+            const char* needle;   // names exactly one message in that field
+        } kTradeRewards[] = {
+            { "elmin4_2", "show guidebook",   "Received Underwater" },
+            { "elmin4_2", "show desert rose", "It's a Chocobo"      },
+        };
+        for (const auto& t : kTradeRewards) {
+            if (fieldName.compare(QLatin1String(t.field), Qt::CaseInsensitive) != 0)
+                continue;
+            const QString key = QString::fromLatin1(t.field).toLower()
+                              + QChar('|') + QString::fromLatin1(t.apKey);
+            auto it = m_apJsonLookup.find(key);
+            if (it == m_apJsonLookup.end() || it->isEmpty()) {
+                debugStream << "  TRADE_TEXT: no AP placement for " << key
+                            << " - left vanilla\n";
+                continue;
+            }
+            // Peek, never dequeue: this mod carries TEXT only. The coord's
+            // biton belongs to the trade flag the client watches, and claiming
+            // it here would take it from whatever else asks for it.
+            const ApBitonCoord& coord = it->head();
+            // Find the message so the mod can sit next to it. Anchoring 3 bytes
+            // past the MESSAGE puts it 3 back in the backward scan, which is
+            // well inside the 500-byte window and cannot be mistaken for a
+            // nearer candidate.
+            int msgOff = -1;
+            for (int pos = sec0DataStart; pos + 2 < scriptAbsEnd; ++pos) {
+                if (static_cast<quint8>(decompressed.at(pos)) != MESSAGE_OPCODE) continue;
+                if (!opcodeStarts.contains(pos)) continue;
+                const quint8 winID = static_cast<quint8>(decompressed.at(pos + 1));
+                const quint8 txtID = static_cast<quint8>(decompressed.at(pos + 2));
+                if (winID > 15 || txtID >= textCount) continue;
+                if (messageNames(pos, QString::fromLatin1(t.needle))) { msgOff = pos; break; }
+            }
+            if (msgOff < 0) {
+                debugStream << "  TRADE_TEXT: no message names \"" << t.needle
+                            << "\" in " << fieldName << " - left vanilla\n";
+                continue;
+            }
+            OpcodeModification tm(msgOff + 3, QString(), false);
+            tm.vanillaName  = QString::fromLatin1(t.needle);
+            tm.encodedText  = composeApPickupText(coord, debugStream,
+                                                  &tm.textLines, &tm.textCols);
+            mods.append(tm);
+            debugStream << "  TRADE_TEXT: " << t.apKey << " -> message @" << msgOff
+                        << " will announce the Archipelago item\n";
+        }
+    }
+
+    for (const auto& mod : mods) {
         int backOff = -1, fwdOff = -1;
         // Nearest naming candidate in EACH direction, kept apart so the closer
         // of the two can win. One combined "first named wins" let a backward

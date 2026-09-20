@@ -6603,6 +6603,15 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         } kTradeRewards[] = {
             { "elmin4_2", "show guidebook",   "Received Underwater" },
             { "elmin4_2", "show desert rose", "It's a Chocobo"      },
+            // One trade, three checks: bits 1-3 of the same byte, all set when
+            // the Earth Harp is shown. Mapped by SCRIPT ORDER, which is the
+            // only non-arbitrary bijection available - the grants run
+            // Command (@3208), Summon (@3358), Magic (@3511), and their
+            // messages are text 16, 17 and 15 respectively. Reading the text
+            // table by id instead would have swapped two of the three.
+            { "elmin4_2", "show earth harp 1", "Received Master Command" },
+            { "elmin4_2", "show earth harp 2", "Received Master Summon"  },
+            { "elmin4_2", "show earth harp 3", "Received Master Magic"   },
         };
         for (const auto& t : kTradeRewards) {
             if (fieldName.compare(QLatin1String(t.field), Qt::CaseInsensitive) != 0)

@@ -6621,6 +6621,11 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
             // Materia already") and 30 ("put the Materia away") are the failure
             // paths, so this one fires only on a real grant.
             { "Contain", "Received Materia from the Chocobo" },   // itown1b
+            // Mt. Nibel grants COUNTER ATTACK but announces it as
+            // `Received "Counter" Materia!`. The full phrase, not a bare
+            // "Counter": las3_2 announces Magic Counter and crcin_1 mentions
+            // counters in dialogue.
+            { "Counter Attack", "Received \"Counter\" Materia" },   // nvdun1
         };
         for (const auto& alias : kAlsoKnownAs) {
             if (b == squash(QString::fromLatin1(alias.table))

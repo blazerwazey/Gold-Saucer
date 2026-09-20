@@ -6569,6 +6569,11 @@ bool FieldPickupRandomizer_ff7tk::updateFieldTexts(
         static const struct { const char* table; const char* printed; }
         kAlsoKnownAs[] = {
             { "Basement Key", "Key to the Basement" },   // sinin2_1
+            // Mideel's white chocobo announces the grant without naming what it
+            // gave: `Received Materia from the Chocobo!`. Message 29 ("too much
+            // Materia already") and 30 ("put the Materia away") are the failure
+            // paths, so this one fires only on a real grant.
+            { "Contain", "Received Materia from the Chocobo" },   // itown1b
         };
         for (const auto& alias : kAlsoKnownAs) {
             if (b == squash(QString::fromLatin1(alias.table))

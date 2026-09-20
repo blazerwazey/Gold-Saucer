@@ -1,6 +1,8 @@
 #include "SceneComposer.h"
 
 #include <algorithm>
+#include <cstring>
+#include <cmath>
 #include <QStringList>
 
 SceneComposer::SceneComposer(std::mt19937& rng,
@@ -113,6 +115,75 @@ SceneComposer::Donor SceneComposer::makeDonor(const QVector<QByteArray>& scenes,
     return d;
 }
 
+double SceneComposer::sceneAvgHp(const QByteArray& scene)
+{
+    if (scene.size() != SCENE_SIZE) return 0.0;
+    double total = 0.0;
+    int n = 0;
+    for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
+        if (!enemyPresent(scene, e)) continue;
+        quint32 hp = 0;
+        memcpy(&hp, scene.constData() + ENEMY_BASE + e * ENEMY_RECORD + ENM_HP, 4);
+        if (hp == 0 || hp == 0xFFFFFFFFu) continue;
+        total += hp;
+        ++n;
+    }
+    return n ? total / n : 0.0;
+}
+
+// ── difficulty scaling ─────────────────────────────────────────────────────
+//
+// A composed scene keeps the PLACE's difficulty, not the arrivals'. The ratio is
+//     (average HP the slot originally had) / (average HP the new cast has)
+// and each stat moves by that ratio raised to its own exponent.
+//
+// The exponents are FITTED from the shipped scene.bin, not chosen: ordinary
+// least squares of log(stat) on log(HP) across all 615 enemies. FF7 carries
+// difficulty almost entirely in HP - a monster with 100x the HP has only about
+// 4.6x the Strength (100^0.34) and 27x the EXP - so scaling everything linearly
+// would turn a modest correction into a difficulty and economy break.
+//
+// Speed, Luck and Evade are the softest movers on purpose: the fit barely
+// supports them (Speed r=0.60, Luck r=0.33) and Evade is flat in vanilla, so it
+// borrows Luck's exponent rather than a measured one.
+void SceneComposer::scaleSceneStats(QByteArray& scene, double ratio) const
+{
+    struct StatScale { int offset; int width; double exponent; };
+    static const StatScale kStatScaling[] = {
+        { ENM_LEVEL, 1, 0.30 }, { ENM_SPEED, 1, 0.18 }, { ENM_LUCK,  1, 0.15 },
+        { ENM_EVADE, 1, 0.15 }, { ENM_STR,   1, 0.34 }, { ENM_DEF,   1, 0.34 },
+        { ENM_MAG,   1, 0.38 }, { ENM_MDEF,  1, 0.34 }, { ENM_MP,    2, 0.38 },
+        { ENM_HP,    4, 1.00 },   // the reference the ratio is built from
+        { ENM_EXP,   4, 0.69 }, { ENM_GIL,   4, 0.70 },
+    };
+    if (scene.size() != SCENE_SIZE) return;
+    if (!(ratio > 0.0) || qFuzzyCompare(ratio, 1.0)) return;
+
+    char* base = scene.data();
+    for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
+        if (!enemyPresent(scene, e)) continue;
+        const int off = ENEMY_BASE + e * ENEMY_RECORD;
+        for (const StatScale& st : kStatScaling) {
+            const int p = off + st.offset;
+            quint32 cur = 0;
+            if      (st.width == 1) cur = static_cast<quint8>(scene.at(p));
+            else if (st.width == 2) { quint16 v; memcpy(&v, base + p, 2); cur = v; }
+            else                    { quint32 v; memcpy(&v, base + p, 4); cur = v; }
+            // 0 means the designers left this stat empty; scaling invents one.
+            if (cur == 0) continue;
+            double scaled = static_cast<double>(cur) * std::pow(ratio, st.exponent);
+            const double cap = (st.width == 1) ? 255.0
+                             : (st.width == 2) ? 65535.0 : 4294967295.0;
+            if (scaled < 1.0) scaled = 1.0;   // never scale a stat out of existence
+            if (scaled > cap) scaled = cap;
+            const quint32 v32 = static_cast<quint32>(scaled + 0.5);
+            if      (st.width == 1) base[p] = static_cast<char>(static_cast<quint8>(v32));
+            else if (st.width == 2) { quint16 v = static_cast<quint16>(v32); memcpy(base + p, &v, 2); }
+            else                    { quint32 v = v32;                       memcpy(base + p, &v, 4); }
+        }
+    }
+}
+
 // ── which enemies must never be separated ──────────────────────────────────
 //
 // Derived from the player's own file rather than shipped as a table. For each
@@ -187,11 +258,13 @@ QHash<quint16, int> SceneComposer::derivePartSets(const QVector<QByteArray>& sce
 // ── the draw pool ──────────────────────────────────────────────────────────
 
 QVector<SceneComposer::Unit> SceneComposer::buildUnits(
-        const QVector<QByteArray>& scenes, const QHash<quint16, int>& setOf) const
+        const QVector<QByteArray>& scenes, const QHash<quint16, int>& setOf,
+        const QSet<int>& skipScenes) const
 {
     QVector<Unit> units;
     for (int i = 0; i < scenes.size(); ++i) {
         if (scenes[i].size() != SCENE_SIZE) continue;
+        if (skipScenes.contains(i)) continue;   // its enemies are not on offer
 
         QHash<int, QVector<QPair<int, Donor>>> bySet;   // set id -> (slot, donor)
         QVector<QPair<int, Donor>> singles;
@@ -455,6 +528,7 @@ QStringList SceneComposer::validateScene(const QByteArray& scene,
 bool SceneComposer::compose(QVector<QByteArray>& scenes,
                             const QVector<int>& blockOf,
                             const QSet<int>& held,
+                            bool includeBosses,
                             QTextStream& log,
                             Result* result)
 {
@@ -464,9 +538,21 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
         return false;
     }
 
+    // Every scene's difficulty, captured BEFORE anything is replaced - it is
+    // both the boss test and the target the new cast is scaled toward.
+    QVector<double> origAvg(scenes.size(), 0.0);
+    QSet<int> bossScenes;
+    for (int i = 0; i < scenes.size(); ++i) {
+        origAvg[i] = sceneAvgHp(scenes[i]);
+        if (origAvg[i] >= BOSS_HP_THRESHOLD) bossScenes.insert(i);
+    }
+    // With bosses excluded the tier is held BOTH ways: these scenes keep their
+    // vanilla cast, and their enemies are not offered to anyone else's.
+    const QSet<int> donorSkip = includeBosses ? QSet<int>() : bossScenes;
+
     QVector<QSet<quint16>> sets;
     const QHash<quint16, int> setOf = derivePartSets(scenes, sets);
-    const QVector<Unit> units = buildUnits(scenes, setOf);
+    const QVector<Unit> units = buildUnits(scenes, setOf, donorSkip);
     r.coupledSets = sets.size();
     r.units = units.size();
 
@@ -474,6 +560,12 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
     for (const QSet<quint16>& s : sets) biggest = qMax(biggest, s.size());
     log << "Composer: " << sets.size() << " multi-part sets (largest " << biggest
         << "), " << units.size() << " indivisible draws\n";
+    log << "Include bosses: " << (includeBosses ? "YES" : "no");
+    if (!includeBosses)
+        log << " - " << bossScenes.size() << " boss-tier scene(s) keep their cast "
+            << "and their enemies are out of the pool";
+    log << "\n";
+    r.bossDonors = includeBosses ? 0 : bossScenes.size();
     if (biggest > ENEMIES_PER_SCENE) {
         // Nothing in the shipped file trips this. If a mod does, those sets can
         // never be placed, so say so rather than silently splitting them.
@@ -498,6 +590,7 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
         for (int e = 0; e < ENEMIES_PER_SCENE; ++e)
             if (enemyPresent(scenes[i], e)) { any = true; break; }
         if (!any) continue;          // an unused slot: filling it is pure growth
+        if (!includeBosses && bossScenes.contains(i)) { ++r.bossHeld; continue; }
         candidates.append(i);
     }
     r.eligible = candidates.size();
@@ -520,6 +613,15 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
             QString why;
             if (!composeScene(scenes[idx], cast, coupled, built, &why)) continue;
             if (!validateScene(built, cast).isEmpty()) continue;
+            // Match the arrivals to the neighbourhood BEFORE measuring: scaling
+            // rewrites stat bytes, so a size taken first is a size for a scene
+            // that will not be written.
+            const double came = sceneAvgHp(built);
+            if (origAvg[idx] > 0.0 && came > 0.0) {
+                const double ratio = origAvg[idx] / came;
+                scaleSceneStats(built, ratio);
+                r.worstScale = qMax(r.worstScale, qMax(ratio, 1.0 / ratio));
+            }
             const int csz = m_sizeOf(built);
             if (csz > slack) continue;      // would not fit the block: draw again
             used[block] += csz - size[idx];
@@ -541,6 +643,9 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
         worst = qMax(worst, it.value());
     log << "Composer: fullest block now " << (worst + BLOCK_HEADER) << " of "
         << BLOCK_SIZE << " bytes\n";
+    log << "Composer: scaled every rebuilt cast to the difficulty of where it "
+        << "sits (largest correction " << QString::number(r.worstScale, 'f', 2)
+        << "x)\n";
 
     if (result) *result = r;
     return true;

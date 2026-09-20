@@ -680,34 +680,6 @@ QWidget* SimpleMainWindow::buildStepOptions()
     shl->addWidget(shc, 1);
     cards->addWidget(shopCard);
 
-    // Also the player's, for the same reason the shop box is: composition never
-    // moves a formation id, so every check and the goal land exactly where they
-    // would have. No .apff7 field sets this one at all.
-    QWidget* compCard = new QWidget(page);
-    compCard->setObjectName("cardGold");
-    QHBoxLayout* cml = new QHBoxLayout(compCard);
-    cml->setContentsMargins(16, 14, 16, 14);
-    cml->setSpacing(12);
-    m_compositionCheckBox = new QCheckBox(compCard);
-    cml->addWidget(m_compositionCheckBox, 0, Qt::AlignTop);
-    QWidget* cmc = new QWidget(compCard);
-    QVBoxLayout* cmcl = new QVBoxLayout(cmc);
-    cmcl->setContentsMargins(0, 0, 0, 0);
-    cmcl->setSpacing(3);
-    QLabel* compTitle = mkLabel("Mixed enemy casts", nullptr, cmc);
-    compTitle->setStyleSheet("font-size: 14px; font-weight: 600;");
-    cmcl->addWidget(compTitle);
-    cmcl->addWidget(mkLabel("Rebuild who is in each fight from monsters drawn across the "
-                            "whole game, so a battle can hold three that never met — a "
-                            "Tonberry, a Materia Keeper and a wolf. Where each fight "
-                            "happens never changes, only who is in it.", "muted", cmc));
-    cmcl->addWidget(mkLabel("Replaces the encounter shuffle below — the two rearrange the "
-                            "same data and cannot both run. Multi-part bosses keep their "
-                            "own limbs.", "faint", cmc));
-    cmcl->addWidget(mkLabel("Experimental — this has never been played through.",
-                            "faint", cmc));
-    cml->addWidget(cmc, 1);
-    cards->addWidget(compCard);
 
     // --- everything the seed dictates ----------------------------------------
     m_lockedSectionHeader = new QWidget(page);
@@ -771,11 +743,12 @@ QWidget* SimpleMainWindow::buildStepOptions()
     cards->addWidget(eqCard);
 
     // ── Enemy encounters ──────────────────────────────────────────────────
-    // Deliberately NOT in lockedWidgets(): shuffling which monsters appear
-    // moves no Archipelago check. Boss kills are identified by FORMATION ID and
-    // every formation a script or the client names is held out of the shuffle,
-    // so this is the same class of setting as the shop-stock box - the seed
-    // SETS it from features[7] on import, and the player may still change it.
+    // Deliberately NOT in lockedWidgets(): changing which monsters appear moves
+    // no Archipelago check. The pass rebuilds each fight CAST and leaves every
+    // scene where it is, so FORMATION IDS NEVER MOVE and nothing a script starts
+    // or the client watches is disturbed. Same class of setting as the shop-stock
+    // box - the seed SETS it from features[7] on import, and the player may
+    // still change it.
     QWidget* enemyCard = new QWidget(page);
     enemyCard->setObjectName("card");
     QHBoxLayout* enl = new QHBoxLayout(enemyCard);
@@ -790,18 +763,21 @@ QWidget* SimpleMainWindow::buildStepOptions()
     QLabel* enTitle = mkLabel("Enemy encounters", nullptr, enc);
     enTitle->setStyleSheet("font-size: 14px; font-weight: 600;");
     encl->addWidget(enTitle);
-    encl->addWidget(mkLabel("Shuffle which monsters you run into, within tiers of "
-                            "similar difficulty. Scripted story fights, the Weapons, "
-                            "chocobo formations and the Battle Arena never move.",
+    encl->addWidget(mkLabel("Rebuild who you run into. Each fight's monsters are drawn "
+                            "from across the whole game, so a battle can hold three that "
+                            "never met — then scaled to the difficulty of where it "
+                            "happens. Scripted story fights, the Weapons, chocobo "
+                            "formations and the Battle Arena keep their own.",
                             "muted", enc));
     encl->addWidget(mkLabel("Experimental — this has not been proven in a full "
                             "playthrough yet.", "faint", enc));
 
-    // Sub-option, indented under its parent. Off by default and deliberately
-    // blunt about why: the shuffle stays within a tier, so this does not put a
-    // boss in a random encounter, but the boss tier is an average-HP guess and
-    // the later phases of a multi-phase fight are not covered by the protected
-    // list. See the comment on includeBosses in EnemyRandomizer::randomizeEncounters.
+    // Sub-option, indented under its parent. Off by default, and it matters more
+    // here than it did under the old shuffle: that moved whole scenes within a
+    // tier, so a boss could only ever land in another boss slot. This pass draws
+    // INDIVIDUALS, so with the tier open a boss can appear in any fight at all -
+    // 77 of 542 donor units come from boss-tier scenes. Off holds the tier out
+    // BOTH ways: those scenes keep their cast, and their enemies leave the pool.
     QWidget* bossRow = new QWidget(enc);
     QHBoxLayout* brl = new QHBoxLayout(bossRow);
     brl->setContentsMargins(0, 4, 0, 0);
@@ -815,9 +791,10 @@ QWidget* SimpleMainWindow::buildStepOptions()
     QLabel* bossTitle = mkLabel("Include bosses", nullptr, bossText);
     bossTitle->setStyleSheet("font-size: 13px; font-weight: 600;");
     btl->addWidget(bossTitle);
-    btl->addWidget(mkLabel("Bosses shuffle too, only ever with other bosses. Riskier: the "
-                           "tier is an HP guess, and a multi-phase boss is only held back "
-                           "at its first phase.", "faint", bossText));
+    btl->addWidget(mkLabel("Let boss fights be rebuilt too, and let bosses turn up in "
+                           "ordinary battles. Riskier: the boss tier is an HP guess, and "
+                           "a multi-phase boss is only held back at its first phase.",
+                           "faint", bossText));
     brl->addWidget(bossText, 1);
     encl->addWidget(bossRow);
 
@@ -1232,9 +1209,8 @@ void SimpleMainWindow::refreshRail()
     int on = (m_shopCheckBox && m_shopCheckBox->isChecked() ? 1 : 0)
            + (m_fieldCheckBox && m_fieldCheckBox->isChecked() ? 1 : 0)
            + (m_equipmentCheckBox && m_equipmentCheckBox->isChecked() ? 1 : 0)
-           + (m_enemyCheckBox && m_enemyCheckBox->isChecked() ? 1 : 0)
-           + (m_compositionCheckBox && m_compositionCheckBox->isChecked() ? 1 : 0);
-    setSub(m_railSub[StepOptions], QString("%1 of 5 on").arg(on));
+           + (m_enemyCheckBox && m_enemyCheckBox->isChecked() ? 1 : 0);
+    setSub(m_railSub[StepOptions], QString("%1 of 4 on").arg(on));
     setSub(m_railSub[StepOutput], m_outputFolderEdit && !m_outputFolderEdit->text().isEmpty()
                ? QFileInfo(m_outputFolderEdit->text()).fileName()
                : QString());
@@ -1844,37 +1820,22 @@ void SimpleMainWindow::startRandomization()
         // Off by default and unproven in play, so a failure here is reported
         // as a WARNING and the run continues: a bad scene.bin shuffle should
         // not cost the player the field and shop work already done.
-        // EITHER mode runs this stage. Composition is a separate mode that
-        // REPLACES the shuffle, so gating the stage on the shuffle's feature
-        // flag alone meant a player who did what the card says - shuffle off,
-        // Mixed casts on - got no pass, no log and no warning at all.
-        const bool composing = m_config.getEncounterComposition();
         if (!stopHere(StageEnemies)
-            && (composing
-                || m_config.isFeatureEnabled(Config::EnemyEncounterRandomization))) {
+            && m_config.isFeatureEnabled(Config::EnemyEncounterRandomization)) {
             setStage(StageEnemies, 1);
-            m_statusLabel->setText(composing ? "Rebuilding Enemy Casts..."
-                                             : "Shuffling Enemy Encounters...");
-            m_runDetail->setText(composing
-                ? QStringLiteral("Rebuilding each fight's cast from monsters game-wide…")
-                : QStringLiteral("Shuffling encounters within difficulty tiers…"));
-            appendConsoleMessage(composing ? "Rebuilding enemy casts..."
-                                           : "Shuffling enemy encounters...");
+            m_statusLabel->setText("Rebuilding Enemy Casts...");
+            m_runDetail->setText("Rebuilding each fight's cast from monsters game-wide…");
+            appendConsoleMessage("Rebuilding enemy casts...");
             QApplication::processEvents();
 
             if (!randomizer.randomizeEnemyEncounters()) {
-                appendConsoleMessage(composing
-                    ? QStringLiteral("WARNING: enemy cast rebuild failed — encounters "
-                                     "left vanilla. See encounter_composition_debug.txt.")
-                    : QStringLiteral("WARNING: enemy encounter shuffle failed — encounters "
-                                     "left vanilla. See encounter_randomization_debug.txt."));
+                appendConsoleMessage("WARNING: enemy cast rebuild failed — encounters "
+                                     "left vanilla. See encounter_composition_debug.txt.");
                 setStage(StageEnemies, 3);
             } else {
-                appendConsoleMessage(composing ? "Enemy cast rebuild completed"
-                                               : "Enemy encounter shuffle completed");
+                appendConsoleMessage("Enemy cast rebuild completed");
                 setStage(StageEnemies, 2);
-                ran << (composing ? "Rebuilt the enemy casts"
-                                  : "Shuffled the enemy encounters");
+                ran << "Rebuilt the enemy casts";
             }
         } else if (!cancelled) {
             setStage(StageEnemies, 3);
@@ -2070,8 +2031,6 @@ void SimpleMainWindow::updateConfig()
                                m_enemyCheckBox && m_enemyCheckBox->isChecked());
     m_config.setEncounterBossesIncluded(m_encounterBossCheckBox
                                         && m_encounterBossCheckBox->isChecked());
-    m_config.setEncounterComposition(m_compositionCheckBox
-                                     && m_compositionCheckBox->isChecked());
 
     m_config.setFeatureEnabled(Config::ArchipelagoIntegration, m_archipelagoCheckBox->isChecked());
     m_config.setFreeRoam(m_freeRoamCheckBox->isChecked());
@@ -2182,8 +2141,6 @@ void SimpleMainWindow::applyConfigToUI()
     m_equipmentCheckBox->setChecked(m_config.isFeatureEnabled(Config::StartingEquipmentRandomization));
     if (m_enemyCheckBox)
         m_enemyCheckBox->setChecked(m_config.isFeatureEnabled(Config::EnemyEncounterRandomization));
-    if (m_compositionCheckBox)
-        m_compositionCheckBox->setChecked(m_config.getEncounterComposition());
     if (m_encounterBossCheckBox) {
         m_encounterBossCheckBox->setChecked(m_config.getEncounterBossesIncluded());
         // toggled() only fires on a CHANGE, so the row's enabled state has to be

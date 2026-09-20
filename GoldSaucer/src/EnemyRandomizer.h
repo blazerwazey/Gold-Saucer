@@ -51,16 +51,11 @@ class EnemyRandomizer
 {
 public:
     explicit EnemyRandomizer(Randomizer* parent);
-    // Shuffle whole encounters between slots of similar difficulty, then scale
-    // the arrivals to the difficulty of where they landed. The only entry point:
-    // the stats-variance pass was removed 2026-09-18, having sat unreachable
-    // since the Initial Commit.
-    bool randomizeEncounters();
-
-    // The sibling pass: leave every scene where it is and rebuild the three
-    // enemies inside it from donors drawn game-wide. Formation ids never move,
-    // so this is the variant that can touch a scripted fight without moving the
-    // fight a check is watching. See SceneComposer.h.
+    // THE enemy randomizer. Leaves every scene where it is and rebuilds the
+    // three enemies inside it from donors drawn game-wide, so a fight can hold
+    // monsters that never met. Formation ids never move, so nothing a script
+    // starts or a check watches is disturbed — which is what let this replace
+    // the encounter shuffle outright on 2026-09-20. See SceneComposer.h.
     bool composeEncounters();
 
 private:
@@ -105,13 +100,6 @@ private:
     static const int ENM_EXP      = 0xA8;  // u32
     static const int ENM_GIL      = 0xAC;  // u32
 
-    // Boss detection by HP (no reliable global ID in scene.bin)
-    // The tier split for the encounter shuffle: tier 4 never moves, tier 3
-    // only among itself. These were duplicated as bare literals in the tier
-    // classification until the stats pass was removed.
-    static const quint32 BOSS_HP_THRESHOLD     = 10000;
-    static const quint32 MINIBOSS_HP_THRESHOLD = 4000;
-
     // ── internal types ───────────────────────────────────────────────────
     struct SceneEntry {
         int  blockIndex;      // which 0x2000 block this came from
@@ -126,11 +114,5 @@ private:
     QByteArray rebuildSceneBin(const QVector<SceneEntry>& scenes,
                                QTextStream& log);
 
-
-    // ── difficulty scaling ─────────────────────────────────────────────────────
-    // Rescale one scene's enemies toward the difficulty of the slot they now
-    // occupy. `ratio` is (average HP the slot originally had) / (average HP the
-    // incoming enemies natively have). See kStatScaling.
-    void       scaleSceneStats(QByteArray& scene, double ratio);
 
 };

@@ -74,14 +74,23 @@ public:
         int leftVanilla = 0;  // no cast fit the block's remaining slack
         int coupledSets = 0;  // multi-part sets found in this scene.bin
         int units      = 0;   // indivisible draws available
+        int bossHeld   = 0;   // boss-tier scenes left vanilla
+        int bossDonors = 0;   // boss-tier units kept out of the pool
+        double worstScale = 1.0;  // largest difficulty correction applied
     };
 
     // `scenes` holds DECOMPRESSED 7808-byte buffers indexed by scene id, and is
     // edited in place. `blockOf` says which 0x2000 block each scene lives in.
     // Scenes in `held` are never touched, nor are empty ones.
+    // includeBosses: when false the boss tier is held out BOTH ways - those
+    // scenes keep their vanilla cast and their enemies leave the donor pool.
+    // The second half matters here in a way it never did for the shuffle, which
+    // moves whole scenes within a tier: this mode draws individuals, so without
+    // it a grassland fight can hold Safer Sephiroth.
     bool compose(QVector<QByteArray>& scenes,
                  const QVector<int>& blockOf,
                  const QSet<int>& held,
+                 bool includeBosses,
                  QTextStream& log,
                  Result* result = nullptr);
 
@@ -116,6 +125,14 @@ private:
     static const int REC_NAME         = 0x00;
     static const int REC_ATTACK_IDS   = 0x48;     // 16 × u16, GLOBAL ids
     static const int REC_MANIP_IDS    = 0x94;     // 3 × u16, also global ids
+
+    // Offsets inside a 184-byte enemy record, for the difficulty scaling.
+    static const int ENM_LEVEL = 0x20, ENM_SPEED = 0x21, ENM_LUCK  = 0x22;
+    static const int ENM_EVADE = 0x23, ENM_STR   = 0x24, ENM_DEF   = 0x25;
+    static const int ENM_MAG   = 0x26, ENM_MDEF  = 0x27, ENM_MP    = 0x9C;
+    static const int ENM_HP    = 0xA4, ENM_EXP   = 0xA8, ENM_GIL   = 0xAC;
+    // The shuffle's tier-4 line. A scene at or above this average is a boss.
+    static const quint32 BOSS_HP_THRESHOLD = 10000;
 
     static const quint16 NULL16 = 0xFFFF;
     // Offsets in the enemy-AI table count from the table itself, so the first
@@ -160,7 +177,15 @@ private:
                                        QVector<QSet<quint16>>& setsOut) const;
 
     QVector<Unit> buildUnits(const QVector<QByteArray>& scenes,
-                             const QHash<quint16, int>& setOf) const;
+                             const QHash<quint16, int>& setOf,
+                             const QSet<int>& skipScenes) const;
+
+    // Mean HP of a scene's living enemies; 0 for an empty scene.
+    static double sceneAvgHp(const QByteArray& scene);
+
+    // Rescale one scene's enemies toward the difficulty of the slot they now
+    // occupy. Moved from the shuffle, exponents and all.
+    void scaleSceneStats(QByteArray& scene, double ratio) const;
 
     // Pick units that tile all three slots. Returns false if it could not.
     // coupledOut says whether a multi-part set was used, which decides whether

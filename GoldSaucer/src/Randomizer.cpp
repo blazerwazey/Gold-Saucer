@@ -149,11 +149,7 @@ bool Randomizer::randomizeEnemyEncounters()
         return false;
     }
     
-    if (m_config.getEncounterComposition()) {
-        qDebug() << "Enemy encounters: composing casts (replaces the shuffle)";
-        return m_enemyRandomizer->composeEncounters();
-    }
-    return m_enemyRandomizer->randomizeEncounters();
+    return m_enemyRandomizer->composeEncounters();
 }
 
 bool Randomizer::randomizeShops()

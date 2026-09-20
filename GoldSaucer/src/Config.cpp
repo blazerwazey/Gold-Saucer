@@ -22,8 +22,7 @@ void Config::setDefaults()
     m_seed = rd();
     
     // Enemy settings
-    m_encounterBossesIncluded = false; // Don't shuffle bosses by default
-    m_encounterComposition = false;    // Shuffle whole fights, don't recast them
+    m_encounterBossesIncluded = false; // Boss tier stays vanilla by default
     
     // Shop settings
     m_shopItemPoolSize = 50; // Use 50 random items for shops
@@ -85,9 +84,6 @@ bool Config::loadFromFile(const QString& filename)
     QJsonObject enemySettings = root["enemyRandomization"].toObject();
     if (enemySettings.contains("encounterBossesIncluded")) {
         m_encounterBossesIncluded = enemySettings["encounterBossesIncluded"].toBool(m_encounterBossesIncluded);
-    }
-    if (enemySettings.contains("encounterComposition")) {
-        m_encounterComposition = enemySettings["encounterComposition"].toBool(m_encounterComposition);
     }
     
     // Load shop settings
@@ -166,7 +162,6 @@ bool Config::saveToFile(const QString& filename, bool includeApJsonPath) const
     // Save enemy settings
     QJsonObject enemySettings;
     enemySettings["encounterBossesIncluded"] = m_encounterBossesIncluded;
-    enemySettings["encounterComposition"] = m_encounterComposition;
     root["enemyRandomization"] = enemySettings;
     
     // Save shop settings
@@ -255,15 +250,6 @@ bool Config::getEncounterBossesIncluded() const
     return m_encounterBossesIncluded;
 }
 
-void Config::setEncounterComposition(bool enabled)
-{
-    m_encounterComposition = enabled;
-}
-
-bool Config::getEncounterComposition() const
-{
-    return m_encounterComposition;
-}
 
 
 void Config::setShopItemPoolSize(int size)

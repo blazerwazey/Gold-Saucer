@@ -163,12 +163,15 @@ private:
                              const QHash<quint16, int>& setOf) const;
 
     // Pick units that tile all three slots. Returns false if it could not.
-    bool drawCast(const QVector<Unit>& units, QVector<Donor>& castOut);
+    // coupledOut says whether a multi-part set was used, which decides whether
+    // the formation's bodies may be redealt across the slots.
+    bool drawCast(const QVector<Unit>& units, QVector<Donor>& castOut,
+                  bool* coupledOut);
 
     // Build the new scene. Returns false (with a reason) when the cast does not
     // fit the 32-slot attack table or the 4090-byte AI block.
     bool composeScene(const QByteArray& dest, const QVector<Donor>& cast,
-                      QByteArray& out, QString* whyNot) const;
+                      bool castIsCoupled, QByteArray& out, QString* whyNot) const;
 
     // Every invariant the game relies on, checked on the emitted bytes.
     QStringList validateScene(const QByteArray& scene,

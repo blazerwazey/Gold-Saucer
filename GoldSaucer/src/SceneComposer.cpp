@@ -231,13 +231,16 @@ QVector<SceneComposer::Unit> SceneComposer::buildUnits(
     return units;
 }
 
-bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut)
+bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut,
+                             bool* coupledOut)
 {
+    if (coupledOut) *coupledOut = false;
     if (units.isEmpty()) return false;
     std::uniform_int_distribution<int> pick(0, units.size() - 1);
 
     for (int attempt = 0; attempt < 40; ++attempt) {
         QHash<int, Donor> filled;   // slot -> who is in it
+        bool usedCoupled = false;
         for (int guard = 0; guard < 64 && filled.size() < ENEMIES_PER_SCENE; ++guard) {
             const Unit& u = units[pick(m_rng)];
             if (filled.size() + u.members.size() > ENEMIES_PER_SCENE) continue;
@@ -249,6 +252,7 @@ bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut
                 if (clash) continue;
                 for (int k = 0; k < u.homeSlots.size(); ++k)
                     filled.insert(u.homeSlots[k], u.members[k]);
+                usedCoupled = true;
             } else {
                 QVector<int> free;
                 for (int s = 0; s < ENEMIES_PER_SCENE; ++s)
@@ -259,6 +263,7 @@ bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut
             }
         }
         if (filled.size() != ENEMIES_PER_SCENE) continue;
+        if (coupledOut) *coupledOut = usedCoupled;
         castOut.clear();
         for (int s = 0; s < ENEMIES_PER_SCENE; ++s) castOut.append(filled.value(s));
         return true;
@@ -269,7 +274,8 @@ bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut
 // ── the composition itself ─────────────────────────────────────────────────
 
 bool SceneComposer::composeScene(const QByteArray& dest, const QVector<Donor>& cast,
-                                 QByteArray& out, QString* whyNot) const
+                                 bool castIsCoupled, QByteArray& out,
+                                 QString* whyNot) const
 {
     if (dest.size() != SCENE_SIZE || cast.size() != ENEMIES_PER_SCENE) {
         if (whyNot) *whyNot = QStringLiteral("bad input");
@@ -338,11 +344,25 @@ bool SceneComposer::composeScene(const QByteArray& dest, const QVector<Donor>& c
 
     // Placements name an enemy by MODEL ID, so every reference to the enemy that
     // used to hold a slot has to become the id of the one that holds it now.
+    //
+    // Then SPREAD them. Vanilla formations are overwhelmingly single-species -
+    // 708 of the 996 that have a combatant reference exactly one model, while
+    // 690 field two or more bodies - so preserving the pattern means seven in
+    // ten composed fights are one monster three times, however varied the cast
+    // behind them. Redealing the bodies round-robin across the three slots is
+    // what turns a varied cast into a varied FIGHT. The number of combatants
+    // never changes; only which of the scene's three enemies each body draws.
+    //
+    // Never for a cast holding a multi-part set: those members' AI addresses
+    // enemy SLOTS and expects its partners on the field, so redealing could
+    // leave a body without its arms, or arms with no body.
     for (int f = 0; f < FORMATION_COUNT; ++f) {
+        QVector<int> live;
         for (int p = 0; p < PLACEMENTS; ++p) {
             const int at = FORMATIONS + f * FORMATION_STRIDE + p * PLACEMENT_SIZE;
             const quint16 eid = readU16(out, at);
             if (eid == NULL16) continue;
+            live.append(at);
             for (int i = 0; i < ENEMIES_PER_SCENE; ++i) {
                 if (oldIds[i] != NULL16 && eid == oldIds[i]) {
                     writeU16(out, at, newIds[i]);
@@ -350,6 +370,9 @@ bool SceneComposer::composeScene(const QByteArray& dest, const QVector<Donor>& c
                 }
             }
         }
+        if (castIsCoupled || live.size() < 2) continue;
+        for (int k = 0; k < live.size(); ++k)
+            writeU16(out, live[k], newIds[k % ENEMIES_PER_SCENE]);
     }
 
     if (out.size() != SCENE_SIZE) {
@@ -491,10 +514,11 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
         bool done = false;
         for (int t = 0; t < 60 && !done; ++t) {
             QVector<Donor> cast;
-            if (!drawCast(units, cast)) continue;
+            bool coupled = false;
+            if (!drawCast(units, cast, &coupled)) continue;
             QByteArray built;
             QString why;
-            if (!composeScene(scenes[idx], cast, built, &why)) continue;
+            if (!composeScene(scenes[idx], cast, coupled, built, &why)) continue;
             if (!validateScene(built, cast).isEmpty()) continue;
             const int csz = m_sizeOf(built);
             if (csz > slack) continue;      // would not fit the block: draw again

@@ -307,8 +307,11 @@ private:
                                    QVector<OpcodeModification>* mods = nullptr);
 
     // --- Text section update ---
+    // fieldName: the trade-reward injection below is per-field, and the
+    // function had no other reason to know where it was.
     bool updateFieldTexts(QByteArray& decompressed,
                           const QVector<OpcodeModification>& modifications,
+                          const QString& fieldName,
                           QTextStream& debugStream);
     static const int MESSAGE_OPCODE = 0x40;
 

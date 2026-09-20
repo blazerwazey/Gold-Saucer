@@ -1795,6 +1795,58 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         }
     }
 
+    // --- Mideel's materia NPC opens MIDGAR'S shop record ---------------------
+    // itown1b is Mideel's town map. Its 'mateli' entity opens shop 5, which is
+    // the same exe record Midgar's mds5_m ('oyaji') opens - a shop id is a
+    // RECORD, not a place, and FF7 happily reuses one in two towns.
+    //
+    // Archipelago cannot: it reserves AP slots per shop id and gates the
+    // resulting location on a single logic region. So a player buying from
+    // Mideel fired "Sector 5 Materia - AP Slot", a check the logic had put
+    // behind the Key to Sector 5 (reported against v0.0.6). Nothing downstream
+    // was wrong - shops.json, the client's (shop_id, section, token) key and
+    // shophook.dll's live-shop-id key are all correctly scoped. The premise that
+    // shop 5 is Midgar's alone was wrong.
+    //
+    // Repointed to shop 56: the only materia record in the exe that NO field
+    // opens (checked by walking the MENU opcodes of all 753 fields). It carries
+    // six real materia, and it is not one of the ids mirrorFreeRoamStoryShops
+    // overwrites (51, 52, 54, 55, 57-64), so nothing else can reach or clobber
+    // it. Mideel's counter becomes private and shop 5 goes back to Midgar.
+    //
+    // Gated on Archipelago mode: without AP slots the shared record is merely odd
+    // vanilla data, and there is no reason to alter a plain randomization.
+    //
+    // MENU is 49 <bank> <type> <param>; type 0x08 opens a shop, param is the id.
+    // One byte, length-preserving, so no offsets move. The pattern occurs exactly
+    // once in the whole 662KB field, so the anchor cannot drift.
+    if (m_parent && m_parent->m_config.isFeatureEnabled(Config::ArchipelagoIntegration)
+        && fieldName.toLower() == "itown1b") {
+        static const unsigned char kMateliOpensShop5[] = {0x49, 0x00, 0x08, 0x05};
+        const int n = static_cast<int>(sizeof(kMateliOpensShop5));
+        int at = -1;
+        for (int i = 0; i + n <= decompressed.size(); ++i) {
+            bool m = true;
+            for (int k = 0; k < n; ++k)
+                if (static_cast<quint8>(decompressed[i + k]) != kMateliOpensShop5[k]) {
+                    m = false; break;
+                }
+            if (m) {
+                if (at >= 0) { at = -2; break; }     // not unique: refuse to guess
+                at = i;
+            }
+        }
+        if (at < 0) {
+            debugStream << "  MIDEEL_SHOP: MENU(shop 5) anchor not found or not unique"
+                        << " (at=" << at << ") - skipping\n";
+        } else {
+            decompressed[at + 3] = static_cast<char>(56);
+            debugStream << "  MIDEEL_SHOP: itown1b 'mateli' repointed from shop 5"
+                        << " (Midgar Sector 5 Materia) to shop 56 @" << at << "\n";
+            totalMods++;
+        }
+    }
+
     // --- Free Roam: suppress the Kalm Traveler gold-chocobo grant ------------
     // In elmin4_2 the 'choko' entity (script 1) awards a Gold Chocobo into the
     // stable when the Desert Rose trade sets its trigger bit (savemap addr 0x57

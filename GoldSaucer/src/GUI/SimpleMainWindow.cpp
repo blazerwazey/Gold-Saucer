@@ -1844,23 +1844,37 @@ void SimpleMainWindow::startRandomization()
         // Off by default and unproven in play, so a failure here is reported
         // as a WARNING and the run continues: a bad scene.bin shuffle should
         // not cost the player the field and shop work already done.
+        // EITHER mode runs this stage. Composition is a separate mode that
+        // REPLACES the shuffle, so gating the stage on the shuffle's feature
+        // flag alone meant a player who did what the card says - shuffle off,
+        // Mixed casts on - got no pass, no log and no warning at all.
+        const bool composing = m_config.getEncounterComposition();
         if (!stopHere(StageEnemies)
-            && m_config.isFeatureEnabled(Config::EnemyEncounterRandomization)) {
+            && (composing
+                || m_config.isFeatureEnabled(Config::EnemyEncounterRandomization))) {
             setStage(StageEnemies, 1);
-            m_statusLabel->setText("Shuffling Enemy Encounters...");
-            m_runDetail->setText("Shuffling encounters within difficulty tiers…");
-            appendConsoleMessage("Shuffling enemy encounters...");
+            m_statusLabel->setText(composing ? "Rebuilding Enemy Casts..."
+                                             : "Shuffling Enemy Encounters...");
+            m_runDetail->setText(composing
+                ? QStringLiteral("Rebuilding each fight's cast from monsters game-wide…")
+                : QStringLiteral("Shuffling encounters within difficulty tiers…"));
+            appendConsoleMessage(composing ? "Rebuilding enemy casts..."
+                                           : "Shuffling enemy encounters...");
             QApplication::processEvents();
 
             if (!randomizer.randomizeEnemyEncounters()) {
-                appendConsoleMessage("WARNING: enemy encounter shuffle failed — "
-                                     "encounters left vanilla. See "
-                                     "encounter_randomization_debug.txt.");
+                appendConsoleMessage(composing
+                    ? QStringLiteral("WARNING: enemy cast rebuild failed — encounters "
+                                     "left vanilla. See encounter_composition_debug.txt.")
+                    : QStringLiteral("WARNING: enemy encounter shuffle failed — encounters "
+                                     "left vanilla. See encounter_randomization_debug.txt."));
                 setStage(StageEnemies, 3);
             } else {
-                appendConsoleMessage("Enemy encounter shuffle completed");
+                appendConsoleMessage(composing ? "Enemy cast rebuild completed"
+                                               : "Enemy encounter shuffle completed");
                 setStage(StageEnemies, 2);
-                ran << "Shuffled the enemy encounters";
+                ran << (composing ? "Rebuilt the enemy casts"
+                                  : "Shuffled the enemy encounters");
             }
         } else if (!cancelled) {
             setStage(StageEnemies, 3);

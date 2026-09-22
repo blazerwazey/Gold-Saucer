@@ -254,25 +254,54 @@ bool EnemyRandomizer::composeEncounters()
 
     }
 
-    // Held out for exactly the reason the shuffle holds them: the client
-
-    // identifies boss kills by formation id. Composition does not move formation
-
-    // ids, so this is belt and braces rather than strictly required - but a
-
-    // scripted fight whose cast is replaced is still a scripted fight the script
-
-    // did not plan for, so they stay vanilla until that has been played.
+    // Held back only where there is a reason to. The list was built for the
+    // shuffle, which MOVED scenes and so broke the formation id a script names;
+    // this pass never moves an id, which changes what each source buys.
+    //
+    // Chocobo is the one correctness hold-out left: catching needs a chocobo in
+    // the formation, and catching is how racing works. Weapon, Arena and
+    // BossChest are content - you should still fight the actual Weapon, the
+    // Battle Square draws from its own table, and a Boss in a Box chest should
+    // open onto its boss.
+    //
+    // Plain Field is NOT held. A scripted fight's id does not move, so its check
+    // fires whatever the cast is, and protection is per-SCENE - four formations
+    // share three enemy records - so one scripted ambush was freezing up to
+    // three ordinary encounters beside it. 61 scenes were held for that reason
+    // alone, 44 of them not boss-tier; the Midgar reactor Grunts sit at 28
+    // average HP. The fights worth keeping are already held by the BOSS TIER
+    // that "Include bosses" governs, so the endgame chain - Safer and Bizarro
+    // Sephiroth, Jenova Synthesis, Carry Armor, Schizo, Hojo - stays vanilla
+    // through a rule that already existed, with no second threshold to tune.
 
     QSet<int> held;
 
-    for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i)
+    int fieldReleased = 0;
 
-        held.insert(EnemyProtectedFormations::kProtected[i] / 4);
+    for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i) {
 
-    dbg << "Protected: " << EnemyProtectedFormations::kProtectedCount
+        const int scene = EnemyProtectedFormations::kProtected[i] / 4;
 
-        << " formations -> " << held.size() << " scenes held back\n\n";
+        if (EnemyProtectedFormations::kProtectedKind[i]
+            == EnemyProtectedFormations::Kind::Field) {
+
+            ++fieldReleased;
+
+            continue;
+
+        }
+
+        held.insert(scene);
+
+    }
+
+    dbg << "Protected: " << held.size() << " scenes held (chocobo, Weapons, "
+
+        << "Battle Square, boss chests); " << fieldReleased
+
+        << " scripted-fight formations released - their ids never move, and the "
+
+        << "boss tier still holds the fights worth keeping\n\n";
 
     QVector<QByteArray> buf;
 

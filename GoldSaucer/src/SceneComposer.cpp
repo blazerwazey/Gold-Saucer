@@ -259,9 +259,10 @@ QHash<quint16, int> SceneComposer::derivePartSets(const QVector<QByteArray>& sce
 
 QVector<SceneComposer::Unit> SceneComposer::buildUnits(
         const QVector<QByteArray>& scenes, const QHash<quint16, int>& setOf,
-        const QSet<int>& skipScenes) const
+        const QSet<int>& skipScenes, int* multiPartDropped) const
 {
     QVector<Unit> units;
+    if (multiPartDropped) *multiPartDropped = 0;
     for (int i = 0; i < scenes.size(); ++i) {
         if (scenes[i].size() != SCENE_SIZE) continue;
         if (skipScenes.contains(i)) continue;   // its enemies are not on offer
@@ -285,13 +286,27 @@ QVector<SceneComposer::Unit> SceneComposer::buildUnits(
                 singles.append(it.value().first());
                 continue;
             }
-            Unit u;
-            u.coupled = true;
-            for (const auto& pr : it.value()) {
-                u.homeSlots.append(pr.first);
-                u.members.append(pr.second);
+            // A "set" whose members all share ONE model id is not a multi-part
+            // enemy — it is the same monster standing in two slots, which the
+            // co-occurrence detector cannot tell from a real pair. Ordinary
+            // singles, and safe to draw.
+            QSet<quint16> models;
+            for (const auto& pr : it.value()) models.insert(pr.second.modelId);
+            if (models.size() == 1) {
+                for (const auto& pr : it.value()) singles.append(pr);
+                continue;
             }
-            units.append(u);
+            // A genuine multi-part enemy is NOT offered to other scenes.
+            // Keeping the set together is necessary but not sufficient: a
+            // member only reaches the field if a PLACEMENT references its slot,
+            // and 721 of the 996 formations that field a combatant field
+            // exactly ONE. So wherever it landed, its first member would
+            // usually fight alone while its AI waited for partners that never
+            // arrive — reported from play as Grosspanzer with a frozen ATB.
+            //
+            // Its own scene is untouched by this: the boss tier keeps Carry
+            // Armor, Emerald and Ruby fighting as themselves.
+            if (multiPartDropped) ++(*multiPartDropped);
         }
         for (const auto& pr : singles) {
             Unit u;
@@ -580,7 +595,10 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
 
     QVector<QSet<quint16>> sets;
     const QHash<quint16, int> setOf = derivePartSets(scenes, sets);
-    const QVector<Unit> units = buildUnits(scenes, setOf, donorSkip);
+    int multiPartDropped = 0;
+    const QVector<Unit> units = buildUnits(scenes, setOf, donorSkip,
+                                           &multiPartDropped);
+    r.multiPartDropped = multiPartDropped;
     r.coupledSets = sets.size();
     r.units = units.size();
 
@@ -588,6 +606,9 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
     for (const QSet<quint16>& s : sets) biggest = qMax(biggest, s.size());
     log << "Composer: " << sets.size() << " multi-part sets (largest " << biggest
         << "), " << units.size() << " indivisible draws\n";
+    log << "Composer: " << multiPartDropped << " multi-part enem(ies) kept out of "
+        << "the donor pool - a member only reaches the field if a placement "
+        << "references its slot, and most formations field only one" << Qt::endl;
     log << "Include bosses: " << (includeBosses ? "YES" : "no");
     if (!includeBosses)
         log << " - " << bossScenes.size() << " boss-tier scene(s) keep their cast "

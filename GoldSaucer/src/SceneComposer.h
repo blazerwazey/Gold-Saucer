@@ -76,6 +76,7 @@ public:
         int units      = 0;   // indivisible draws available
         int bossHeld   = 0;   // boss-tier scenes left vanilla
         int bossDonors = 0;   // boss-tier units kept out of the pool
+        int multiPartDropped = 0; // real multi-part enemies kept out of the pool
         double worstScale = 1.0;  // largest difficulty correction applied
     };
 
@@ -178,7 +179,8 @@ private:
 
     QVector<Unit> buildUnits(const QVector<QByteArray>& scenes,
                              const QHash<quint16, int>& setOf,
-                             const QSet<int>& skipScenes) const;
+                             const QSet<int>& skipScenes,
+                             int* multiPartDropped) const;
 
     // Mean HP of a scene's living enemies; 0 for an empty scene.
     static double sceneAvgHp(const QByteArray& scene);

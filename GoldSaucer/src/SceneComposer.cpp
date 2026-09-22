@@ -444,8 +444,36 @@ bool SceneComposer::composeScene(const QByteArray& dest, const QVector<Donor>& c
             }
         }
         if (castIsCoupled || live.size() < 2) continue;
-        for (int k = 0; k < live.size(); ++k)
-            writeU16(out, live[k], newIds[k % ENEMIES_PER_SCENE]);
+
+        // Only deal between bodies that are genuinely interchangeable. A
+        // placement carries a ROW (+8), COVER flags (+10) and 32 bits of
+        // INITIAL CONDITIONS (+12) as well as its coordinates, and handing a
+        // monster the conditions written for the one that used to stand there
+        // is how a Gargoyle ends up hatching on someone else's schedule.
+        QVector<bool> taken(live.size(), false);
+        for (int a = 0; a < live.size(); ++a) {
+            if (taken[a]) continue;
+            QVector<int> group;
+            group.append(live[a]);
+            taken[a] = true;
+            for (int b = a + 1; b < live.size(); ++b) {
+                if (taken[b]) continue;
+                bool same = true;
+                for (int w = 8; w < PLACEMENT_SIZE; w += 2)
+                    if (readU16(out, live[a] + w) != readU16(out, live[b] + w)) {
+                        same = false;
+                        break;
+                    }
+                if (!same) continue;
+                group.append(live[b]);
+                taken[b] = true;
+            }
+            // A lone body has nothing to swap with; it keeps what the remap gave
+            // it, which is the enemy now holding its old slot.
+            if (group.size() < 2) continue;
+            for (int k = 0; k < group.size(); ++k)
+                writeU16(out, group[k], newIds[k % ENEMIES_PER_SCENE]);
+        }
     }
 
     if (out.size() != SCENE_SIZE) {

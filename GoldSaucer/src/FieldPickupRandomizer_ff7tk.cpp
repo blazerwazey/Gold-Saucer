@@ -2203,6 +2203,76 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         }
     }
 
+    // --- Free Roam: gate the Sleeping Forest exit on the LUNAR HARP ---------
+    // slfrst_2's line entity is the whole maze:
+    //     IFSW Var16[bank1+0x0000] >= 652 -> +0x0d if false   [16 20 00 00 8c 02 04 0d]
+    //     MAPJUMP 625 (sango1)      ; progressed, out of the forest
+    //     JMPF +0x0b
+    //     MAPJUMP 619 (slfrst_2)    ; bounced back to the start
+    // Var16[bank1+0] is savemap 0x0BA4 `mprogress` — the game moment, which Free
+    // Roam pins at 1997, so the test is always true and the forest always lets
+    // the player through. That is the front door to the Forgotten Capital, and
+    // it is why the Lunar Harp gated nothing in game while the apworld required
+    // it (reported from play 2026-09-22: Forgotten Capital without the Harp).
+    //
+    // Re-point the test at the Harp's own possession bit, Var[1][0x43].3 — set by
+    // KEY_ITEM_FLAGS on AP delivery, and the same bit the three Corel Valley world
+    // entries use (CraterBarrierPatcher::patchTownGates). Holding it walks out;
+    // not holding it wanders back, exactly the vanilla behaviour this test used
+    // to produce before the moment was pinned.
+    //
+    // IFUB is two bytes shorter than IFSW, so the replacement carries two NOPs
+    // (0x5F): length-preserving, so no jump anywhere in the field moves. The new
+    // jump byte is DERIVED from the old one rather than hardcoded — IFSW counts
+    // its offset from +7 and IFUB from +5, so the same target is oldJump + 2.
+    // Idempotent: after the patch the needle no longer matches.
+    if (freeRoam && fieldName.toLower() == "slfrst_2"
+        && decompressed.size() >= 6 + 9 * 4) {
+        quint32 sec0b = 0;
+        memcpy(&sec0b, decompressed.constData() + 6, 4);
+        int sd = static_cast<int>(sec0b) + 4;
+        if (sd + 6 <= decompressed.size()) {
+            quint16 posTexts = 0;
+            memcpy(&posTexts, decompressed.constData() + sd + 4, 2);
+            int hi = sd + static_cast<int>(posTexts);
+            if (hi > decompressed.size() || hi <= sd) hi = decompressed.size();
+            // IFSW Var16[bank1+0x0000] >= 652  (the jump byte is NOT in the needle)
+            static const QByteArray kGate = QByteArray::fromHex("162000008c0204");
+            int patched = 0;
+            int at = sd;
+            while ((at = decompressed.indexOf(kGate, at)) >= 0 && at + 9 <= hi) {
+                // Alignment check: the byte after the 8-byte IFSW is the true
+                // path, MAPJUMP (0x60). A seven-byte needle can in principle
+                // land inside some other opcode's operands, and a misaligned
+                // rewrite would corrupt the script rather than gate it.
+                if (static_cast<quint8>(static_cast<unsigned char>(decompressed[at + 8])) != 0x60) {
+                    at += kGate.size();
+                    continue;
+                }
+                const quint8 oldJump =
+                    static_cast<quint8>(static_cast<unsigned char>(decompressed[at + 7]));
+                decompressed[at + 0] = static_cast<char>(0x14);        // IFSW -> IFUB
+                decompressed[at + 1] = static_cast<char>(0x10);        // bank1 (savemap+0xBA4, 8-bit)
+                decompressed[at + 2] = static_cast<char>(0x43);        // key-item byte
+                decompressed[at + 3] = static_cast<char>(0x03);        // bit 3 = Lunar Harp
+                decompressed[at + 4] = static_cast<char>(0x09);        // bitON
+                decompressed[at + 5] = static_cast<char>(oldJump + 2); // +7 shift -> +5 shift
+                decompressed[at + 6] = static_cast<char>(0x5F);        // NOP
+                decompressed[at + 7] = static_cast<char>(0x5F);        // NOP
+                at += kGate.size();
+                patched++;
+            }
+            if (patched) {
+                totalMods++;
+                debugStream << "  SLEEPING_FOREST_GATE: slfrst_2 exit re-gated on Lunar Harp "
+                            << "possession (" << patched << " moment test(s) repointed)\n";
+            } else {
+                debugStream << "  SLEEPING_FOREST_GATE: slfrst_2 moment test not found "
+                            << "— the forest is NOT gated on the Harp\n";
+            }
+        }
+    }
+
     // --- Free Roam diagnostics (disabled): the Rocket Town soft-lock was traced
     //     to the rckt/rckt2 'cloud' init gating UC(disable control)+MENU2 on
     //     Var[3][130] bit 3 (the first-visit intro flag), now pre-set in the

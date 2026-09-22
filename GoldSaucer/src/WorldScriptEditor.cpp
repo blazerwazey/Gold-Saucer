@@ -174,6 +174,12 @@ int WorldScriptEditor::entryHeader(int tableIndex) const
     quint16 h = m_entries[tableIndex].header;
     return h == 0xFFFF ? -1 : int(h);
 }
+int WorldScriptEditor::findEntryByHeader(quint16 header) const
+{
+    for (int i = 0; i < m_entries.size(); ++i)
+        if (m_entries[i].header == header) return i;
+    return -1;
+}
 
 // ----------------------------------------------------------------------------
 // editing
@@ -213,6 +219,30 @@ bool WorldScriptEditor::insertGoto(int idx, bool ifFalse, int targetIdx, QString
     for (Entry &e : m_entries) if (e.idx >= idx) e.idx += 1;
     if (in.target >= idx) in.target += 1;   // our own target shifts too
     m_instrs.insert(idx, in);
+    return true;
+}
+
+int WorldScriptEditor::insertEntry(quint16 header, int instrIdx, QString &err)
+{
+    if (!m_valid) { err = "not parsed"; return -1; }
+    if (instrIdx < 0 || instrIdx >= m_instrs.size()) { err = "instruction index out of range"; return -1; }
+    if (m_entries.last().header != 0xFFFF) { err = "call table full"; return -1; }
+    int pos = 1;
+    while (pos < m_entries.size() && m_entries[pos].header != 0xFFFF && m_entries[pos].header < header) ++pos;
+    if (pos < m_entries.size() && m_entries[pos].header == header) { err = "header already present"; return -1; }
+    for (int i = m_entries.size() - 1; i > pos; --i) m_entries[i] = m_entries[i - 1];
+    m_entries[pos].header = header;
+    m_entries[pos].rawOffset = 0;
+    m_entries[pos].idx = instrIdx;
+    return pos;
+}
+
+bool WorldScriptEditor::setEntryStart(int tableIndex, int instrIdx, QString &err)
+{
+    if (!m_valid) { err = "not parsed"; return false; }
+    if (tableIndex < 0 || tableIndex >= m_entries.size()) { err = "entry index out of range"; return false; }
+    if (instrIdx < 0 || instrIdx >= m_instrs.size()) { err = "entry start out of range"; return false; }
+    m_entries[tableIndex].idx = instrIdx;
     return true;
 }
 

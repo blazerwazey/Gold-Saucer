@@ -44,9 +44,10 @@ public:
     int sitesPatched() const { return m_sitesPatched; }
 
 private:
-    // Locate wm0.ev (overworld script) within an LGP buffer. Returns false if
-    // the archive or the entry cannot be found. On success, dataStart/dataSize
-    // describe the wm0.ev payload region within `lgp`.
+    // Locate a named .ev file (wm0.ev/wm2.ev/...) within an LGP buffer. Returns
+    // false if the archive or the entry cannot be found. On success,
+    // dataStart/dataSize describe the payload region within `lgp`.
+    bool findEvFile(const QByteArray& lgp, const char* name, int& dataStart, int& dataSize) const;
     bool findWm0(const QByteArray& lgp, int& dataStart, int& dataSize) const;
 
     // Patch the barrier conditions in `lgp` in place. Returns the number of
@@ -89,12 +90,39 @@ private:
     // other, field-51-gated model-10 caller.)
     int patchDiamondBoardingScene(QByteArray& lgp) const;
 
+    // Reproduce the Diamond Weapon "optional map boss" edits programmatically (via
+    // the re-offsetting WorldScriptEditor) so the mod no longer ships a hand-edited
+    // world_us.lgp asset. On the player's vanilla wm0.ev this:
+    //   * prepends a kill-gate to Diamond's Model functions 0x4a00/0x4a02/0x4a03
+    //     (RESET; PUSH_SAVEMAP_BIT 985 (0xC1F.1, weapons_killed.bit[1]);
+    //      GOTO_IF_FALSE body; RETURN) so once he is defeated his init/update/touch
+    //     do nothing and he stays gone;
+    //   * replaces the touch handler's rise-cinematic block (…PUSH 53; PUSH 0;
+    //     ENTER_FIELD) with (RESET; PUSH 980; TRIGGER_BATTLE), so touching him on the
+    //     overworld starts battle formation 980 instead of the vanilla map jump. The
+    //     preceding special[8]∈{0,1,2} collision guard is preserved.
+    // Header-anchored (survives recompilation); re-offsets wm0.ev, so it must run
+    // with the other WorldScriptEditor passes, before the content-anchored
+    // patchDiamondBoardingScene. Returns 1 if applied, 0 if not found / already done.
+    int patchDiamondMapBoss(QByteArray& lgp) const;
+
+    // Wrap every RESET;PUSH modelId;LOAD_MODEL site in evName with a
+    // PUSH_SAVEMAP_BIT keyBit gate so the entity only loads when the client
+    // has set the bit. Ultimate is wm0.ev model 11 bit 7210, Emerald is
+    // wm2.ev model 30 bit 7230. Idempotent and fail safe, returns site count.
+    int patchWeaponLoadGate(QByteArray& lgp, const char* evName, int modelId,
+                            int keyBit, const char* label) const;
+
     // Neutralize the Highwind-init Diamond Weapon scene in wm0.ev: the Highwind
     // model's init runs a "if last_field_id == 51" block that repositions the
     // Highwind, plays the rise cinematic, and calls diamond_weapon fn 28. We make
     // the comparison impossible (push 51 -> push 0xFFFF) so the block is always
     // skipped. Length-preserving (2 bytes), unique anchor, idempotent.
     int patchHighwindDiamondScene(QByteArray& lgp) const;
+    // Make the battle-return Ruby load check her spawn flag 0xF2B.4 instead of 0xF2A.4.
+    int patchRubyBattleReturnLoad(QByteArray& lgp) const;
+    // WEAPON Arrival roar sound and banner, triggered by client bits 0x405.0-3 (messages 35/36/49/50).
+    int patchWeaponArrivalScenes(QByteArray& lgp) const;
     // Make Ultimate Weapon's crater-crash cinematic reachable in Free Roam.
     // highwind_init runs it (call_function(ultima_weapon, 27)) but only inside
     // `if Special.unknown_5 == 1`, and the preceding `if unknown_5 == 0` block
@@ -155,6 +183,9 @@ private:
     int     m_diamondSitesPatched = 0;
     int     m_diamondAmbientPatched = 0;
     int     m_diamondBoardingPatched = 0;
+    int     m_diamondBossPatched = 0;
+    int     m_ultimateGatePatched = 0;
+    int     m_emeraldGatePatched = 0;
     int     m_highwindScenePatched = 0;
     int     m_craterLandingPatched = 0;
 };

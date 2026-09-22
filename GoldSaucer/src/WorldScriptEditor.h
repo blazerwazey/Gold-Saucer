@@ -56,6 +56,9 @@ public:
     // Convenience: instruction index where the call-table entry `tableIndex` begins.
     int entryStart(int tableIndex) const;
     int entryHeader(int tableIndex) const; // -1 if empty (0xFFFF)
+    // First call-table entry (0..255) whose header == `header`, or -1. World-map
+    // Model functions carry header (model<<8)|fn (e.g. 0x4a03 = model 0x4a, fn 3).
+    int findEntryByHeader(quint16 header) const;
 
     // --- editing (instruction granularity; indices shift on insert/remove) -----
     // Inserted opcodes must be complete world-script opcodes (LE u16 each). A GOTO
@@ -65,6 +68,13 @@ public:
     bool removeAt(int idx, QString &err);
     // Insert a GOTO/GOTO_IF_FALSE before idx, targeting instruction targetIdx.
     bool insertGoto(int idx, bool ifFalse, int targetIdx, QString &err);
+    // Repoint call-table entry `tableIndex` to begin at instruction `instrIdx`.
+    // Used after prepending a prologue (e.g. a kill-gate) so the engine enters at
+    // the newly-inserted head instead of the original body. `instrIdx` must be a
+    // current instruction index.
+    bool setEntryStart(int tableIndex, int instrIdx, QString &err);
+    // Add a function to the call table, keeping it sorted; returns its slot or -1.
+    int insertEntry(quint16 header, int instrIdx, QString &err);
 
     // Re-emit the whole 0x7000 EV with offsets/targets recomputed.
     QByteArray assemble(QString &err) const;

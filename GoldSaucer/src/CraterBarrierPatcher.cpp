@@ -807,9 +807,16 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
     if (logf.open(QIODevice::WriteOnly | QIODevice::Truncate)) log.setDevice(&logf);
     auto LOG = [&](const QString& s){ qDebug().noquote() << s; if (logf.isOpen()) log << s << "\n"; };
 
-    // Only gate towns when the seed asked for it: read free_roam + rules.town_gating
-    // straight from the .apff7 (GS's own free_roam flag is a GUI/config setting, not
-    // the seed's). Absent/false -> leave the world map untouched.
+    // Read free_roam + rules.town_gating straight from the .apff7 (GS's own
+    // free_roam flag is a GUI/config setting, not the seed's).
+    //
+    // TOWN gating is optional; the LUNAR HARP is not. It is a vanilla key item,
+    // the apworld requires it for the Forgotten Capital and Corel Valley in every
+    // Free Roam seed, and until 2026-09-22 this early return meant that with town
+    // gating off it gated nothing at all — reported from play as the Forgotten
+    // Capital reached without it. So the pass now runs for any Free Roam seed and
+    // picks its rows below.
+    bool townGating = false;
     {
         const QByteArray seedJson = ApSeedFile::readJson(m_apJsonPath);
         if (seedJson.isEmpty()) {
@@ -817,10 +824,9 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         }
         QJsonObject root = QJsonDocument::fromJson(seedJson).object();
         bool freeRoam = root.value("free_roam").toBool(false);
-        bool townGating = root.value("rules").toObject().value("town_gating").toBool(false);
-        if (!(freeRoam && townGating)) {
-            LOG(QStringLiteral("towngate: disabled (free_roam=%1 town_gating=%2) — skipping")
-                .arg(freeRoam).arg(townGating));
+        townGating = root.value("rules").toObject().value("town_gating").toBool(false);
+        if (!freeRoam) {
+            LOG("towngate: disabled (free_roam=false) — skipping");
             return 0;
         }
     }
@@ -878,13 +884,34 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
         // Harp at all (both gate on game_moment, which Free Roam pins at 1997), so
         // the whole chain was walkable without it. Added 2026-09-05.
         //
-        // The Sleeping Forest itself is deliberately NOT gated on the Harp — its
-        // logic rule was dropped the same day for exactly the reason above.
+        // The Sleeping Forest's own world entry stays open — there isn't one; the
+        // forest is reached through Bone Village, where the Harp is dug up. Its
+        // EXIT is gated instead, in the field script: see SLEEPING_FOREST_GATE in
+        // FieldPickupRandomizer_ff7tk.cpp (added 2026-09-22).
         { 26, 0x404, 2, "Corel Valley Cave", 0x43, 3 },  // sandun_2 (+ Lunar Harp)
         { 57, 0x404, 2, "Corel Valley"     , 0x43, 3 },  // sango2   (+ Lunar Harp)
         { 58, 0x404, 2, "Corel Valley"     , 0x43, 3 },  // lost1    (+ Lunar Harp)
     };
-    const int nTowns = int(sizeof(towns) / sizeof(towns[0]));
+    // Town gating OFF: the same three entries, on the Lunar Harp alone. Nothing
+    // else in the table applies — every other row is an AP town key, and those
+    // keys are not in the item pool unless town gating asked for them.
+    //
+    // The front door (Bone Village -> Sleeping Forest) is NOT here and cannot be:
+    // the Harp is dug up IN Bone Village, so sealing bonevil would lock the player
+    // out of the item that opens it. That route is gated in the field script
+    // instead — see SLEEPING_FOREST_GATE in FieldPickupRandomizer_ff7tk.cpp,
+    // which re-points slfrst_2's exit from game_moment (pinned at 1997 in Free
+    // Roam, so always true) onto the Harp's own possession bit.
+    static const Town harpOnly[] = {
+        { 26, 0x43, 3, "Corel Valley Cave (Lunar Harp)" },  // sandun_2
+        { 57, 0x43, 3, "Corel Valley (Lunar Harp)"      },  // sango2
+        { 58, 0x43, 3, "Corel Valley (Lunar Harp)"      },  // lost1
+    };
+    const Town* rows = townGating ? towns : harpOnly;
+    const int nTowns = townGating ? int(sizeof(towns) / sizeof(towns[0]))
+                                  : int(sizeof(harpOnly) / sizeof(harpOnly[0]));
+    LOG(QStringLiteral("towngate: town_gating=%1 — applying %2 row(s)")
+        .arg(townGating).arg(nTowns));
 
     // One shared "sealed" notice, shown inline from each town's Mesh entry (the
     // overworld renders messages from mesh context — e.g. the Diamond Weapon
@@ -947,7 +974,7 @@ int CraterBarrierPatcher::patchTownGates(QByteArray& lgp) const
     // point. Sites are gated high-index-first so the lower sites' indices stay valid.
     int gated = 0;
     for (int ti = 0; ti < nTowns; ++ti) {
-        const Town& t = towns[ti];
+        const Town& t = rows[ti];
         QVector<int> sites;
         for (int i = w.findOpcode(0x318); i >= 0; i = w.findOpcode(0x318, i + 1))
             if (i >= 2 && w.opAt(i - 2) == 0x110 && int(w.paramAt(i - 2, 0)) == t.tblIdx)

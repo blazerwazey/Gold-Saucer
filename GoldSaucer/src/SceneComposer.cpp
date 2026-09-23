@@ -319,15 +319,72 @@ QVector<SceneComposer::Unit> SceneComposer::buildUnits(
     return units;
 }
 
+QHash<int, quint16> SceneComposer::derivePinnedModels(
+        const QVector<QByteArray>& scenes, const QSet<int>& pinFormations) const
+{
+    // Derived from the player's own scene.bin, never from a NAME: enemy names
+    // are localised and this has to hold in every language.
+    //
+    // Not from the models the protected scenes have in common either - they have
+    // none. Checked against the shipped file: the fourteen chocobo scenes field
+    // NINE different chocobos, one per area (a Mideel chocobo is not a Grasslands
+    // chocobo), so an intersection comes back empty and pins nothing.
+    //
+    // What does resolve, 14 of 14: protection is per FORMATION. Take the bodies
+    // the protected formations field, then remove every body that any
+    // UNPROTECTED formation anywhere in the file fields. An ordinary monster
+    // always turns up in some unprotected fight; the protected species never
+    // does, which is why it needed protecting.
+    auto formationModels = [&](const QByteArray& sc, int f) {
+        QSet<quint16> out;
+        for (int p = 0; p < PLACEMENTS; ++p) {
+            const quint16 v = readU16(sc, FORMATIONS + f * FORMATION_STRIDE
+                                          + p * PLACEMENT_SIZE);
+            if (v != NULL16) out.insert(v);
+        }
+        return out;
+    };
+
+    QSet<quint16> fieldedElsewhere;
+    for (int i = 0; i < scenes.size(); ++i) {
+        if (scenes[i].size() != SCENE_SIZE) continue;
+        for (int f = 0; f < FORMATION_COUNT; ++f) {
+            if (pinFormations.contains(i * FORMATION_COUNT + f)) continue;
+            fieldedElsewhere.unite(formationModels(scenes[i], f));
+        }
+    }
+
+    QHash<int, quint16> out;
+    QSet<int> pinScenes;
+    for (int f : pinFormations) pinScenes.insert(f / FORMATION_COUNT);
+    for (int s : pinScenes) {
+        if (s < 0 || s >= scenes.size() || scenes[s].size() != SCENE_SIZE) continue;
+        QSet<quint16> candidates;
+        for (int f = 0; f < FORMATION_COUNT; ++f) {
+            if (!pinFormations.contains(s * FORMATION_COUNT + f)) continue;
+            candidates.unite(formationModels(scenes[s], f));
+        }
+        candidates.subtract(fieldedElsewhere);
+        if (candidates.size() == 1) out.insert(s, *candidates.constBegin());
+    }
+    return out;
+}
+
 bool SceneComposer::drawCast(const QVector<Unit>& units, QVector<Donor>& castOut,
-                             bool* coupledOut)
+                             bool* coupledOut, const QHash<int, Donor>& prefill)
 {
     if (coupledOut) *coupledOut = false;
     if (units.isEmpty()) return false;
+    if (prefill.size() >= ENEMIES_PER_SCENE) {
+        // nothing left to draw: the scene is entirely pinned
+        castOut.clear();
+        for (int s = 0; s < ENEMIES_PER_SCENE; ++s) castOut.append(prefill.value(s));
+        return true;
+    }
     std::uniform_int_distribution<int> pick(0, units.size() - 1);
 
     for (int attempt = 0; attempt < 40; ++attempt) {
-        QHash<int, Donor> filled;   // slot -> who is in it
+        QHash<int, Donor> filled = prefill;   // slot -> who is in it
         bool usedCoupled = false;
         for (int guard = 0; guard < 64 && filled.size() < ENEMIES_PER_SCENE; ++guard) {
             const Unit& u = units[pick(m_rng)];
@@ -571,6 +628,7 @@ QStringList SceneComposer::validateScene(const QByteArray& scene,
 bool SceneComposer::compose(QVector<QByteArray>& scenes,
                             const QVector<int>& blockOf,
                             const QSet<int>& held,
+                            const QSet<int>& pinFormations,
                             bool includeBosses,
                             QTextStream& log,
                             Result* result)
@@ -622,6 +680,48 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
             << " enemies cannot be placed and will be skipped\n";
     }
 
+    // ── the pinned scenes ────────────────────────────────────────────────
+    // Protection is per-SCENE and a scene is FOUR formations, so holding a scene
+    // because one of its formations can spawn a chocobo also froze the three
+    // ordinary encounters that share its enemy records. That is 14 scenes and 56
+    // formations of open world-map grass - reported from play as the Wutai and
+    // Mideel grass still being vanilla.
+    //
+    // Catching needs the chocobo in the formation; it does not need the monsters
+    // standing next to it to be the vanilla ones. So the chocobo keeps its slot
+    // and everything in it, and the rest of the cast is composed normally.
+    QHash<int, QHash<int, Donor>> pinned;    // scene -> slot -> the enemy that stays
+    QSet<int> heldPlusFailedPins = held;
+    QSet<int> pinScenes;
+    for (int f : pinFormations) pinScenes.insert(f / FORMATION_COUNT);
+    const QHash<int, quint16> pinnedModelOf = derivePinnedModels(scenes, pinFormations);
+    for (int s : pinScenes) {
+        if (s < 0 || s >= scenes.size() || scenes[s].size() != SCENE_SIZE) continue;
+        // NOT named `slots`: Qt defines that as a keyword macro expanding to
+        // nothing, so the declaration would vanish and every use of it becomes a
+        // syntax error at the dot.
+        QHash<int, Donor> pinSlots;
+        bool ok = pinnedModelOf.contains(s);
+        if (ok) {
+            const quint16 model = pinnedModelOf.value(s);
+            for (int e = 0; e < ENEMIES_PER_SCENE; ++e) {
+                if (!enemyPresent(scenes[s], e)) continue;
+                if (readU16(scenes[s], MODEL_IDS + e * 2) != model) continue;
+                const Donor d = makeDonor(scenes, s, e);
+                if (!d.valid) { ok = false; break; }
+                pinSlots.insert(e, d);
+            }
+        }
+        // Could not name the body, or could not lift it intact: hold the scene
+        // whole, which is the behaviour this replaces and never worse than it.
+        if (!ok || pinSlots.isEmpty()) {
+            heldPlusFailedPins.insert(s);
+            ++r.pinnedHeld;
+            continue;
+        }
+        pinned.insert(s, pinSlots);
+    }
+
     // what each scene costs today, and what each block is carrying
     QVector<int> size(scenes.size(), 0);
     QHash<int, int> used;
@@ -634,7 +734,7 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
 
     QVector<int> candidates;
     for (int i = 0; i < scenes.size(); ++i) {
-        if (scenes[i].size() != SCENE_SIZE || held.contains(i)) continue;
+        if (scenes[i].size() != SCENE_SIZE || heldPlusFailedPins.contains(i)) continue;
         bool any = false;
         for (int e = 0; e < ENEMIES_PER_SCENE; ++e)
             if (enemyPresent(scenes[i], e)) { any = true; break; }
@@ -650,17 +750,25 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
     });
 
     int firstDraw = 0;
+    QVector<int> noRoom;
     for (int idx : candidates) {
         const int block = blockOf[idx];
         const int slack = budget - used[block] + size[idx];
+        const QHash<int, Donor> prefill = pinned.value(idx);
         bool done = false;
         for (int t = 0; t < 60 && !done; ++t) {
             QVector<Donor> cast;
             bool coupled = false;
-            if (!drawCast(units, cast, &coupled)) continue;
+            if (!drawCast(units, cast, &coupled, prefill)) continue;
             QByteArray built;
             QString why;
-            if (!composeScene(scenes[idx], cast, coupled, built, &why)) continue;
+            // A pinned scene keeps its BODY LAYOUT for the same reason a
+            // multi-part cast does. Re-dealing the bodies could point the
+            // chocobo's placement at another monster, or hand a second body the
+            // chocobo's model - either changes how many chocobos are on the
+            // field, which is the one thing catching depends on.
+            const bool keepLayout = coupled || !prefill.isEmpty();
+            if (!composeScene(scenes[idx], cast, keepLayout, built, &why)) continue;
             if (!validateScene(built, cast).isEmpty()) continue;
             // Match the arrivals to the neighbourhood BEFORE measuring: scaling
             // rewrites stat bytes, so a size taken first is a size for a scene
@@ -671,21 +779,49 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
                 scaleSceneStats(built, ratio);
                 r.worstScale = qMax(r.worstScale, qMax(ratio, 1.0 / ratio));
             }
+            // The pinned enemy is restored verbatim afterwards: its stats are the
+            // ones the catching code was written against, and it is only in the
+            // scene's average at all because it shares the fight.
+            for (auto it = prefill.constBegin(); it != prefill.constEnd(); ++it)
+                built.replace(ENEMY_BASE + it.key() * ENEMY_RECORD, ENEMY_RECORD,
+                              it.value().record);
             const int csz = m_sizeOf(built);
             if (csz > slack) continue;      // would not fit the block: draw again
             used[block] += csz - size[idx];
             size[idx] = csz;
             scenes[idx] = built;
             ++r.composed;
+            if (!prefill.isEmpty()) ++r.pinnedComposed;
             if (t == 0) ++firstDraw;
             done = true;
         }
-        if (!done) ++r.leftVanilla;
+        if (!done) { ++r.leftVanilla; noRoom.append(idx); }
     }
 
     log << "Composer: rebuilt the cast of " << r.composed << " of " << r.eligible
         << " eligible scenes (" << firstDraw << " on the first draw); "
         << r.leftVanilla << " left vanilla for want of room\n";
+    if (r.pinnedComposed || r.pinnedHeld)
+        log << "Composer: " << r.pinnedComposed << " protected-species scene(s) "
+            << "recast around the enemy they were protected for, "
+            << r.pinnedHeld << " held whole because that enemy could not be "
+            << "named from the data\n";
+    // Name them. A player reporting "area X is still vanilla" should be
+    // answerable from this file instead of a byte-diff of scene.bin.
+    if (!noRoom.isEmpty()) {
+        log << "Composer: no cast fit the block for scene(s):";
+        for (int i : noRoom)
+            log << " " << i << " (" << enemyName(scenes[i], 0) << ")";
+        log << "\n";
+    }
+    if (!heldPlusFailedPins.isEmpty()) {
+        log << "Composer: held whole:";
+        for (int i : heldPlusFailedPins) {
+            if (i < 0 || i >= scenes.size() || scenes[i].size() != SCENE_SIZE) continue;
+            log << " " << i << " (" << enemyName(scenes[i], 0) << ")";
+        }
+        log << "\n";
+    }
 
     int worst = 0;
     for (auto it = used.constBegin(); it != used.constEnd(); ++it)

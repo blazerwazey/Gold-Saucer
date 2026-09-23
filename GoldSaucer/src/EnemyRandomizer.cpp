@@ -258,11 +258,18 @@ bool EnemyRandomizer::composeEncounters()
     // shuffle, which MOVED scenes and so broke the formation id a script names;
     // this pass never moves an id, which changes what each source buys.
     //
-    // Chocobo is the one correctness hold-out left: catching needs a chocobo in
-    // the formation, and catching is how racing works. Weapon, Arena and
-    // BossChest are content - you should still fight the actual Weapon, the
-    // Battle Square draws from its own table, and a Boss in a Box chest should
-    // open onto its boss.
+    // Chocobo is not a hold at all any more, it is a PIN. Catching needs a
+    // chocobo in the formation, and catching is how racing works - but it does
+    // not need the monsters standing beside it to be the vanilla ones, and
+    // protection is per-SCENE where a scene is FOUR formations. Holding the
+    // scene froze the three ordinary encounters sharing its enemy records: 14
+    // scenes, 56 formations, all of it open world-map grass. Reported from play
+    // as the Wutai and Mideel grass still being vanilla. The composer now keeps
+    // the chocobo in its slot and recasts the rest.
+    //
+    // Weapon, Arena and BossChest stay held: they are content - you should still
+    // fight the actual Weapon, the Battle Square draws from its own table, and a
+    // Boss in a Box chest should open onto its boss.
     //
     // Plain Field is NOT held. A scripted fight's id does not move, so its check
     // fires whatever the cast is, and protection is per-SCENE - four formations
@@ -276,16 +283,28 @@ bool EnemyRandomizer::composeEncounters()
 
     QSet<int> held;
 
+    QSet<int> pinned;
+
     int fieldReleased = 0;
 
     for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i) {
 
         const int scene = EnemyProtectedFormations::kProtected[i] / 4;
 
-        if (EnemyProtectedFormations::kProtectedKind[i]
-            == EnemyProtectedFormations::Kind::Field) {
+        const EnemyProtectedFormations::Kind kind =
+            EnemyProtectedFormations::kProtectedKind[i];
+
+        if (kind == EnemyProtectedFormations::Kind::Field) {
 
             ++fieldReleased;
+
+            continue;
+
+        }
+
+        if (kind == EnemyProtectedFormations::Kind::Chocobo) {
+
+            pinned.insert(EnemyProtectedFormations::kProtected[i]);
 
             continue;
 
@@ -295,9 +314,25 @@ bool EnemyRandomizer::composeEncounters()
 
     }
 
-    dbg << "Protected: " << held.size() << " scenes held (chocobo, Weapons, "
+    // A scene protected for BOTH reasons is held: the stronger claim wins, and
+    // pinning one body inside a Weapon or Battle Square scene would not make it
+    // safe to recast the rest.
 
-        << "Battle Square, boss chests); " << fieldReleased
+    QSet<int> pinnedFormations;
+
+    for (int f : pinned) if (!held.contains(f / 4)) pinnedFormations.insert(f);
+
+    pinned = pinnedFormations;
+
+    QSet<int> pinnedSceneCount;
+
+    for (int f : pinned) pinnedSceneCount.insert(f / 4);
+
+    dbg << "Protected: " << held.size() << " scenes held (Weapons, Battle Square, "
+
+        << "boss chests); " << pinnedSceneCount.size() << " chocobo scenes recast "
+
+        << "AROUND their chocobo; " << fieldReleased
 
         << " scripted-fight formations released - their ids never move, and the "
 
@@ -336,7 +371,7 @@ bool EnemyRandomizer::composeEncounters()
 
     SceneComposer::Result res;
 
-    if (!composer.compose(buf, blockOf, held, includeBosses, dbg, &res)) {
+    if (!composer.compose(buf, blockOf, held, pinned, includeBosses, dbg, &res)) {
 
         dbg << "ERROR: composition failed\n";
 

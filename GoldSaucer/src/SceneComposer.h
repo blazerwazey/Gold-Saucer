@@ -77,6 +77,8 @@ public:
         int bossHeld   = 0;   // boss-tier scenes left vanilla
         int bossDonors = 0;   // boss-tier units kept out of the pool
         int multiPartDropped = 0; // real multi-part enemies kept out of the pool
+        int pinnedComposed = 0;   // chocobo scenes recast around their chocobo
+        int pinnedHeld = 0;       // chocobo scenes held whole after all
         double worstScale = 1.0;  // largest difficulty correction applied
     };
 
@@ -88,9 +90,21 @@ public:
     // The second half matters here in a way it never did for the shuffle, which
     // moves whole scenes within a tier: this mode draws individuals, so without
     // it a grassland fight can hold Safer Sephiroth.
+    // `pinFormations` are FORMATION ids (scene x 4 + slot) whose scene should be
+    // composed like any other EXCEPT that the enemy it was protected for keeps
+    // its slot, its record and its placements.
+    //
+    // The chocobo case: catching needs a chocobo in the formation, but not the
+    // vanilla monsters beside it, and holding the whole scene froze the three
+    // ordinary encounters that share its enemy records - 56 formations of open
+    // grass, reported from play as Wutai and Mideel still being vanilla.
+    //
+    // Formation ids rather than scene ids because that is what identifies the
+    // enemy to pin: see derivePinnedModels.
     bool compose(QVector<QByteArray>& scenes,
                  const QVector<int>& blockOf,
                  const QSet<int>& held,
+                 const QSet<int>& pinFormations,
                  bool includeBosses,
                  QTextStream& log,
                  Result* result = nullptr);
@@ -192,8 +206,16 @@ private:
     // Pick units that tile all three slots. Returns false if it could not.
     // coupledOut says whether a multi-part set was used, which decides whether
     // the formation's bodies may be redealt across the slots.
+    // `prefill` holds slots that are already spoken for (a pinned chocobo); the
+    // draw fills only what is left and never displaces one.
     bool drawCast(const QVector<Unit>& units, QVector<Donor>& castOut,
-                  bool* coupledOut);
+                  bool* coupledOut,
+                  const QHash<int, Donor>& prefill = QHash<int, Donor>());
+
+    // scene -> the model id to pin in it. A scene is absent when its protected
+    // formations do not resolve to exactly one body, and is then held whole.
+    QHash<int, quint16> derivePinnedModels(const QVector<QByteArray>& scenes,
+                                           const QSet<int>& pinFormations) const;
 
     // Build the new scene. Returns false (with a reason) when the cast does not
     // fit the 32-slot attack table or the 4090-byte AI block.

@@ -3,6 +3,7 @@
 #include "Randomizer.h"
 #include "Config.h"
 #include "FieldScriptEditor.h"
+#include "PhsGate.h"
 #include <QFile>
 #include <QDir>
 #include <QDebug>
@@ -1213,6 +1214,17 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
             if (nopFieldScriptMovies(decompressed, fieldName, debugStream) > 0)
                 totalMods++;
         }
+    }
+
+    // Field-script PHS offers (the Highwind Operation Room crew) open the PHS with
+    // MENU 07 directly, straight past the client's main-menu gate, and the PHS
+    // softlocks with a party of fewer than three. PhsGate ties each one to the
+    // same menu_visible bit the client maintains. See PhsGate.h.
+    if (freeRoam) {
+        QString phsLog;
+        const int phs = PhsGate::apply(fieldName, decompressed, phsLog);
+        if (!phsLog.isEmpty()) debugStream << phsLog;
+        totalMods += phs;
     }
 
     // spipe_2 (Underwater Reactor pipe): a "lock" Line entity freezes the player and

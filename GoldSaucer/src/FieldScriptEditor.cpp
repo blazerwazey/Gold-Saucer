@@ -322,6 +322,40 @@ bool FieldScriptEditor::insertBefore(int idx, const QByteArray &opcodeBytes, QSt
     return true;
 }
 
+bool FieldScriptEditor::insertJumpBefore(int idx, const QByteArray &opcodeBytes, int target,
+                                         bool claimIncoming, QString &err)
+{
+    if (!m_valid) { err = "not parsed"; return false; }
+    if (idx < 0 || idx > m_instrs.size()) { err = "insert index out of range"; return false; }
+    if (target < 0 || target > m_instrs.size()) { err = "jump target out of range"; return false; }
+    const int len = opcodeLength(opcodeBytes, 0);
+    if (len <= 0 || len != opcodeBytes.size()) { err = "must be exactly one opcode"; return false; }
+    const quint8 id = quint8(opcodeBytes.at(0));
+    if (!opIsJump(id)) { err = "not a jump opcode (use insertBefore)"; return false; }
+    // Only forward jumps: a back jump's target sits before it, and the only
+    // caller so far builds guards that skip ahead.
+    if (opIsBackJump(id)) { err = "back jumps are not supported"; return false; }
+    if (target < idx) { err = "a forward jump cannot target an earlier instruction"; return false; }
+
+    Instr in;
+    in.bytes    = opcodeBytes;
+    in.isJump   = true;
+    in.backJump = false;
+    in.longJump = opIsLongJump(id);
+    in.shift    = opJumpShift(id);
+
+    // shift symbolic references at/after the insertion point - except, with
+    // claimIncoming, the jumps aimed exactly at idx, which now land on `in`
+    for (Instr &o : m_instrs) {
+        if (!o.isJump) continue;
+        if (o.target > idx || (o.target == idx && !claimIncoming)) o.target += 1;
+    }
+    for (int &si : m_scriptStartIdx) if (si >= idx) si += 1;
+    in.target = target + 1;   // target >= idx, so it moved with everything else
+    m_instrs.insert(idx, in);
+    return true;
+}
+
 bool FieldScriptEditor::replaceAt(int idx, const QByteArray &opcodeBytes, QString &err)
 {
     if (!m_valid) { err = "not parsed"; return false; }

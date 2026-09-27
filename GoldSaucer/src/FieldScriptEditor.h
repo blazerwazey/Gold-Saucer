@@ -73,6 +73,19 @@ public:
     // Insert before instruction `idx` (idx == instrCount() appends at end).
     bool insertBefore(int idx, const QByteArray &opcodeBytes, QString &err);
 
+    // Insert ONE forward jump opcode (JMPF/JMPFL/IFUB/IFSW/…) before `idx`,
+    // jumping to instruction `target`, given as an index in the list as it
+    // stands BEFORE this insert. The jump operand in `opcodeBytes` is ignored:
+    // assemble() computes it from the target, promoting short->long if needed.
+    //
+    // claimIncoming: insertBefore() moves every existing jump aimed at `idx`
+    // onto the instruction that WAS at idx, so they skip the inserted code. That
+    // is wrong for a GUARD - a jump into the guarded instruction would bypass
+    // the guard. With claimIncoming those jumps land on the new instruction
+    // instead, so every path that reached `idx` now passes through it.
+    bool insertJumpBefore(int idx, const QByteArray &opcodeBytes, int target,
+                          bool claimIncoming, QString &err);
+
     // Replace instruction `idx` with `opcodeBytes` (may differ in length).
     bool replaceAt(int idx, const QByteArray &opcodeBytes, QString &err);
 

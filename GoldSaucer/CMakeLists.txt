@@ -64,6 +64,7 @@ add_executable(GoldSaucer_GUI WIN32
     src/KernelBinParser.cpp
     src/FieldPickupRandomizer_ff7tk.cpp
     src/FieldScriptEditor.cpp
+    src/PhsGate.cpp
     src/WorldScriptEditor.cpp
     src/ulgp_lgp_writer.cpp
     src/MakouLgpManager.cpp

@@ -24,6 +24,18 @@
 // REAL characters. Hiding them from the screen instead would have left it open
 // with too few to fill, which is the PHS softlock.
 //
+// Two more crater fields, both party-size hazards (CraterRoster.cpp has the
+// disassembly):
+//   las0_1  the entrance crew empties the party (PRTYE Cloud alone) and opens the
+//           PHS, which cannot be left with fewer than three. Both now run only
+//           while the client's main-menu PHS bit is set; otherwise the party the
+//           player arrived with is kept.
+//   las4_0  the reform before the final descent waits (PRQEW) on party members
+//           #1/#2 - a hang once the split has left the party short - and opens the
+//           PHS. The waits become PREQ; the PHS runs only while unlocked, and
+//           otherwise every available character not already in the party is
+//           added (never more than two companions, so it cannot overflow).
+//
 // Its own file so a standalone harness can run exactly this code against the
 // player's real field before a build ships.
 // ============================================================================

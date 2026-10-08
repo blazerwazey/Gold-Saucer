@@ -629,6 +629,7 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
                             const QVector<int>& blockOf,
                             const QSet<int>& held,
                             const QSet<int>& pinFormations,
+                            const QSet<int>& neverDonateFormations,
                             bool includeBosses,
                             QTextStream& log,
                             Result* result)
@@ -651,11 +652,31 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
     // vanilla cast, and their enemies are not offered to anyone else's.
     const QSet<int> donorSkip = includeBosses ? QSet<int>() : bossScenes;
 
+    // Held scenes keep their own cast, but holding a scene says nothing about
+    // whether its enemies may visit other fights. For the Weapons the answer is
+    // no, regardless of Include bosses - see neverDonateFormations in the header.
+    QSet<quint16> neverDonateModels;
+    for (int f : neverDonateFormations) {
+        const int s = f / FORMATION_COUNT, slot = f % FORMATION_COUNT;
+        if (s < 0 || s >= scenes.size() || scenes[s].size() != SCENE_SIZE) continue;
+        for (int p = 0; p < PLACEMENTS; ++p) {
+            const quint16 m = readU16(scenes[s], FORMATIONS + slot * FORMATION_STRIDE
+                                                 + p * PLACEMENT_SIZE);
+            if (m != NULL16) neverDonateModels.insert(m);
+        }
+    }
+
     QVector<QSet<quint16>> sets;
     const QHash<quint16, int> setOf = derivePartSets(scenes, sets);
     int multiPartDropped = 0;
-    const QVector<Unit> units = buildUnits(scenes, setOf, donorSkip,
-                                           &multiPartDropped);
+    QVector<Unit> units = buildUnits(scenes, setOf, donorSkip, &multiPartDropped);
+    int weaponDropped = 0;
+    for (int u = units.size() - 1; u >= 0; --u) {
+        bool weapon = false;
+        for (const Donor& d : units[u].members)
+            if (neverDonateModels.contains(d.modelId)) { weapon = true; break; }
+        if (weapon) { units.remove(u); ++weaponDropped; }
+    }
     r.multiPartDropped = multiPartDropped;
     r.coupledSets = sets.size();
     r.units = units.size();
@@ -667,6 +688,11 @@ bool SceneComposer::compose(QVector<QByteArray>& scenes,
     log << "Composer: " << multiPartDropped << " multi-part enem(ies) kept out of "
         << "the donor pool - a member only reaches the field if a placement "
         << "references its slot, and most formations field only one" << Qt::endl;
+    if (!neverDonateModels.isEmpty())
+        log << "Composer: " << neverDonateModels.size() << " Weapon bod(ies) kept "
+            << "out of other fights (" << weaponDropped << " donor instance(s)) - "
+            << "their AI is written for their own fight, and Ultimate's flee "
+            << "ends the battle\n";
     log << "Include bosses: " << (includeBosses ? "YES" : "no");
     if (!includeBosses)
         log << " - " << bossScenes.size() << " boss-tier scene(s) keep their cast "

@@ -101,10 +101,17 @@ public:
     //
     // Formation ids rather than scene ids because that is what identifies the
     // enemy to pin: see derivePinnedModels.
+    // Every BODY that a `neverDonateFormations` formation fields is kept out of
+    // the donor pool wherever it appears, whatever includeBosses says. The
+    // Weapons: their AI is written for their own fight - Ultimate's flee ENDS it
+    // - so two Ultimates dealt into one formation softlocked the moment one fled,
+    // and a pincer layout holding one crashed. By MODEL, not by scene, because
+    // the same Ultimate also sits in scene 247 (formation 988), off the list.
     bool compose(QVector<QByteArray>& scenes,
                  const QVector<int>& blockOf,
                  const QSet<int>& held,
                  const QSet<int>& pinFormations,
+                 const QSet<int>& neverDonateFormations,
                  bool includeBosses,
                  QTextStream& log,
                  Result* result = nullptr);

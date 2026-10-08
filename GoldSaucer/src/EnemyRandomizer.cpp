@@ -285,6 +285,8 @@ bool EnemyRandomizer::composeEncounters()
 
     QSet<int> pinned;
 
+    QSet<int> weaponFormations;   // their bodies never donate (see SceneComposer.h)
+
     int fieldReleased = 0;
 
     for (int i = 0; i < EnemyProtectedFormations::kProtectedCount; ++i) {
@@ -311,6 +313,10 @@ bool EnemyRandomizer::composeEncounters()
         }
 
         held.insert(scene);
+
+        if (kind == EnemyProtectedFormations::Kind::Weapon)
+
+            weaponFormations.insert(EnemyProtectedFormations::kProtected[i]);
 
     }
 
@@ -371,7 +377,7 @@ bool EnemyRandomizer::composeEncounters()
 
     SceneComposer::Result res;
 
-    if (!composer.compose(buf, blockOf, held, pinned, includeBosses, dbg, &res)) {
+    if (!composer.compose(buf, blockOf, held, pinned, weaponFormations, includeBosses, dbg, &res)) {
 
         dbg << "ERROR: composition failed\n";
 

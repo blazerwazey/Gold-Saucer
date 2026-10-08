@@ -62,6 +62,10 @@ public:
     // The raw bytes of instruction `idx` (id + operands).
     QByteArray instrBytes(int idx) const;
 
+    // Index of the instruction that jump `idx` lands on, or -1 if `idx` is not
+    // a jump. Symbolic, so it stays right across inserts.
+    int jumpTarget(int idx) const;
+
     // --- editing ------------------------------------------------------------
     // Each takes/returns instruction indices in the CURRENT list; indices of
     // instructions after an insert/remove shift accordingly. Jump targets and

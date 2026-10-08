@@ -268,6 +268,12 @@ QByteArray FieldScriptEditor::instrBytes(int idx) const
     return m_instrs[idx].bytes;
 }
 
+int FieldScriptEditor::jumpTarget(int idx) const
+{
+    if (idx < 0 || idx >= m_instrs.size() || !m_instrs[idx].isJump) return -1;
+    return m_instrs[idx].target;
+}
+
 int FieldScriptEditor::findOpcode(const QByteArray &prefix, int fromInstr) const
 {
     if (prefix.isEmpty()) return -1;

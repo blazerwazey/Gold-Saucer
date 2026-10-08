@@ -5,6 +5,7 @@
 #include "FieldScriptEditor.h"
 #include "PhsGate.h"
 #include "ReducedPartyFixes.h"
+#include "CraterRoster.h"
 #include <QFile>
 #include <QDir>
 #include <QDebug>
@@ -1233,6 +1234,13 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         const int party = ReducedPartyFixes::apply(fieldName, decompressed, partyLog);
         if (!partyLog.isEmpty()) debugStream << partyLog;
         totalMods += party;
+
+        // The Northern Crater regroup counts only characters the player HAS, so
+        // its Reform PHS never offers an undelivered one. See CraterRoster.h.
+        QString craterLog;
+        const int crater = CraterRoster::apply(fieldName, decompressed, craterLog);
+        if (!craterLog.isEmpty()) debugStream << craterLog;
+        totalMods += crater;
     }
 
     // spipe_2 (Underwater Reactor pipe): a "lock" Line entity freezes the player and

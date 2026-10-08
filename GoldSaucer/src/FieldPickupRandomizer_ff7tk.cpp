@@ -4,6 +4,7 @@
 #include "Config.h"
 #include "FieldScriptEditor.h"
 #include "PhsGate.h"
+#include "ReducedPartyFixes.h"
 #include <QFile>
 #include <QDir>
 #include <QDebug>
@@ -1225,6 +1226,13 @@ bool FieldPickupRandomizer_ff7tk::processFieldFile(
         const int phs = PhsGate::apply(fieldName, decompressed, phsLog);
         if (!phsLog.isEmpty()) debugStream << phsLog;
         totalMods += phs;
+
+        // Story scenes that hang with fewer than three in the party (PRQEW on
+        // party member #2). See ReducedPartyFixes.h.
+        QString partyLog;
+        const int party = ReducedPartyFixes::apply(fieldName, decompressed, partyLog);
+        if (!partyLog.isEmpty()) debugStream << partyLog;
+        totalMods += party;
     }
 
     // spipe_2 (Underwater Reactor pipe): a "lock" Line entity freezes the player and
